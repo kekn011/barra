@@ -39,6 +39,8 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
     <Style TargetType="ComboBox"><Setter Property="Background" Value="#0A0C10"/><Setter Property="Foreground" Value="#1B1F27"/><Setter Property="FontSize" Value="13"/></Style>
     <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#C9CFD8"/></Style>
     <Style x:Key="Lbl" TargetType="TextBlock"><Setter Property="Foreground" Value="#8B939F"/><Setter Property="FontSize" Value="12"/><Setter Property="Margin" Value="0,10,0,4"/></Style>
+    <Style x:Key="Grp" TargetType="TextBlock"><Setter Property="Foreground" Value="#5B8DEF"/><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Margin" Value="0,2,0,2"/></Style>
+    <Style x:Key="Hint" TargetType="TextBlock"><Setter Property="Foreground" Value="#606772"/><Setter Property="FontSize" Value="12"/><Setter Property="Margin" Value="0,4,0,0"/><Setter Property="TextWrapping" Value="Wrap"/></Style>
   </Window.Resources>
   <Grid Margin="20">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
@@ -58,25 +60,31 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
         <Grid Grid.Row="1" Margin="0,8,0,0">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="22"/><ColumnDefinition Width="*"/><ColumnDefinition Width="22"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
           <StackPanel Grid.Column="0">
+            <TextBlock x:Name="GrpAccess" Style="{StaticResource Grp}"/>
             <TextBlock x:Name="LUser" Style="{StaticResource Lbl}"/><TextBox x:Name="FUser"/>
             <TextBlock x:Name="LPass" Style="{StaticResource Lbl}"/><PasswordBox x:Name="FPass"/>
             <TextBlock x:Name="LPass2" Style="{StaticResource Lbl}"/><PasswordBox x:Name="FPass2"/>
-            <TextBlock x:Name="LHost" Style="{StaticResource Lbl}"/><TextBox x:Name="FHost"/>
-            <TextBlock x:Name="LTz" Style="{StaticResource Lbl}"/><TextBox x:Name="FTz"/>
+            <TextBlock x:Name="LKey" Style="{StaticResource Lbl}"/>
+            <TextBox x:Name="FKey" Height="96" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontSize="12"/>
+            <TextBlock x:Name="FKeyHint" Style="{StaticResource Hint}"/>
           </StackPanel>
           <StackPanel Grid.Column="2">
+            <TextBlock x:Name="GrpNet" Style="{StaticResource Grp}"/>
             <TextBlock x:Name="LSsid" Style="{StaticResource Lbl}"/>
             <DockPanel><Button x:Name="BtnWifi" Content="" DockPanel.Dock="Right" Padding="12,6" Margin="8,0,0,0" Background="#2A2F3A"/><TextBox x:Name="FSsid"/></DockPanel>
+            <TextBlock x:Name="SsidHint" Style="{StaticResource Hint}"/>
             <TextBlock x:Name="LPsk" Style="{StaticResource Lbl}"/><PasswordBox x:Name="FPsk"/>
-            <TextBlock x:Name="LChg" Style="{StaticResource Lbl}"/>
-            <DockPanel LastChildFill="False"><TextBox x:Name="FChgS" Width="70" Text="50"/><TextBlock x:Name="LTo" Text="" VerticalAlignment="Center"/><TextBox x:Name="FChgE" Width="70" Text="55"/></DockPanel>
-            <TextBlock x:Name="LChgHint" Text="" FontSize="12" Foreground="#606772" Margin="0,4,0,0" TextWrapping="Wrap"/>
-            <TextBlock x:Name="LDisp" Style="{StaticResource Lbl}"/><TextBox x:Name="FDisp" Width="90" HorizontalAlignment="Left" Text="20"/>
+            <TextBlock x:Name="LHost" Style="{StaticResource Lbl}"/><TextBox x:Name="FHost"/>
+            <TextBlock x:Name="HostHint" Style="{StaticResource Hint}"/>
           </StackPanel>
           <StackPanel Grid.Column="4">
-            <TextBlock x:Name="LKey" Style="{StaticResource Lbl}"/>
-            <TextBox x:Name="FKey" Height="150" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontSize="12"/>
-            <TextBlock x:Name="FKeyHint" Text="" FontSize="12" Foreground="#8B939F" Margin="0,4,0,0"/>
+            <TextBlock x:Name="GrpOp" Style="{StaticResource Grp}"/>
+            <TextBlock x:Name="LTz" Style="{StaticResource Lbl}"/><TextBox x:Name="FTz"/>
+            <TextBlock x:Name="LChg" Style="{StaticResource Lbl}"/>
+            <DockPanel LastChildFill="False"><TextBox x:Name="FChgS" Width="70" Text="50"/><TextBlock x:Name="LTo" Text="" VerticalAlignment="Center"/><TextBox x:Name="FChgE" Width="70" Text="55"/></DockPanel>
+            <TextBlock x:Name="LChgHint" Style="{StaticResource Hint}"/>
+            <TextBlock x:Name="LDisp" Style="{StaticResource Lbl}"/><TextBox x:Name="FDisp" Width="90" HorizontalAlignment="Left" Text="20"/>
+            <TextBlock x:Name="DispHint" Style="{StaticResource Hint}"/>
           </StackPanel>
         </Grid>
         <DockPanel Grid.Row="2" Margin="0,16,0,0"><Button x:Name="BtnUnflash" Content="" DockPanel.Dock="Left" Background="#2A2F3A" Foreground="#C9CFD8" Padding="12,6"/><Button x:Name="BtnNext1" Content="" DockPanel.Dock="Right" HorizontalAlignment="Right"/><TextBlock x:Name="FErr" Foreground="#FF453A" VerticalAlignment="Center" Margin="14,0,0,0"/></DockPanel>
@@ -158,7 +166,7 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
 </Window>
 "@
 $W = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
-$ui=@{}; foreach ($n in 'Logo','Sub','Pager','FLang','Page1','Page2','Page3','P1Title','P1Intro','LUser','LPass','LPass2','LHost','LTz','LSsid','LPsk','LChg','LTo','LChgHint','LDisp','LKey','FUser','FPass','FPass2','FHost','FTz','FSsid','BtnWifi','FPsk','FKey','FKeyHint','FChgS','FChgE','FDisp','FErr','BtnNext1','BtnUnflash','Steps','StepTitle','StateBox','StateDot','StateText','Prog','ProgText','FeedScroll','Feed','ActionBox','ActionText','BtnYes','BtnNo','BtnStart','BtnLog','BtnBack','Status','LogBox','Log','DoneTitle','DoneSub','DoneCmd','BtnCopy','DoneHint','BtnAgain','BtnClose') { $ui[$n]=$W.FindName($n) }
+$ui=@{}; foreach ($n in 'Logo','GrpAccess','GrpNet','GrpOp','SsidHint','HostHint','DispHint','Sub','Pager','FLang','Page1','Page2','Page3','P1Title','P1Intro','LUser','LPass','LPass2','LHost','LTz','LSsid','LPsk','LChg','LTo','LChgHint','LDisp','LKey','FUser','FPass','FPass2','FHost','FTz','FSsid','BtnWifi','FPsk','FKey','FKeyHint','FChgS','FChgE','FDisp','FErr','BtnNext1','BtnUnflash','Steps','StepTitle','StateBox','StateDot','StateText','Prog','ProgText','FeedScroll','Feed','ActionBox','ActionText','BtnYes','BtnNo','BtnStart','BtnLog','BtnBack','Status','LogBox','Log','DoneTitle','DoneSub','DoneCmd','BtnCopy','DoneHint','BtnAgain','BtnClose') { $ui[$n]=$W.FindName($n) }
 
 # Logo (barra-setup\logo.png) in Header + Fenster-Icon — fehlt die Datei, bleibt nur die Wortmarke
 $logoFile = Join-Path $Kit 'logo.png'
@@ -176,6 +184,8 @@ function Apply-UiLang {
   $ui.LHost.Text=T 'setup.p1.host'; $ui.LTz.Text=T 'setup.p1.tz'; $ui.LSsid.Text=T 'setup.p1.ssid'
   $ui.BtnWifi.Content=T 'setup.p1.wifi_btn'; $ui.LPsk.Text=T 'setup.p1.psk'; $ui.LChg.Text=T 'setup.p1.charge'
   $ui.LTo.Text=(T 'setup.p1.to')+'  '; $ui.LChgHint.Text=T 'setup.p1.charge_hint'; $ui.LDisp.Text=T 'setup.p1.disp'; $ui.LKey.Text=T 'setup.p1.key'
+  $ui.GrpAccess.Text=T 'setup.p1.grp_access'; $ui.GrpNet.Text=T 'setup.p1.grp_net'; $ui.GrpOp.Text=T 'setup.p1.grp_op'
+  $ui.SsidHint.Text=T 'setup.p1.ssid_hint'; $ui.HostHint.Text=T 'setup.p1.host_hint'; $ui.DispHint.Text=T 'setup.p1.disp_hint'
   $ui.BtnUnflash.Content=T 'setup.p1.unflash'; $ui.BtnUnflash.ToolTip=T 'setup.p1.unflash_tip'; $ui.BtnNext1.Content=T 'setup.p1.next'
   $ui.StepTitle.Text=T 'setup.p2.title0'; $ui.StateText.Text=$script:stateWords.ready
   $ui.BtnYes.Content=T 'setup.p2.done_btn'; $ui.BtnNo.Content=T 'setup.p2.cancel'
