@@ -2,7 +2,7 @@
  * glibc im Ubuntu-Container, FreeType (AA-Roboto, UTF-8) + rohe DRM/KMS aufs DSI-Panel.
  * Drei Sektionen: Akku & Konnektivitaet / Rechenleistung / Speicher. 1x/s, Auto-Aus nach <timeout> s.
  *   dash2 [timeout]
- * Build: gcc dash2.c -o dash2 $(pkg-config --cflags --libs freetype2) -lm */
+ * Build: gcc dash2.c -o dash2 $(pkg-config --cflags --libs freetype2) -lm -I.  (stb_image.h daneben) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +25,9 @@
 #include <drm/drm_mode.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#include "stb_image.h"
 
 /* ---------------- DRM/KMS ---------------- */
 static int DFD; static uint8_t* FB; static uint32_t W,H,PITCH; static struct drm_mode_crtc CRT; static uint32_t CONN;
@@ -51,6 +54,13 @@ static void bar(int x,int y,int w,int h,float frac,uint32_t fg,uint32_t track){
   if(frac<0)frac=0; if(frac>1)frac=1; rrect(x,y,w,h,h/2,track);
   int fw=(int)(w*frac); if(fw<h&&frac>0.004f)fw=h; if(fw>w)fw=w; if(frac>0.004f) rrect(x,y,fw,h,h/2,fg);
 }
+
+/* Logo (vorskaliertes RGBA-PNG neben den anderen hwbridge-Assets; optional) */
+static unsigned char* LOGO; static int LW,LH;
+static void logo_load(void){ int n; LOGO=stbi_load("/opt/hwbridge/logo.png",&LW,&LH,&n,4); }
+static void logo_draw(int x0,int y0){ if(!LOGO)return;
+  for(int j=0;j<LH;j++)for(int i=0;i<LW;i++){ const unsigned char* p=LOGO+((size_t)j*LW+i)*4;
+    if(p[3]) blend(x0+i,y0+j,col(p[0],p[1],p[2]),p[3]); } }
 
 /* ---------------- FreeType + UTF-8 ---------------- */
 static FT_Library FTL; static FT_Face FACE;
@@ -207,6 +217,7 @@ int main(int argc,char**argv){
   W=cq.width; H=cq.height; PITCH=cq.pitch;
   memset(&CRT,0,sizeof CRT); CRT.crtc_id=crtc; CRT.fb_id=fb.fb_id; CRT.set_connectors_ptr=(uint64_t)(uintptr_t)&CONN; CRT.count_connectors=1; CRT.mode=mode; CRT.mode_valid=1;
 
+  logo_load();
   cpu_sample(); usleep(250000);
   int first=0; struct timespec t0; clock_gettime(CLOCK_MONOTONIC,&t0);
   for(;;){
@@ -219,7 +230,7 @@ int main(int argc,char**argv){
     int half=(cw-22)/2, xr=M+half+22;
 
     /* ===== Kopf ===== */
-    text(M,92,58,TXT,"barra");
+    { int tx=M; if(LOGO){ logo_draw(M,92-56); tx=M+LW+18; } text(tx,92,58,TXT,"barra"); }
     { int w=wifi_ip(buf,sizeof buf)==0; int pw=textw(20,w?"ONLINE":"OFFLINE")+52;
       rrect(M+cw-pw,58,pw,40,20, w?col(20,58,32):col(58,24,22));
       rrect(M+cw-pw+16,74,10,10,5, w?A_BAT:RED); text(M+cw-pw+34,86,20, w?A_BAT:RED, w?"ONLINE":"OFFLINE"); }

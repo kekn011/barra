@@ -1,6 +1,7 @@
 # Trademarks
 
-"barra" and the barra logo are trademarks of the barra project.
+"barra" (short for *Bridged Accelerator Runtime for Rooted Android*) and the
+barra logo are trademarks of the barra project.
 
 The Apache 2.0 license (see [LICENSE](LICENSE)) grants you broad rights to use,
 modify and redistribute the **code**, but it does **not** grant any rights to

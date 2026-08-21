@@ -2,6 +2,8 @@
 
 # barra
 
+**barra** — *Bridged Accelerator Runtime for Rooted Android*
+
 **CUDA for your pocket.** barra turns a Google Pixel 8a into a headless Ubuntu
 compute node and makes its Tensor G3 accelerators — the edge **TPU**, the Mali
 **GPU** and the **DSP** — programmable from your own code, the way you'd use

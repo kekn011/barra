@@ -30,3 +30,5 @@ respective licenses and terms.
 
 "barra" is a trademark of the project. See TRADEMARKS.md — the Apache-2.0 license
 grants no trademark rights.
+
+This repository includes stb_image.h and uses stb_truetype.h by Sean Barrett (public domain / MIT, https://github.com/nothings/stb).

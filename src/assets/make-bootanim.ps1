@@ -2,6 +2,9 @@
 #   part0 = 10 Frames Fade-in (Logo + "barra")
 #   part1 = 12 Frames Loop (3 pulsierende Ladepunkte)
 # Zip MUSS store-only sein (bootanim mmapt die Eintraege).
+# WICHTIG (Deploy): das Magisk-Modul barra-bootanim braucht die Datei unter BEIDEN
+# Namen — bootanimation.zip UND bootanimation-dark.zip. Pixel spielt im Dark-Theme
+# die -dark-Variante; ueberlagert man nur die helle, laeuft weiter die Google-Anim.
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.IO.Compression
@@ -63,13 +66,42 @@ for ($i=0; $i -lt 12; $i++) {
 $logo.Dispose()
 [IO.File]::WriteAllText("$work\desc.txt","$W $H $FPS`np 1 0 part0`np 0 0 part1`n")
 
+# --- Zip STORE-ONLY selbst schreiben. ACHTUNG: .NET ZipArchive mit
+# CompressionLevel.NoCompression erzeugt trotzdem method=8 (Deflate mit
+# stored-Bloecken) — bootanimation/libziparchive kann Frames aber nur bei
+# ECHTEM method=0 mmapen und faellt sonst STILL auf die eingebaute
+# Google-Animation zurueck (so am 21.8. auf dem Geraet diagnostiziert).
+Add-Type -TypeDefinition @'
+public static class BarraCrc {
+  public static uint Compute(byte[] d){ uint[] t=new uint[256];
+    for(uint i=0;i<256;i++){ uint c=i; for(int k=0;k<8;k++) c=(c&1)!=0?0xEDB88320u^(c>>1):c>>1; t[i]=c; }
+    uint crc=0xFFFFFFFFu; foreach(byte b in d) crc=t[(crc^b)&0xFF]^(crc>>8); return crc^0xFFFFFFFFu; }
+}
+'@
+function Crc32([byte[]]$d){ [BarraCrc]::Compute($d) }
+
 New-Item -ItemType Directory -Force (Split-Path $out) | Out-Null
 Remove-Item $out -Force -ErrorAction SilentlyContinue
-$fs=[IO.File]::Create($out)
-$zip=[IO.Compression.ZipArchive]::new($fs,[IO.Compression.ZipArchiveMode]::Create)
+$ms=[IO.File]::Create($out); $bw=[IO.BinaryWriter]::new($ms)
+$central=@()
 foreach ($rel in @('desc.txt') + (0..9 | ForEach-Object {'part0/{0:d3}.png' -f $_}) + (0..11 | ForEach-Object {'part1/{0:d3}.png' -f $_})) {
-  $e=$zip.CreateEntry($rel,[IO.Compression.CompressionLevel]::NoCompression)
-  $es=$e.Open(); $bytes=[IO.File]::ReadAllBytes("$work\$($rel -replace '/','\')"); $es.Write($bytes,0,$bytes.Length); $es.Close()
+  $data=[IO.File]::ReadAllBytes("$work\$($rel -replace '/','\')")
+  $nb=[Text.Encoding]::ASCII.GetBytes($rel); $crc=Crc32 $data; $off=[uint32]$ms.Position
+  $bw.Write([uint32]0x04034b50); $bw.Write([uint16]20); $bw.Write([uint16]0); $bw.Write([uint16]0)   # LFH, v2.0, keine Flags, STORED
+  $bw.Write([uint16]0); $bw.Write([uint16]0)                                                        # Zeit/Datum 0 (deterministisch)
+  $bw.Write([uint32]$crc); $bw.Write([uint32]$data.Length); $bw.Write([uint32]$data.Length)
+  $bw.Write([uint16]$nb.Length); $bw.Write([uint16]0); $bw.Write($nb); $bw.Write($data)
+  $central += ,@{n=$nb; crc=$crc; len=[uint32]$data.Length; off=$off}
 }
-$zip.Dispose(); $fs.Close()
-Write-Output ("OK: {0} ({1:n1} MB)" -f $out,((Get-Item $out).Length/1e6))
+$cdStart=[uint32]$ms.Position
+foreach ($e in $central) {
+  $bw.Write([uint32]0x02014b50); $bw.Write([uint16]20); $bw.Write([uint16]20); $bw.Write([uint16]0); $bw.Write([uint16]0)
+  $bw.Write([uint16]0); $bw.Write([uint16]0); $bw.Write([uint32]$e.crc); $bw.Write([uint32]$e.len); $bw.Write([uint32]$e.len)
+  $bw.Write([uint16]$e.n.Length); $bw.Write([uint16]0); $bw.Write([uint16]0); $bw.Write([uint16]0); $bw.Write([uint16]0)
+  $bw.Write([uint32]0); $bw.Write([uint32]$e.off); $bw.Write($e.n)
+}
+$cdLen=[uint32]($ms.Position-$cdStart)
+$bw.Write([uint32]0x06054b50); $bw.Write([uint16]0); $bw.Write([uint16]0)
+$bw.Write([uint16]$central.Count); $bw.Write([uint16]$central.Count); $bw.Write([uint32]$cdLen); $bw.Write([uint32]$cdStart); $bw.Write([uint16]0)
+$bw.Close(); $ms.Close()
+Write-Output ("OK: {0} ({1:n1} MB, store-only)" -f $out,((Get-Item $out).Length/1e6))
