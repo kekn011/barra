@@ -63,6 +63,14 @@ log "=== base-boot start (headless) ==="
 # Panel uebernimmt. Kein langes Settle mehr (das hiess: Lockscreen + Android-
 # Display-Timeout = lange Schwarzphase).
 stage boot-wait
+# Uebergang kaschieren: SF setzt service.bootanim.exit=1 BEVOR die Bootanimation
+# wirklich endet und der Keyguard komponiert wird — genau dann sofort abdunkeln.
+# Statt Lockscreen-Blitz bleibt der Schirm schwarz, bis der bootsplash das
+# Backlight wieder hochdreht (bzw. der Fehlerpfad unten es restauriert).
+# Startet VOR dem boot_completed-Wait (das 2s-Raster + Settle kam sonst zu spaet).
+( k=0; while [ $k -lt 3000 ] && [ "$(getprop service.bootanim.exit)" != "1" ]; do sleep 0.1; k=$((k+1)); done
+  echo 0 > /sys/class/backlight/panel0-backlight/brightness 2>/dev/null ) &
+ANIMW=$!
 if [ "$(getprop sys.boot_completed)" != "1" ]; then
   i=0
   while [ "$(getprop sys.boot_completed)" != "1" ] && [ $i -lt 120 ]; do
@@ -71,11 +79,6 @@ if [ "$(getprop sys.boot_completed)" != "1" ]; then
   sleep 3
 fi
 log "boot_completed=$(getprop sys.boot_completed) nach ${i:-0} Runden"
-# Uebergang kaschieren: endet die Bootanimation (SF-bootFinished oder fw-quiet),
-# SOFORT abdunkeln — statt Lockscreen-Blitz bleibt der Schirm schwarz, bis der
-# bootsplash das Backlight wieder hochdreht. Anim laeuft dabei ungestoert zu Ende.
-( j=0; while [ $j -lt 60 ] && pgrep -x bootanimation >/dev/null 2>&1; do sleep 0.2; j=$((j+1)); done
-  echo 0 > /sys/class/backlight/panel0-backlight/brightness 2>/dev/null ) &
 
 # --- 2. Grundsystem ----------------------------------------------------------
 stage grundsystem
@@ -102,6 +105,9 @@ log "display bleibt an (Boot-Anzeige), wakelock=$(cat /sys/power/wake_lock 2>/de
 stage framework-aus
 sh $T/fw-quiet.sh off >>"$LOG" 2>&1
 log "system_server=$(pidof system_server) netd=$(pidof netd)"
+# Dimm-Waechter beenden — ab hier gehoert das Backlight dem bootsplash (ein spaetes
+# exit=1 wuerde ihm sonst die Helligkeit klauen)
+kill $ANIMW 2>/dev/null
 # Composer ist jetzt weg -> Panel frei -> Boot-Splash starten (laeuft bis Status 100)
 splash 20 "$(t splash.userland)"
 if [ -x $T/bootsplash ]; then
@@ -119,6 +125,7 @@ if [ -n "$SDPID" ] && [ -d "/proc/$SDPID" ]; then
 else
   log "FEHLER: Ubuntu-Userland nicht hochgekommen - Framework zurueck, Abbruch (adb bleibt)"
   splash 100 ""
+  echo 3000 > /sys/class/backlight/panel0-backlight/brightness 2>/dev/null
   sh $T/fw-quiet.sh on >>"$LOG" 2>&1
   exit 1
 fi
