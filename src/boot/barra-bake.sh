@@ -40,6 +40,8 @@ echo "== Android-Seite kopieren + saeubern =="
 A=$B/adb
 cp -a /data/adb/baseos /data/adb/hwbridge /data/adb/service.d /data/adb/post-fs-data.d /data/adb/usbnet-modules $A/
 cp /data/adb/nsprep $A/nsprep; cp /data/adb/wifi-rfkill.ko $A/wifi-rfkill.ko
+# Magisk-Modul barra-bootanim (Boot-Branding) gezielt mitnehmen — NICHT ganz modules/ (fremde Module)
+mkdir -p $A/modules; cp -a /data/adb/modules/barra-bootanim $A/modules/ 2>/dev/null || true
 S=$A/baseos/config; [ -f $S ] && { grep -v '^WIFI_SSID=' $S | grep -v '^WIFI_PSK=' > $S.tmp; mv $S.tmp $S; chmod 600 $S; }
 rm -rf $A/baseos/run; mkdir -p $A/baseos/run; chmod 700 $A/baseos/run
 rm -f $A/baseos/state $A/baseos/disable $A/baseos/boot.log $A/baseos/bin/*.bak* 2>/dev/null; rm -rf $A/baseos/boot.lock 2>/dev/null

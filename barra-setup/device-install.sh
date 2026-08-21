@@ -31,6 +31,11 @@ cp -a /data/local/barra-stage/adb/hwbridge /data/adb/
 cp -a /data/local/barra-stage/adb/service.d/. /data/adb/service.d/
 cp -a /data/local/barra-stage/adb/post-fs-data.d/. /data/adb/post-fs-data.d/
 cp -a /data/local/barra-stage/adb/usbnet-modules /data/adb/
+# Magisk-Modul barra-bootanim (Boot-Branding), falls im Payload
+if [ -d /data/local/barra-stage/adb/modules/barra-bootanim ]; then
+  mkdir -p /data/adb/modules
+  cp -a /data/local/barra-stage/adb/modules/barra-bootanim /data/adb/modules/
+fi
 cp /data/local/barra-stage/adb/nsprep /data/adb/nsprep; chmod 755 /data/adb/nsprep
 cp /data/local/barra-stage/adb/wifi-rfkill.ko /data/adb/wifi-rfkill.ko
 chmod 755 /data/adb/service.d/*.sh /data/adb/post-fs-data.d/*.sh /data/adb/baseos/bin/* /data/adb/hwbridge/*.sh 2>/dev/null || true
