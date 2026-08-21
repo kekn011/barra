@@ -24,10 +24,10 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="barra Setup" Width="1060" Height="620" MinWidth="900" MinHeight="560" WindowStartupLocation="CenterScreen"
-        Background="#0D1015" FontFamily="Segoe UI" FontSize="14">
+        Background="#0A0C10" FontFamily="Segoe UI" FontSize="14">
   <Window.Resources>
     <Style TargetType="Button">
-      <Setter Property="Background" Value="#3D6FE0"/><Setter Property="Foreground" Value="White"/><Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Background" Value="#5B8DEF"/><Setter Property="Foreground" Value="White"/><Setter Property="BorderThickness" Value="0"/>
       <Setter Property="Padding" Value="20,9"/><Setter Property="FontSize" Value="14"/><Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
         <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
@@ -51,7 +51,7 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
     </DockPanel>
 
     <!-- SEITE 1: Einrichten -->
-    <Border Grid.Row="1" x:Name="Page1" Background="#161A21" CornerRadius="14" Padding="26">
+    <Border Grid.Row="1" x:Name="Page1" Background="#14181F" CornerRadius="14" Padding="26">
       <Grid>
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel Grid.Row="0"><TextBlock x:Name="P1Title" Text="" FontSize="22" FontWeight="SemiBold" Foreground="#F0F2F6"/><TextBlock x:Name="P1Intro" Text="" Margin="0,4,0,0" TextWrapping="Wrap"/></StackPanel>
@@ -69,7 +69,8 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
             <DockPanel><Button x:Name="BtnWifi" Content="" DockPanel.Dock="Right" Padding="12,6" Margin="8,0,0,0" Background="#2A2F3A"/><TextBox x:Name="FSsid"/></DockPanel>
             <TextBlock x:Name="LPsk" Style="{StaticResource Lbl}"/><PasswordBox x:Name="FPsk"/>
             <TextBlock x:Name="LChg" Style="{StaticResource Lbl}"/>
-            <DockPanel><TextBox x:Name="FChgS" Width="70" Text="50"/><TextBlock x:Name="LTo" Text="" VerticalAlignment="Center"/><TextBox x:Name="FChgE" Width="70" Text="55"/><TextBlock x:Name="LChgHint" Text="" FontSize="12" Foreground="#8B939F" VerticalAlignment="Center"/></DockPanel>
+            <DockPanel LastChildFill="False"><TextBox x:Name="FChgS" Width="70" Text="50"/><TextBlock x:Name="LTo" Text="" VerticalAlignment="Center"/><TextBox x:Name="FChgE" Width="70" Text="55"/></DockPanel>
+            <TextBlock x:Name="LChgHint" Text="" FontSize="12" Foreground="#606772" Margin="0,4,0,0" TextWrapping="Wrap"/>
             <TextBlock x:Name="LDisp" Style="{StaticResource Lbl}"/><TextBox x:Name="FDisp" Width="90" HorizontalAlignment="Left" Text="20"/>
           </StackPanel>
           <StackPanel Grid.Column="4">
@@ -86,14 +87,43 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
     <Grid Grid.Row="1" x:Name="Page2" Visibility="Collapsed">
       <Grid.ColumnDefinitions><ColumnDefinition Width="260"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
       <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <Border Grid.Column="0" Background="#161A21" CornerRadius="14" Padding="16" Margin="0,0,14,0"><StackPanel x:Name="Steps"/></Border>
-      <Border Grid.Column="1" Background="#161A21" CornerRadius="14" Padding="24">
+      <Border Grid.Column="0" Background="#14181F" CornerRadius="14" Padding="16" Margin="0,0,14,0"><StackPanel x:Name="Steps"/></Border>
+      <Border Grid.Column="1" Background="#14181F" CornerRadius="14" Padding="24">
         <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <TextBlock x:Name="StepTitle" Grid.Row="0" Text="" FontSize="22" FontWeight="SemiBold" Foreground="#F0F2F6"/>
-          <Border Grid.Row="1" x:Name="StateBox" Background="#1E232C" CornerRadius="10" Padding="14,10" Margin="0,12,0,0">
-            <DockPanel><TextBlock x:Name="StateDot" Text="●" FontSize="18" Foreground="#3D6FE0" VerticalAlignment="Center" Margin="0,0,10,0"/>
-              <StackPanel><TextBlock x:Name="StateText" Text="" FontSize="15" Foreground="#F0F2F6"/><ProgressBar x:Name="Prog" Height="6" Margin="0,8,0,0" Minimum="0" Maximum="100" Value="0" Foreground="#3D6FE0" Background="#0A0C10" BorderThickness="0" Visibility="Collapsed"/><TextBlock x:Name="ProgText" Text="" FontSize="12" Foreground="#8B939F" Margin="0,4,0,0"/></StackPanel>
-            </DockPanel>
+          <Border Grid.Row="1" x:Name="StateBox" Background="#0E1116" BorderBrush="#262A33" BorderThickness="1" CornerRadius="12" Padding="16,12" Margin="0,12,0,0">
+            <StackPanel>
+              <DockPanel>
+                <TextBlock x:Name="StateDot" Text="●" FontSize="11" Foreground="#5B8DEF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <TextBlock x:Name="StateText" Text="" FontSize="12" Foreground="#8B939F" VerticalAlignment="Center"/>
+              </DockPanel>
+              <TextBlock x:Name="ProgText" Text="" FontSize="14.5" Foreground="#F0F2F6" Margin="0,7,0,0" TextWrapping="Wrap"/>
+              <ProgressBar x:Name="Prog" Height="8" Margin="0,10,0,0" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed">
+                <ProgressBar.Template>
+                  <ControlTemplate TargetType="ProgressBar">
+                    <Grid>
+                      <Border CornerRadius="4" Background="#262A33"/>
+                      <Border x:Name="Pulse" CornerRadius="4" Background="#5B8DEF" Opacity="0.5" Visibility="Collapsed"/>
+                      <Border x:Name="PART_Indicator" CornerRadius="4" Background="#5B8DEF" HorizontalAlignment="Left"/>
+                      <Border x:Name="PART_Track" Background="Transparent"/>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsIndeterminate" Value="True">
+                        <Setter TargetName="PART_Indicator" Property="Visibility" Value="Collapsed"/>
+                        <Setter TargetName="Pulse" Property="Visibility" Value="Visible"/>
+                        <Trigger.EnterActions>
+                          <BeginStoryboard>
+                            <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                              <DoubleAnimation Storyboard.TargetName="Pulse" Storyboard.TargetProperty="Opacity" From="0.2" To="0.8" Duration="0:0:0.7"/>
+                            </Storyboard>
+                          </BeginStoryboard>
+                        </Trigger.EnterActions>
+                      </Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                </ProgressBar.Template>
+              </ProgressBar>
+            </StackPanel>
           </Border>
           <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0" x:Name="FeedScroll"><StackPanel x:Name="Feed"/></ScrollViewer>
           <Border Grid.Row="3" x:Name="ActionBox" Background="#3A3418" CornerRadius="10" Padding="16" Margin="0,12,0,0" Visibility="Collapsed">
@@ -114,7 +144,7 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
     </Grid>
 
     <!-- SEITE 3: Fertig -->
-    <Border Grid.Row="1" x:Name="Page3" Background="#161A21" CornerRadius="14" Padding="30" Visibility="Collapsed">
+    <Border Grid.Row="1" x:Name="Page3" Background="#14181F" CornerRadius="14" Padding="30" Visibility="Collapsed">
       <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="620">
         <TextBlock Text="✔" FontSize="56" Foreground="#34C759" HorizontalAlignment="Center"/>
         <TextBlock x:Name="DoneTitle" Text="" FontSize="26" FontWeight="SemiBold" Foreground="#F0F2F6" HorizontalAlignment="Center" Margin="0,8,0,0"/>
@@ -139,7 +169,8 @@ if (Test-Path $logoFile) {
 # ---------- Sprache anwenden (alle statischen Texte; wird auch beim Dropdown-Wechsel gerufen) ----------
 $script:mode='setup'
 function Apply-UiLang {
-  $script:stateWords = @{ ready=(T 'setup.state.ready'); run=(T 'setup.state.run'); wait_user=(T 'setup.state.wait_user'); wait_dev=(T 'setup.state.wait_dev'); ok=(T 'setup.state.ok'); fail=(T 'setup.state.fail') }
+  # Versal-Label wie die dash2-Kacheltitel (WPF kennt kein text-transform -> ToUpper hier)
+  $script:stateWords = @{ ready=(T 'setup.state.ready').ToUpper(); run=(T 'setup.state.run').ToUpper(); wait_user=(T 'setup.state.wait_user').ToUpper(); wait_dev=(T 'setup.state.wait_dev').ToUpper(); ok=(T 'setup.state.ok').ToUpper(); fail=(T 'setup.state.fail').ToUpper() }
   $ui.P1Title.Text=T 'setup.p1.title'; $ui.P1Intro.Text=T 'setup.p1.intro'
   $ui.LUser.Text=T 'setup.p1.user'; $ui.LPass.Text=T 'setup.p1.pass'; $ui.LPass2.Text=T 'setup.p1.pass2'
   $ui.LHost.Text=T 'setup.p1.host'; $ui.LTz.Text=T 'setup.p1.tz'; $ui.LSsid.Text=T 'setup.p1.ssid'
@@ -213,7 +244,7 @@ function Set-Mode($m){
   if ($m -eq 'unflash') { Set-StepNames $unflashSteps; $ui.Sub.Text=T 'setup.sub_unflash' } else { Set-StepNames $setupSteps; $ui.Sub.Text=T 'setup.sub' }
 }
 
-$stateColors=@{ run='#3D6FE0'; wait_user='#FFD166'; wait_dev='#FF9F0A'; ok='#34C759'; fail='#FF453A' }
+$stateColors=@{ run='#5B8DEF'; wait_user='#FFD166'; wait_dev='#FF9F0A'; ok='#34C759'; fail='#FF453A' }
 $script:curStep=-1; $script:lastState=''
 function Set-Step($n,$title,$state){
   $stepUI=$script:stepUI; $stepNames=$script:stepNames
