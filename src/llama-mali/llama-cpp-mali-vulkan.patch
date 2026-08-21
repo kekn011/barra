@@ -1,0 +1,904 @@
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 45fa97f..2fe034f 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -183,9 +183,15 @@ static bool is_pow2(uint32_t x) { return x > 1 && (x & (x-1)) == 0; }
+ #define VK_VENDOR_ID_INTEL 0x8086
+ #define VK_VENDOR_ID_NVIDIA 0x10de
+ #define VK_VENDOR_ID_QUALCOMM 0x5143
++#define VK_VENDOR_ID_ARM 0x13b5
+ 
+ #define VK_DEVICE_DESCRIPTOR_POOL_SIZE 256
+ 
++// ARM_DEFAULTS: auf Mali ist KHR_coopmat langsamer als der mul_mm-Pfad -> standardmaessig aus (GGML_VK_ARM_COOPMAT=1 schaltet ein)
++static bool vk_arm_coopmat_off(const vk::PhysicalDevice & pd) {
++    return pd.getProperties().vendorID == VK_VENDOR_ID_ARM && !getenv("GGML_VK_ARM_COOPMAT");
++}
++
+ #define VK_CHECK(err, msg, dev)                                     \
+     do {                                                            \
+         vk::Result err_;                                            \
+@@ -2408,9 +2414,26 @@ static uint64_t vk_tensor_offset(const ggml_tensor * tensor) {
+     return (uint8_t *) tensor->data - (uint8_t *) vk_ptr_base;
+ }
+ 
++// ---- q6_K-Repack (Mali-Fork): Geraete-Layout 224 B je Block statt 210 (16-Byte-aligned) ----
++static constexpr uint64_t VK_Q6K_BLK = 210, VK_Q6K_DEV_BLK = 224;
++static inline bool vk_is_q6k(const ggml_tensor * t) { return t->type == GGML_TYPE_Q6_K; }
++// ggml-Byteposition (210er-Stride) -> Geraete-Byteposition (224er-Stride); Layout innerhalb des Blocks identisch
++static inline uint64_t vk_q6k_dev_pos(uint64_t o) { return (o / VK_Q6K_BLK) * VK_Q6K_DEV_BLK + (o % VK_Q6K_BLK); }
++static inline uint64_t vk_q6k_dev_size(uint64_t off, uint64_t size) { return size == 0 ? 0 : vk_q6k_dev_pos(off + size - 1) + 1 - vk_q6k_dev_pos(off); }
++static inline uint64_t vk_q6k_dev_bytes_for(uint64_t ggml_bytes) { return (ggml_bytes / VK_Q6K_BLK) * VK_Q6K_DEV_BLK + (ggml_bytes % VK_Q6K_BLK ? VK_Q6K_DEV_BLK : 0); }
++static inline uint64_t vk_dev_nbytes(const ggml_tensor * t) { return vk_is_q6k(t) ? vk_q6k_dev_bytes_for(ggml_nbytes(t)) : ggml_nbytes(t); }
++static uint64_t vk_tensor_dev_offset(const ggml_tensor * t) {
++    uint64_t vo = t->view_offs;
++    if (vo != 0 && vk_is_q6k(t)) {
++        GGML_ASSERT(vo % VK_Q6K_BLK == 0);   // Views auf q6_K nur an Blockgrenzen
++        vo = vk_q6k_dev_pos(vo);
++    }
++    return vk_tensor_offset(t) + vo;
++}
++
+ static uint32_t get_misalign_bytes(const ggml_backend_vk_context * ctx, const ggml_tensor * t)
+ {
+-    return ((vk_tensor_offset(t) + t->view_offs) & (ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1));;
++    return ((vk_tensor_dev_offset(t)) & (ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1));;
+ }
+ 
+ static uint32_t ggml_vk_concat_unit_size(ggml_type type) {
+@@ -3405,6 +3428,7 @@ static std::vector<uint32_t> ggml_vk_find_memory_properties(const vk::PhysicalDe
+ 
+ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std::initializer_list<vk::MemoryPropertyFlags> & req_flags_list,
+                                        void *import_ptr = nullptr) {
++    if (getenv("GGML_VK_TRACE_ALLOC")) { fprintf(stderr, "[vk-alloc] create_buffer size=%zu\n", (size_t)size); }
+     VK_LOG_DEBUG("ggml_vk_create_buffer(" << device->name << ", " << size << ", " << to_string(req_flags_list.begin()[0]) << ", " << to_string(req_flags_list.begin()[req_flags_list.size()-1]) << ")");
+     if (size > device->max_buffer_size) {
+         throw vk::OutOfDeviceMemoryError("Requested buffer size exceeds device buffer size limit");
+@@ -5179,6 +5203,8 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     } else if (device->vendor_id == VK_VENDOR_ID_INTEL) {
+         rm_stdq = 2;
+         rm_stdq_int = 2;
++    } else if (device->vendor_id == VK_VENDOR_ID_ARM) {
++        rm_kq_int = getenv("GGML_VK_ARM_RM_KQ") ? atoi(getenv("GGML_VK_ARM_RM_KQ")) : 2;
+     }
+     uint32_t rm_iq = 2 * rm_kq;
+ 
+@@ -5285,9 +5311,16 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ 
+                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q2_K][i], "mul_mat_vec_q2_k_q8_1_f32", arr_dmmv_q2_k_q8_1_f32_len[reduc], arr_dmmv_q2_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {2*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 2*rm_kq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
+                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q3_K][i], "mul_mat_vec_q3_k_q8_1_f32", arr_dmmv_q3_k_q8_1_f32_len[reduc], arr_dmmv_q3_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_kq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
+-                ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q4_K][i], "mul_mat_vec_q4_k_q8_1_f32", arr_dmmv_q4_k_q8_1_f32_len[reduc], arr_dmmv_q4_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_kq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
++                {
++                    // Mali-Pfad (MALI_Q4K_WIDE im Shader): 8 Lanes je Zeile -> wg/8 Zeilen je Workgroup
++                    const uint32_t mali_q4k_rows = (device->vendor_id == VK_VENDOR_ID_ARM) ? std::max(1u, wg_size_subgroup_int / 8) : 1*rm_kq_int;
++                    ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q4_K][i], "mul_mat_vec_q4_k_q8_1_f32", arr_dmmv_q4_k_q8_1_f32_len[reduc], arr_dmmv_q4_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {mali_q4k_rows, 1, 1}, {wg_size_subgroup_int, (device->vendor_id == VK_VENDOR_ID_ARM) ? 1u : 1*rm_kq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
++                }
+                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q5_K][i], "mul_mat_vec_q5_k_q8_1_f32", arr_dmmv_q5_k_q8_1_f32_len[reduc], arr_dmmv_q5_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_kq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
+-                ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q6_K][i], "mul_mat_vec_q6_k_q8_1_f32", arr_dmmv_q6_k_q8_1_f32_len[reduc], arr_dmmv_q6_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_kq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
++                {
++                    const uint32_t mali_q6k_rows = (device->vendor_id == VK_VENDOR_ID_ARM) ? std::max(1u, wg_size_subgroup_int / 16) : 1*rm_kq_int;
++                    ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q6_K][i], "mul_mat_vec_q6_k_q8_1_f32", arr_dmmv_q6_k_q8_1_f32_len[reduc], arr_dmmv_q6_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {mali_q6k_rows, 1, 1}, {wg_size_subgroup_int, (device->vendor_id == VK_VENDOR_ID_ARM) ? 1u : 1*rm_kq_int, i+1}, 1, true, use_subgroups, subgroup_size_int);
++                }
+ 
+                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_IQ1_S][i], "mul_mat_vec_iq1_s_q8_1_f32", arr_dmmv_iq1_s_q8_1_f32_len[reduc], arr_dmmv_iq1_s_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_iq_int(i), 1, 1}, {wg_size_subgroup_int, 1*rm_iq_int(i), i+1}, 1, true, use_subgroups, subgroup_size_int);
+                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_IQ1_M][i], "mul_mat_vec_iq1_m_q8_1_f32", arr_dmmv_iq1_m_q8_1_f32_len[reduc], arr_dmmv_iq1_m_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1*rm_iq_int(i), 1, 1}, {wg_size_subgroup_int, 1*rm_iq_int(i), i+1}, 1, true, use_subgroups, subgroup_size_int);
+@@ -5339,9 +5372,15 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ 
+             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q2_K], "mul_mat_vec_id_q2_k_q8_1_f32", arr_dmmv_id_q2_k_q8_1_f32_len[reduc], arr_dmmv_id_q2_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {2*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 2*rm_kq_int}, 1, true, use_subgroups, subgroup_size_int);
+             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q3_K], "mul_mat_vec_id_q3_k_q8_1_f32", arr_dmmv_id_q3_k_q8_1_f32_len[reduc], arr_dmmv_id_q3_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {1*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_kq_int}, 1, true, use_subgroups, subgroup_size_int);
+-            ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q4_K], "mul_mat_vec_id_q4_k_q8_1_f32", arr_dmmv_id_q4_k_q8_1_f32_len[reduc], arr_dmmv_id_q4_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {1*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_kq_int}, 1, true, use_subgroups, subgroup_size_int);
++            {
++                const uint32_t mali_q4k_rows = (device->vendor_id == VK_VENDOR_ID_ARM) ? std::max(1u, wg_size_subgroup_int / 8) : 1*rm_kq_int;
++                ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q4_K], "mul_mat_vec_id_q4_k_q8_1_f32", arr_dmmv_id_q4_k_q8_1_f32_len[reduc], arr_dmmv_id_q4_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {mali_q4k_rows, 1, 1}, {wg_size_subgroup_int, (device->vendor_id == VK_VENDOR_ID_ARM) ? 1u : 1*rm_kq_int}, 1, true, use_subgroups, subgroup_size_int);
++            }
+             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q5_K], "mul_mat_vec_id_q5_k_q8_1_f32", arr_dmmv_id_q5_k_q8_1_f32_len[reduc], arr_dmmv_id_q5_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {1*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_kq_int}, 1, true, use_subgroups, subgroup_size_int);
+-            ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q6_K], "mul_mat_vec_id_q6_k_q8_1_f32", arr_dmmv_id_q6_k_q8_1_f32_len[reduc], arr_dmmv_id_q6_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {1*rm_kq_int, 1, 1}, {wg_size_subgroup_int, 1*rm_kq_int}, 1, true, use_subgroups, subgroup_size_int);
++            {
++                const uint32_t mali_q6k_rows = (device->vendor_id == VK_VENDOR_ID_ARM) ? std::max(1u, wg_size_subgroup_int / 16) : 1*rm_kq_int;
++                ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q6_K], "mul_mat_vec_id_q6_k_q8_1_f32", arr_dmmv_id_q6_k_q8_1_f32_len[reduc], arr_dmmv_id_q6_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {mali_q6k_rows, 1, 1}, {wg_size_subgroup_int, (device->vendor_id == VK_VENDOR_ID_ARM) ? 1u : 1*rm_kq_int}, 1, true, use_subgroups, subgroup_size_int);
++            }
+ 
+             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_IQ1_S], "mul_mat_vec_id_iq1_s_q8_1_f32", arr_dmmv_id_iq1_s_q8_1_f32_len[reduc], arr_dmmv_id_iq1_s_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {1*rm_iq_int(0), 1, 1}, {wg_size_subgroup_int, 1*rm_iq_int(0)}, 1, true, use_subgroups, subgroup_size_int);
+             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_IQ1_M], "mul_mat_vec_id_iq1_m_q8_1_f32", arr_dmmv_id_iq1_m_q8_1_f32_len[reduc], arr_dmmv_id_iq1_m_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {1*rm_iq_int(0), 1, 1}, {wg_size_subgroup_int, 1*rm_iq_int(0)}, 1, true, use_subgroups, subgroup_size_int);
+@@ -6197,7 +6236,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
+                 device->subgroup_size_control = true;
+ #if defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+             } else if (strcmp("VK_KHR_cooperative_matrix", properties.extensionName) == 0 &&
+-                       !getenv("GGML_VK_DISABLE_COOPMAT")) {
++                       !getenv("GGML_VK_DISABLE_COOPMAT") && !vk_arm_coopmat_off(device->physical_device)) {
+                 device->coopmat_support = true;
+                 device->coopmat_m = 0;
+                 device->coopmat_n = 0;
+@@ -7095,7 +7134,7 @@ static void ggml_vk_print_gpu_info(size_t idx) {
+             fp16_compute = true;
+ #if defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+        } else if (strcmp("VK_KHR_cooperative_matrix", properties.extensionName) == 0 &&
+-                   !getenv("GGML_VK_DISABLE_COOPMAT")) {
++                   !getenv("GGML_VK_DISABLE_COOPMAT") && !vk_arm_coopmat_off(physical_device)) {
+             coopmat_support = true;
+ #endif
+ #if defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
+@@ -7807,6 +7846,10 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec(ggml_backend_vk_context *
+         if (ctx->device->vendor_id == VK_VENDOR_ID_INTEL) {
+             dmmv_wg = DMMV_WG_SIZE_SUBGROUP;
+         }
++        if (ctx->device->vendor_id == VK_VENDOR_ID_ARM) {
++            // Mali-Q4_K-Pfad: 64 Threads = 8 Zeilen je Workgroup (env GGML_VK_ARM_WG_SMALL=1 -> 16 Threads = 2 Zeilen)
++            dmmv_wg = getenv("GGML_VK_ARM_WG_SMALL") ? DMMV_WG_SIZE_SUBGROUP : DMMV_WG_SIZE_LARGE;
++        }
+         return ctx->device->pipeline_dequant_mul_mat_vec_q8_1_f32[dmmv_wg][a_type][num_cols-1];
+     }
+ 
+@@ -7972,6 +8015,10 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec_id(ggml_backend_vk_context
+         if (ctx->device->vendor_id == VK_VENDOR_ID_INTEL) {
+             dmmv_wg = DMMV_WG_SIZE_SUBGROUP;
+         }
++        if (ctx->device->vendor_id == VK_VENDOR_ID_ARM) {
++            // Mali-Q4_K-Pfad: 64 Threads = 8 Zeilen je Workgroup (env GGML_VK_ARM_WG_SMALL=1 -> 16 Threads = 2 Zeilen)
++            dmmv_wg = getenv("GGML_VK_ARM_WG_SMALL") ? DMMV_WG_SIZE_SUBGROUP : DMMV_WG_SIZE_LARGE;
++        }
+         return ctx->device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[dmmv_wg][a_type];
+     }
+ 
+@@ -8052,11 +8099,13 @@ static vk_subbuffer ggml_vk_tensor_subbuffer(
+     if (!buffer) {
+         auto buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
+         buffer = buf_ctx->dev_buffer;
+-        offset = vk_tensor_offset(tensor) + tensor->view_offs;
++        offset = vk_tensor_dev_offset(tensor);
+     }
+     GGML_ASSERT(buffer != nullptr);
++    // q6_K liegt auf dem Geraet gepolstert (224 B/Block); ein q6_K-Tensor im Host-Speicher (UMA-Pfad) haette ggml-Layout -> nicht zulaessig
++    GGML_ASSERT(!(vk_is_q6k(tensor) && ctx->device->uma && ggml_backend_buffer_is_host(tensor->buffer)));
+ 
+-    size_t size = ggml_nbytes(tensor);
++    size_t size = vk_dev_nbytes(tensor);
+ 
+     size_t misalign_bytes = offset & (ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1);
+     // The shader must support misaligned offsets when indexing into the buffer
+@@ -8762,6 +8811,15 @@ static vk_pipeline ggml_vk_guess_matmul_pipeline(ggml_backend_vk_context * ctx,
+         return aligned ? mmp->a_s : mmp->s;
+     }
+ 
++    // EXPERIMENT: env-Override Tile-Variante (GGML_VK_FORCE_MM_TILE=s|m|l), 108=l 109=m 115=s
++    {
++        const char* ft = getenv("GGML_VK_FORCE_MM_TILE");
++        if (ft) {
++            if (ft[0]==108 && mm_l) return aligned ? mmp->a_l : mmp->l;
++            if (ft[0]==109 && mm_m) return aligned ? mmp->a_m : mmp->m;
++            if (ft[0]==115 && mm_s) return aligned ? mmp->a_s : mmp->s;
++        }
++    }
+     if ((mm_s && (m <= 32 || n <= 32)) || (!mm_m && !mm_l)) {
+         return aligned ? mmp->a_s : mmp->s;
+     }
+@@ -9211,7 +9269,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+ 
+     const uint32_t split_k = ggml_vk_guess_split_k(ctx, ne01, ne11, ne10, disable_split_k, pipeline);
+ 
+-    const uint64_t qx_sz = ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type);
++    const uint64_t qx_sz = vk_is_q6k(src0) ? vk_q6k_dev_bytes_for(ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type)) : ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type);
+     const uint64_t qy_sz = ggml_type_size(src1->type) * y_ne / ggml_blck_size(src1->type);
+     const uint64_t x_sz = !qx_needs_dequant ? qx_sz : sizeof(ggml_fp16_t) * x_ne;
+     const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) : (y_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
+@@ -9275,7 +9333,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+     }
+ 
+     vk_buffer d_D = dst_buf_ctx->dev_buffer;
+-    const uint64_t d_buf_offset = vk_tensor_offset(dst) + dst->view_offs;
++    const uint64_t d_buf_offset = vk_tensor_dev_offset(dst);
+     GGML_ASSERT(d_D != nullptr);
+     GGML_ASSERT(d_D->size >= d_buf_offset + d_sz);
+     vk_buffer d_X;
+@@ -9284,12 +9342,12 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+     uint64_t y_buf_offset = 0;
+     if (!src0_uma) {
+         d_Qx = src0_buf_ctx->dev_buffer;
+-        qx_buf_offset = vk_tensor_offset(src0) + src0->view_offs;
++        qx_buf_offset = vk_tensor_dev_offset(src0);
+         GGML_ASSERT(d_Qx != nullptr);
+     }
+     if (!src1_uma) {
+         d_Qy = src1_buf_ctx->dev_buffer;
+-        qy_buf_offset = vk_tensor_offset(src1) + src1->view_offs;
++        qy_buf_offset = vk_tensor_dev_offset(src1);
+         GGML_ASSERT(d_Qy != nullptr);
+     }
+     if (qx_needs_dequant) {
+@@ -9389,6 +9447,11 @@ static bool ggml_vk_should_use_mmvq(const vk_device& device, uint32_t m, uint32_
+         return false;
+     }
+ 
++    // ARM Mali: MMVQ nur mit dem Mali-Pfad (Q4_K, 16-Byte-Loads); die generischen MMVQ-Kernel sind dort langsamer als dequant-f32
++    if (device->vendor_id == VK_VENDOR_ID_ARM) {
++        return src0_type == GGML_TYPE_Q4_K || (src0_type == GGML_TYPE_Q6_K && getenv("GGML_VK_ARM_NO_Q6K") == nullptr);   // q6_K-Mali-Pfad v2 (224-B-Repack), Abschalter GGML_VK_ARM_NO_Q6K
++    }
++
+     // q6_k only has 2-byte alignment which makes it somewhat problematic,
+     // using MMVQ is only a win on Intel.
+     bool mmvq_q6 = device->vendor_id == VK_VENDOR_ID_INTEL;
+@@ -9546,7 +9609,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
+     const uint64_t x_ne = ggml_nelements(src0);
+     const uint64_t y_ne = ggml_nelements(src1);
+ 
+-    const uint64_t qx_sz = ggml_vk_align_size(ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type), ctx->device->properties.limits.minStorageBufferOffsetAlignment);
++    const uint64_t qx_sz = ggml_vk_align_size(vk_is_q6k(src0) ? vk_q6k_dev_bytes_for(ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type)) : ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type), ctx->device->properties.limits.minStorageBufferOffsetAlignment);
+     const uint64_t x_sz = x_non_contig ? ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment) : qx_sz;
+     const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) :
+                          (f16_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
+@@ -10143,7 +10206,7 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
+     const uint64_t y_ne = (uint64_t)y_staged_row_stride * padded_n * ne12 * ne13;
+     const uint64_t d_ne = ggml_nelements(dst);
+ 
+-    const uint64_t qx_sz = ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type);
++    const uint64_t qx_sz = vk_is_q6k(src0) ? vk_q6k_dev_bytes_for(ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type)) : ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type);
+     const uint64_t qy_sz = ggml_type_size(src1->type) * ggml_nelements(src1) / ggml_blck_size(src1->type);
+     const uint64_t x_sz = !qx_needs_dequant ? qx_sz : sizeof(ggml_fp16_t) * x_ne;
+     const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) : (y_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
+@@ -10225,7 +10288,7 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
+     }
+ 
+     vk_buffer d_D = dst_buf_ctx->dev_buffer;
+-    const uint64_t d_buf_offset = vk_tensor_offset(dst) + dst->view_offs;
++    const uint64_t d_buf_offset = vk_tensor_dev_offset(dst);
+     GGML_ASSERT(d_D != nullptr);
+     vk_buffer d_X;
+     uint64_t x_buf_offset = 0;
+@@ -10233,17 +10296,17 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
+     uint64_t y_buf_offset = 0;
+     if (!src0_uma) {
+         d_Qx = src0_buf_ctx->dev_buffer;
+-        qx_buf_offset = vk_tensor_offset(src0) + src0->view_offs;
++        qx_buf_offset = vk_tensor_dev_offset(src0);
+         GGML_ASSERT(d_Qx != nullptr);
+     }
+     if (!src1_uma) {
+         d_Qy = src1_buf_ctx->dev_buffer;
+-        qy_buf_offset = vk_tensor_offset(src1) + src1->view_offs;
++        qy_buf_offset = vk_tensor_dev_offset(src1);
+         GGML_ASSERT(d_Qy != nullptr);
+     }
+     if (!ids_uma) {
+         d_ids = ids_buf_ctx->dev_buffer;
+-        ids_buf_offset = vk_tensor_offset(ids) + ids->view_offs;
++        ids_buf_offset = vk_tensor_dev_offset(ids);
+         GGML_ASSERT(d_ids != nullptr);
+     }
+     if (qx_needs_dequant) {
+@@ -10444,7 +10507,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
+     const uint64_t x_ne = ggml_nelements(src0);
+     const uint64_t y_ne = ggml_nelements(src1);
+ 
+-    const uint64_t qx_sz = ggml_vk_align_size(ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type), ctx->device->properties.limits.minStorageBufferOffsetAlignment);
++    const uint64_t qx_sz = ggml_vk_align_size(vk_is_q6k(src0) ? vk_q6k_dev_bytes_for(ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type)) : ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type), ctx->device->properties.limits.minStorageBufferOffsetAlignment);
+     const uint64_t x_sz = x_non_contig ? ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment) : qx_sz;
+     const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) :
+                                        (f16_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
+@@ -12371,7 +12434,7 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
+         }
+         if (!uma[i]) {
+             buf[i] = buf_ctx[i]->dev_buffer;
+-            offset[i] = vk_tensor_offset(tensors[i]) + tensors[i]->view_offs;
++            offset[i] = vk_tensor_dev_offset(tensors[i]);
+         }
+         GGML_ASSERT(buf[i] != nullptr);
+     }
+@@ -13014,6 +13077,16 @@ static void ggml_vk_repeat_back(ggml_backend_vk_context * ctx, vk_context& subct
+ }
+ 
+ static void ggml_vk_cpy(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
++    if (vk_is_q6k(src0) && vk_is_q6k(dst)) {
++        // gepolstertes Geraete-Layout (224 B/Block): kontiguierliche Byte-Kopie ueber die Geraetegroesse (nur contiguous unterstuetzt, s. supports_op)
++        GGML_ASSERT(ggml_is_contiguous(src0) && ggml_is_contiguous(dst));
++        vk_subbuffer sb = ggml_vk_tensor_subbuffer(ctx, src0);
++        vk_subbuffer db = ggml_vk_tensor_subbuffer(ctx, dst);
++        ggml_vk_sync_buffers(ctx, subctx);
++        ggml_vk_buffer_copy_async(subctx, db.buffer, db.offset, sb.buffer, sb.offset, vk_dev_nbytes(src0));
++        ggml_vk_sync_buffers(ctx, subctx);
++        return;
++    }
+     uint32_t ne = (uint32_t)ggml_nelements(src0);
+     if (ggml_is_quantized(src0->type) && ggml_is_quantized(dst->type)) {
+         // Convert from number of logical elements to 2- or 4-byte units.
+@@ -13219,7 +13292,7 @@ static void ggml_vk_rms_norm(ggml_backend_vk_context * ctx, vk_context& subctx,
+             }
+             if (!uma[i]) {
+                 buf[i] = buf_ctx[i]->dev_buffer;
+-                offset[i] = vk_tensor_offset(tensors[i]) + tensors[i]->view_offs;
++                offset[i] = vk_tensor_dev_offset(tensors[i]);
+             }
+             GGML_ASSERT(buf[i] != nullptr);
+         }
+@@ -13850,7 +13923,7 @@ static void ggml_vk_im2col(ggml_backend_vk_context * ctx, vk_context& subctx, co
+     const ggml_backend_vk_buffer_context * d_buf_ctx = (ggml_backend_vk_buffer_context *)dst->buffer->context;
+     const vk_buffer d_buf = d_buf_ctx->dev_buffer;
+ 
+-    const vk::DeviceAddress dst_addr = d_buf->bda_addr + vk_tensor_offset(dst) + dst->view_offs;
++    const vk::DeviceAddress dst_addr = d_buf->bda_addr + vk_tensor_dev_offset(dst);
+ 
+     ggml_vk_op_f32<vk_op_im2col_push_constants>(ctx, subctx, src0, src1, nullptr, nullptr, dst, GGML_OP_IM2COL, {
+         dst_addr,
+@@ -13892,7 +13965,7 @@ static void ggml_vk_im2col_3d(ggml_backend_vk_context * ctx, vk_context& subctx,
+     const ggml_backend_vk_buffer_context * d_buf_ctx = (ggml_backend_vk_buffer_context *)dst->buffer->context;
+     const vk_buffer d_buf = d_buf_ctx->dev_buffer;
+ 
+-    const vk::DeviceAddress dst_addr = d_buf->bda_addr + vk_tensor_offset(dst) + dst->view_offs;
++    const vk::DeviceAddress dst_addr = d_buf->bda_addr + vk_tensor_dev_offset(dst);
+ 
+     vk_op_im2col_3d_push_constants pc {};
+ 
+@@ -15199,16 +15272,16 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+             if (unsynced_nodes.size() == 0) {
+                 return false;
+             }
+-            auto n_base = vk_tensor_offset(node) + node->view_offs;
+-            auto n_size = ggml_nbytes(node);
++            auto n_base = vk_tensor_dev_offset(node);
++            auto n_size = vk_dev_nbytes(node);
+             ggml_backend_vk_buffer_context * a_buf_ctx = (ggml_backend_vk_buffer_context *)node->buffer->context;
+             vk_buffer a_buf = a_buf_ctx->dev_buffer;
+             for (auto &other : unsynced_nodes) {
+                 ggml_backend_vk_buffer_context * o_buf_ctx = (ggml_backend_vk_buffer_context *)other->buffer->context;
+                 vk_buffer o_buf = o_buf_ctx->dev_buffer;
+                 if (a_buf == o_buf) {
+-                    auto o_base = vk_tensor_offset(other) + other->view_offs;
+-                    auto o_size = ggml_nbytes(other);
++                    auto o_base = vk_tensor_dev_offset(other);
++                    auto o_size = vk_dev_nbytes(other);
+ 
+                     if ((o_base <= n_base && n_base < o_base + o_size) ||
+                         (n_base <= o_base && o_base < n_base + n_size)) {
+@@ -15863,6 +15936,46 @@ static enum ggml_status ggml_backend_vk_buffer_init_tensor(ggml_backend_buffer_t
+     return GGML_STATUS_SUCCESS;
+ }
+ 
++// q6_K: Host-Daten (210er-Stride) blockweise in das 224er-Geraete-Layout schreiben / zurueckholen (chunked)
++static void vk_q6k_write(vk_buffer & buf, uint64_t dev_base, const uint8_t * data, size_t offset, size_t size) {
++    if (getenv("GGML_VK_TRACE_ALLOC")) { fprintf(stderr, "[vk-alloc] q6k_write base=%llu off=%zu size=%zu\n", (unsigned long long)dev_base, offset, size); }
++    const size_t CHUNK_BLOCKS = 65536;   // ~14 MB Geraete-Bytes je Chunk
++    size_t pos = offset, end = offset + size;
++    std::vector<uint8_t> tmp;
++    while (pos < end) {
++        size_t chunk_end = std::min(end, (pos / VK_Q6K_BLK + CHUNK_BLOCKS) * VK_Q6K_BLK);
++        uint64_t d0 = vk_q6k_dev_pos(pos), d1 = vk_q6k_dev_pos(chunk_end - 1) + 1;
++        tmp.assign(d1 - d0, 0);
++        for (size_t q = pos; q < chunk_end; ) {
++            size_t within = q % VK_Q6K_BLK;
++            size_t n = std::min(chunk_end - q, (size_t)VK_Q6K_BLK - within);
++            memcpy(tmp.data() + (vk_q6k_dev_pos(q) - d0), data + (q - offset), n);
++            q += n;
++        }
++        ggml_vk_buffer_write(buf, dev_base + d0, tmp.data(), d1 - d0);
++        pos = chunk_end;
++    }
++}
++static void vk_q6k_read(vk_buffer & buf, uint64_t dev_base, uint8_t * data, size_t offset, size_t size) {
++    if (getenv("GGML_VK_TRACE_ALLOC")) { fprintf(stderr, "[vk-alloc] q6k_read base=%llu off=%zu size=%zu\n", (unsigned long long)dev_base, offset, size); }
++    const size_t CHUNK_BLOCKS = 65536;
++    size_t pos = offset, end = offset + size;
++    std::vector<uint8_t> tmp;
++    while (pos < end) {
++        size_t chunk_end = std::min(end, (pos / VK_Q6K_BLK + CHUNK_BLOCKS) * VK_Q6K_BLK);
++        uint64_t d0 = vk_q6k_dev_pos(pos), d1 = vk_q6k_dev_pos(chunk_end - 1) + 1;
++        tmp.resize(d1 - d0);
++        ggml_vk_buffer_read(buf, dev_base + d0, tmp.data(), d1 - d0);
++        for (size_t q = pos; q < chunk_end; ) {
++            size_t within = q % VK_Q6K_BLK;
++            size_t n = std::min(chunk_end - q, (size_t)VK_Q6K_BLK - within);
++            memcpy(data + (q - offset), tmp.data() + (vk_q6k_dev_pos(q) - d0), n);
++            q += n;
++        }
++        pos = chunk_end;
++    }
++}
++
+ static void ggml_backend_vk_buffer_memset_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, uint8_t value, size_t offset, size_t size) {
+     VK_LOG_DEBUG("ggml_backend_vk_buffer_memset_tensor(" << buffer << ", " << tensor << ", " << value << ", " << offset << ", " << size << ")");
+     ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)buffer->context;
+@@ -15873,7 +15986,11 @@ static void ggml_backend_vk_buffer_memset_tensor(ggml_backend_buffer_t buffer, g
+     }
+ 
+     uint32_t val32 = (uint32_t)value * 0x01010101;
+-    ggml_vk_buffer_memset(buf, vk_tensor_offset(tensor) + tensor->view_offs + offset, val32, size);
++    if (vk_is_q6k(tensor)) {
++        ggml_vk_buffer_memset(buf, vk_tensor_dev_offset(tensor) + vk_q6k_dev_pos(offset), val32, vk_q6k_dev_size(offset, size));
++    } else {
++        ggml_vk_buffer_memset(buf, vk_tensor_dev_offset(tensor) + offset, val32, size);
++    }
+ }
+ 
+ static void ggml_backend_vk_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+@@ -15885,7 +16002,11 @@ static void ggml_backend_vk_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml
+         return;
+     }
+ 
+-    ggml_vk_buffer_write(buf, vk_tensor_offset(tensor) + tensor->view_offs + offset, data, size);
++    if (vk_is_q6k(tensor)) {
++        vk_q6k_write(buf, vk_tensor_dev_offset(tensor), (const uint8_t *) data, offset, size);
++        return;
++    }
++    ggml_vk_buffer_write(buf, vk_tensor_dev_offset(tensor) + offset, data, size);
+ }
+ 
+ static void ggml_backend_vk_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset,
+@@ -15899,7 +16020,13 @@ static void ggml_backend_vk_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, g
+         return;
+     }
+ 
+-    ggml_vk_buffer_write_2d(buf, vk_tensor_offset(tensor) + tensor->view_offs + offset, data, stride_data, stride_tensor, size, n_copies);
++    if (vk_is_q6k(tensor)) {
++        for (size_t i = 0; i < n_copies; i++) {
++            vk_q6k_write(buf, vk_tensor_dev_offset(tensor), (const uint8_t *) data + i * stride_data, offset + i * stride_tensor, size);
++        }
++        return;
++    }
++    ggml_vk_buffer_write_2d(buf, vk_tensor_dev_offset(tensor) + offset, data, stride_data, stride_tensor, size, n_copies);
+ }
+ 
+ static void ggml_backend_vk_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+@@ -15912,7 +16039,11 @@ static void ggml_backend_vk_buffer_get_tensor(ggml_backend_buffer_t buffer, cons
+ 
+     vk_buffer buf = buf_ctx->dev_buffer;
+ 
+-    ggml_vk_buffer_read(buf, vk_tensor_offset(tensor) + tensor->view_offs + offset, data, size);
++    if (vk_is_q6k(tensor)) {
++        vk_q6k_read(buf, vk_tensor_dev_offset(tensor), (uint8_t *) data, offset, size);
++        return;
++    }
++    ggml_vk_buffer_read(buf, vk_tensor_dev_offset(tensor) + offset, data, size);
+ }
+ 
+ static void ggml_backend_vk_buffer_get_tensor_2d(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset,
+@@ -15927,7 +16058,13 @@ static void ggml_backend_vk_buffer_get_tensor_2d(ggml_backend_buffer_t buffer, c
+ 
+     vk_buffer buf = buf_ctx->dev_buffer;
+ 
+-    ggml_vk_buffer_read_2d(buf, vk_tensor_offset(tensor) + tensor->view_offs + offset, data, stride_tensor, stride_data, size, n_copies);
++    if (vk_is_q6k(tensor)) {
++        for (size_t i = 0; i < n_copies; i++) {
++            vk_q6k_read(buf, vk_tensor_dev_offset(tensor), (uint8_t *) data + i * stride_data, offset + i * stride_tensor, size);
++        }
++        return;
++    }
++    ggml_vk_buffer_read_2d(buf, vk_tensor_dev_offset(tensor) + offset, data, stride_tensor, stride_data, size, n_copies);
+ }
+ 
+ static bool ggml_backend_vk_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * src, ggml_tensor * dst) {
+@@ -15942,7 +16079,8 @@ static bool ggml_backend_vk_buffer_cpy_tensor(ggml_backend_buffer_t buffer, cons
+         vk_buffer src_buf = src_buf_ctx->dev_buffer;
+         vk_buffer dst_buf = dst_buf_ctx->dev_buffer;
+ 
+-        ggml_vk_buffer_copy(dst_buf, vk_tensor_offset(dst) + dst->view_offs, src_buf, vk_tensor_offset(src) + src->view_offs, ggml_nbytes(src));
++        GGML_ASSERT(vk_is_q6k(src) == vk_is_q6k(dst));
++        ggml_vk_buffer_copy(dst_buf, vk_tensor_dev_offset(dst), src_buf, vk_tensor_dev_offset(src), vk_dev_nbytes(src));
+ 
+         return true;
+     }
+@@ -16005,7 +16143,8 @@ static size_t ggml_backend_vk_buffer_type_get_max_size(ggml_backend_buffer_type_
+ }
+ 
+ static size_t ggml_backend_vk_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const ggml_tensor * tensor) {
+-    return ggml_nbytes(tensor);
++    if (getenv("GGML_VK_TRACE_ALLOC") && vk_is_q6k(tensor)) { fprintf(stderr, "[vk-alloc] alloc_size q6k %s nbytes=%zu dev=%zu\n", tensor->name, (size_t)ggml_nbytes(tensor), (size_t)vk_dev_nbytes(tensor)); }
++    return vk_dev_nbytes(tensor);   // q6_K: 224 B je Block auf dem Geraet
+ 
+     UNUSED(buft);
+ }
+@@ -16127,6 +16266,15 @@ static void ggml_backend_vk_set_tensor_2d_async(ggml_backend_t backend, ggml_ten
+ 
+     ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
+ 
++    // Q6K_ASYNC_FIX: q6_K muss repackt werden (224-B-Geraetelayout) -> synchroner Repack-Pfad (Loader-Chunks duerfen Bloecke teilen)
++    if (vk_is_q6k(tensor)) {
++        vk_buffer qbuf = buf_ctx->dev_buffer;
++        for (size_t i = 0; i < n_copies; i++) {
++            vk_q6k_write(qbuf, vk_tensor_dev_offset(tensor), (const uint8_t *) data + i * stride_data, offset + i * stride_tensor, size);
++        }
++        return;
++    }
++
+     vk_context cpy_ctx;
+ 
+     if (ctx->device->async_use_transfer_queue) {
+@@ -16137,7 +16285,7 @@ static void ggml_backend_vk_set_tensor_2d_async(ggml_backend_t backend, ggml_ten
+ 
+     vk_buffer buf = buf_ctx->dev_buffer;
+ 
+-    auto dst_offset = vk_tensor_offset(tensor) + tensor->view_offs + offset;
++    auto dst_offset = vk_tensor_dev_offset(tensor) + offset;
+ 
+     bool ret = ggml_vk_buffer_write_2d_async(cpy_ctx, buf, dst_offset, data, stride_data, stride_tensor, size, n_copies);
+ 
+@@ -16190,11 +16338,21 @@ static void ggml_backend_vk_get_tensor_2d_async(ggml_backend_t backend, const gg
+ 
+     ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
+ 
++    // Q6K_ASYNC_FIX: q6_K liegt repackt -> ausstehende Arbeit abschliessen, dann synchroner Repack-Read
++    if (vk_is_q6k(tensor)) {
++        ggml_vk_synchronize(ctx);
++        vk_buffer qbuf = buf_ctx->dev_buffer;
++        for (size_t i = 0; i < n_copies; i++) {
++            vk_q6k_read(qbuf, vk_tensor_dev_offset(tensor), (uint8_t *) data + i * stride_data, offset + i * stride_tensor, size);
++        }
++        return;
++    }
++
+     vk_context compute_ctx = ggml_vk_get_compute_ctx(ctx);
+ 
+     vk_buffer buf = buf_ctx->dev_buffer;
+ 
+-    auto src_offset = vk_tensor_offset(tensor) + tensor->view_offs + offset;
++    auto src_offset = vk_tensor_dev_offset(tensor) + offset;
+     bool ret = ggml_vk_buffer_read_2d_async(compute_ctx, buf, src_offset, data, stride_tensor, stride_data, size, n_copies);
+ 
+     if (!ret) {
+@@ -16258,14 +16416,24 @@ static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend_src, ggml_ba
+             return false;
+         }
+ 
++        // Q6K_ASYNC_FIX: vk->vk nur gleichartig (beide repackt), Geraete-Bytes kopieren
++        if (vk_is_q6k(src) != vk_is_q6k(dst)) {
++            return false;
++        }
++
+         vk_context compute_ctx = ggml_vk_get_compute_ctx(ctx);
+ 
+-        ggml_vk_buffer_copy_async(compute_ctx, dst_buf, vk_tensor_offset(dst) + dst->view_offs,
+-                                   src_buf_ctx->dev_buffer, vk_tensor_offset(src) + src->view_offs,
+-                                   ggml_nbytes(src));
++        ggml_vk_buffer_copy_async(compute_ctx, dst_buf, vk_tensor_dev_offset(dst),
++                                   src_buf_ctx->dev_buffer, vk_tensor_dev_offset(src),
++                                   vk_dev_nbytes(src));
+         return true;
+     }
+ 
++    // Q6K_ASYNC_FIX: host->vk fuer q6_K nicht async (kein Repack dort) -> Aufrufer faellt auf synchronen set_tensor zurueck
++    if (vk_is_q6k(dst)) {
++        return false;
++    }
++
+     if (ggml_backend_buffer_is_host(src->buffer)) {
+         vk_buffer pinned_buf = nullptr;
+         size_t pinned_offset = 0;
+@@ -16282,7 +16450,7 @@ static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend_src, ggml_ba
+         }
+ 
+         return ggml_vk_buffer_write_async(cpy_ctx, dst_buf,
+-                                          vk_tensor_offset(dst) + dst->view_offs,
++                                          vk_tensor_dev_offset(dst),
+                                           src->data, ggml_nbytes(src));
+     }
+ 
+@@ -16798,10 +16966,10 @@ static bool ggml_vk_tensors_overlap(const ggml_tensor * a, const ggml_tensor * b
+     ggml_backend_vk_buffer_context * b_buf_ctx = (ggml_backend_vk_buffer_context *)b->buffer->context;
+     vk_buffer b_buf = b_buf_ctx->dev_buffer;
+     if (a_buf == b_buf) {
+-        auto a_base = vk_tensor_offset(a) + a->view_offs;
+-        auto a_size = ggml_nbytes(a);
+-        auto b_base = vk_tensor_offset(b) + b->view_offs;
+-        auto b_size = ggml_nbytes(b);
++        auto a_base = vk_tensor_dev_offset(a);
++        auto a_size = vk_dev_nbytes(a);   // Q6K_ASYNC_FIX
++        auto b_base = vk_tensor_dev_offset(b);
++        auto b_size = vk_dev_nbytes(b);
+ 
+         if (elementwise && a_base == b_base && a_size == b_size) {
+             return false;
+@@ -18931,7 +19099,7 @@ static void ggml_vk_print_tensor(const ggml_tensor * tensor, const char * name)
+         ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
+ 
+         vk_buffer buffer_gpu = buf_ctx->dev_buffer;
+-        ggml_vk_buffer_read(buffer_gpu, vk_tensor_offset(tensor) + tensor->view_offs, tensor_data, tensor_size);
++        ggml_vk_buffer_read(buffer_gpu, vk_tensor_dev_offset(tensor), tensor_data, tensor_size);
+     }
+ 
+     std::cerr << "TENSOR CHECK " << name << " (" << tensor->name << "): " << ggml_op_name(tensor->op) << std::endl;
+@@ -19013,7 +19181,7 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
+             } else if (ggml_backend_buffer_is_vk(srci->buffer)) {
+                 ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)srci->buffer->context;
+                 vk_buffer& buffer_gpu = buf_ctx->dev_buffer;
+-                uint64_t offset = vk_tensor_offset(srci) + srci->view_offs;
++                uint64_t offset = vk_tensor_dev_offset(srci);
+                 if (!ggml_is_contiguous(srci) && ggml_vk_dim01_contiguous(srci)) {
+                     for (int i3 = 0; i3 < srci->ne[3]; i3++) {
+                         for (int i2 = 0; i2 < srci->ne[2]; i2++) {
+@@ -19462,7 +19630,7 @@ static void ggml_vk_check_results_1(ggml_backend_vk_context * ctx, ggml_cgraph *
+         ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
+ 
+         vk_buffer& buffer_gpu = buf_ctx->dev_buffer;
+-        uint64_t offset = vk_tensor_offset(tensor) + tensor->view_offs;
++        uint64_t offset = vk_tensor_dev_offset(tensor);
+         if (offset + tensor_size >= buffer_gpu->size) {
+             tensor_size = buffer_gpu->size - offset;
+         }
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp
+index 18d441e..1de73cd 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp
+@@ -2,16 +2,32 @@
+ 
+ #extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+ #extension GL_EXT_integer_dot_product : require
++#extension GL_KHR_shader_subgroup_basic : enable
++#extension GL_KHR_shader_subgroup_clustered : enable
+ 
+ #define MMQ
+ #define NEEDS_IQ1S_GRID_GPU
+ #define B_TYPE block_q8_1_x4
++#if defined(DATA_A_Q4_K)
++#define MALI_Q4K_WIDE 1
++#define MALI_WIDE 1
++#define B_TYPEV4 block_q8_1_x4_packed128
++#endif
++#if defined(DATA_A_Q6_K)
++#define MALI_Q6K_WIDE 1
++#define MALI_WIDE 1
++#define B_TYPEV4 block_q8_1_x4_packed128
++#endif
+ 
+ #include "mul_mat_vec_base.glsl"
+ 
+ layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+ 
+-#if defined(DATA_A_Q2_0) || defined(DATA_A_QUANT_K)
++#if defined(MALI_WIDE)
++#define K_PER_ITER 32
++layout (binding = 0) readonly buffer AQ4K4 {uvec4 data_a_q4k_v4[];};
++layout (binding = 0) readonly buffer AU32 {uint data_a_u32[];};
++#elif defined(DATA_A_Q2_0) || defined(DATA_A_QUANT_K)
+ #define K_PER_ITER 16
+ #elif defined(DATA_A_QUANT_LEGACY) || defined(DATA_A_MXFP4)
+ #define K_PER_ITER 8
+@@ -49,6 +65,13 @@ void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const
+         cache_b_qs[1] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + b_qs_idx * 4 + 1];
+         cache_b_qs[2] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + b_qs_idx * 4 + 2];
+         cache_b_qs[3] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + b_qs_idx * 4 + 3];
++#elif K_PER_ITER == 32 && defined(MALI_WIDE)
++        {
++            const ivec4 b0 = data_b_v4[b_block_idx_outer].qs[b_block_idx_inner * 2];
++            const ivec4 b1 = data_b_v4[b_block_idx_outer].qs[b_block_idx_inner * 2 + 1];
++            cache_b_qs[0] = b0.x; cache_b_qs[1] = b0.y; cache_b_qs[2] = b0.z; cache_b_qs[3] = b0.w;
++            cache_b_qs[4] = b1.x; cache_b_qs[5] = b1.y; cache_b_qs[6] = b1.z; cache_b_qs[7] = b1.w;
++        }
+ #elif K_PER_ITER == 32
+         cache_b_qs[0] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8    ];
+         cache_b_qs[1] = data_b[b_block_idx_outer].qs[b_block_idx_inner * 8 + 1];
+@@ -73,6 +96,90 @@ void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const
+     }
+ }
+ 
++#if defined(MALI_WIDE)
++#if defined(MALI_Q6K_WIDE)
++#define MALI_LPR 16u
++#else
++#define MALI_LPR 8u
++#endif
++// Mali: 8 Lanes je Zeile (Cluster), gl_SubgroupSize/8 Zeilen je Subgroup, BLOCK_SIZE/8 Zeilen je Workgroup.
++void mali_iter(inout FLOAT_TYPE temp[NUM_COLS], const uint row, const uint blk) {
++    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
++        const uint b_block_idx = (j*p.batch_stride_b) / QUANT_K_Q8_1 + blk + b_offset;
++        const uint b_block_idx_outer = b_block_idx / 4;
++        const uint b_block_idx_inner = b_block_idx % 4;
++        cache_b_ds = vec2(data_b[b_block_idx_outer].ds[b_block_idx_inner]);
++        const ivec4 b0 = data_b_v4[b_block_idx_outer].qs[b_block_idx_inner * 2];
++        const ivec4 b1 = data_b_v4[b_block_idx_outer].qs[b_block_idx_inner * 2 + 1];
++        cache_b_qs[0] = b0.x; cache_b_qs[1] = b0.y; cache_b_qs[2] = b0.z; cache_b_qs[3] = b0.w;
++        cache_b_qs[4] = b1.x; cache_b_qs[5] = b1.y; cache_b_qs[6] = b1.z; cache_b_qs[7] = b1.w;
++        const uint a_block_idx = (row * p.ncols) / QUANT_K_Q8_1 + blk + a_offset;
++        temp[j] += mmvq_dot_product(a_block_idx, 0);
++    }
++}
++
++void mali_compute(const uint row, const uint lane, const bool valid) {
++    get_offsets(a_offset, b_offset, d_offset);
++    a_offset *= QUANT_K / QUANT_K_Q8_1;
++    b_offset /= QUANT_K_Q8_1;
++
++    FLOAT_TYPE temp[NUM_COLS];
++    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) { temp[j] = FLOAT_TYPE(0.0f); }
++
++    const uint nblk = p.ncols / QUANT_K_Q8_1;
++    uint blk = lane;
++    // 4 Bloecke je Durchlauf (Loads unabhaengig -> mehr in Flight)
++    while (blk + 3u*MALI_LPR < nblk) {
++        mali_iter(temp, row, blk);
++        mali_iter(temp, row, blk + MALI_LPR);
++        mali_iter(temp, row, blk + 2u*MALI_LPR);
++        mali_iter(temp, row, blk + 3u*MALI_LPR);
++        blk += 4u*MALI_LPR;
++    }
++    if (blk + MALI_LPR < nblk) {
++        mali_iter(temp, row, blk);
++        mali_iter(temp, row, blk + MALI_LPR);
++        blk += 2u*MALI_LPR;
++    }
++    if (blk < nblk) {
++        mali_iter(temp, row, blk);
++    }
++    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) { temp[j] = subgroupClusteredAdd(temp[j], MALI_LPR); }
++    if (lane == 0 && valid) {
++        [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
++#ifdef MUL_MAT_ID
++            if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS0) != 0) {
++                temp[j] += FLOAT_TYPE(data_fuse0[expert_id*p.stride_d + row]);
++            }
++            if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE0) != 0) {
++                temp[j] *= FLOAT_TYPE(data_fuse0[gl_WorkGroupID.y]);
++            }
++            if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_SCALE1) != 0) {
++                temp[j] *= FLOAT_TYPE(data_fuse1[gl_WorkGroupID.y]);
++            }
++#else
++            if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS0) != 0) {
++                temp[j] += FLOAT_TYPE(data_fuse0[j*p.batch_stride_d + d_offset + row]);
++            }
++            if ((p.fusion_flags & MAT_VEC_FUSION_FLAGS_BIAS1) != 0) {
++                temp[j] += FLOAT_TYPE(data_fuse1[j*p.batch_stride_d + d_offset + row]);
++            }
++#endif
++            data_d[j*p.batch_stride_d + d_offset + row] = D_TYPE(temp[j]);
++        }
++    }
++}
++
++void main() {
++    const uint rows_per_sg = gl_SubgroupSize / MALI_LPR;
++    const uint rows_per_wg = (gl_WorkGroupSize.x / gl_SubgroupSize) * rows_per_sg;
++    const uint row = rows_per_wg * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z)
++                   + gl_SubgroupID * rows_per_sg + gl_SubgroupInvocationID / MALI_LPR;
++    const uint lane = gl_SubgroupInvocationID % MALI_LPR;
++    const bool valid = row < p.stride_d;
++    mali_compute(valid ? row : 0u, lane, valid);
++}
++#else
+ void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
+     const uint tid = gl_LocalInvocationID.x;
+ 
+@@ -139,3 +246,4 @@ void main() {
+         compute_outputs(first_row, p.stride_d - first_row);
+     }
+ }
++#endif // MALI_WIDE
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl
+index a5403ac..08388d8 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl
+@@ -310,8 +310,42 @@ FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+ }
+ #endif
+ 
+-#if defined(DATA_A_Q4_K) || defined(DATA_A_Q5_K)
+-// 4-byte loads for Q4_K blocks (144 bytes) and Q5_K blocks (176 bytes)
++#if defined(MALI_Q4K_WIDE)
++// Mali-Pfad Q4_K: Thread bearbeitet einen ganzen 32er-Subblock (= ein q8_1-Block): 16-Byte-Loads (Header + 2x qs),
++// Skalen/Min einmal je Subblock dekodiert, signed Int8-Dot (Nibbles 0..15 sind als signed Bytes positiv).
++FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
++    const uint ib_k  = ib_a / 8;
++    const uint sub   = ib_a % 8;          // Subblock j
++    const uint l     = sub >> 1;          // 64er-Chunk
++    const uint shift = (sub & 1) * 4;     // lo/hi-Nibble
++    const uvec4 h  = data_a_q4k_v4[ib_k * 9];
++    const uvec4 q0 = data_a_q4k_v4[ib_k * 9 + 1 + 2 * l];
++    const uvec4 q1 = data_a_q4k_v4[ib_k * 9 + 2 + 2 * l];
++    const vec2 dm = unpackHalf2x16(h.x);  // (d, dmin)
++    float sc, mb;
++    if (sub < 4) {
++        const uint sh = 8 * sub;
++        sc = float((h.y >> sh) & 63u); mb = float((h.z >> sh) & 63u);
++    } else {
++        const uint sh = 8 * (sub - 4);
++        const uint a = (h.w >> sh) & 0xFFu, b = (h.y >> sh) & 0xFFu, c = (h.z >> sh) & 0xFFu;
++        sc = float((a & 0xFu) | ((b >> 6) << 4)); mb = float((a >> 4) | ((c >> 6) << 4));
++    }
++    int32_t q_sum = 0;
++    q_sum += dotPacked4x8EXT(int((q0.x >> shift) & 0x0F0F0F0Fu), cache_b_qs[0]);
++    q_sum += dotPacked4x8EXT(int((q0.y >> shift) & 0x0F0F0F0Fu), cache_b_qs[1]);
++    q_sum += dotPacked4x8EXT(int((q0.z >> shift) & 0x0F0F0F0Fu), cache_b_qs[2]);
++    q_sum += dotPacked4x8EXT(int((q0.w >> shift) & 0x0F0F0F0Fu), cache_b_qs[3]);
++    q_sum += dotPacked4x8EXT(int((q1.x >> shift) & 0x0F0F0F0Fu), cache_b_qs[4]);
++    q_sum += dotPacked4x8EXT(int((q1.y >> shift) & 0x0F0F0F0Fu), cache_b_qs[5]);
++    q_sum += dotPacked4x8EXT(int((q1.z >> shift) & 0x0F0F0F0Fu), cache_b_qs[6]);
++    q_sum += dotPacked4x8EXT(int((q1.w >> shift) & 0x0F0F0F0Fu), cache_b_qs[7]);
++    return FLOAT_TYPE(float(cache_b_ds.x) * dm.x * sc * float(q_sum) - dm.y * mb * float(cache_b_ds.y));
++}
++#endif
++
++#if defined(DATA_A_Q5_K)
++// 4-byte loads for Q5_K blocks (176 bytes)
+ i32vec4 repack4(uint ib, uint iqs) {
+     const uint ib_k = ib / 8;
+     const uint iqs_k = (ib % 8) * 8 + iqs;
+@@ -319,14 +353,6 @@ i32vec4 repack4(uint ib, uint iqs) {
+     const uint qs_idx = (iqs_k / 16) * 8 + (iqs_k % 8);
+     const uint qs_shift = ((iqs_k % 16) / 8) * 4;
+ 
+-#if defined(DATA_A_Q4_K)
+-    const uint32_t vals0 = (data_a_packed32[ib_k].qs[qs_idx    ] >> qs_shift) & 0x0F0F0F0F;
+-    const uint32_t vals1 = (data_a_packed32[ib_k].qs[qs_idx + 1] >> qs_shift) & 0x0F0F0F0F;
+-    const uint32_t vals2 = (data_a_packed32[ib_k].qs[qs_idx + 2] >> qs_shift) & 0x0F0F0F0F;
+-    const uint32_t vals3 = (data_a_packed32[ib_k].qs[qs_idx + 3] >> qs_shift) & 0x0F0F0F0F;
+-
+-    return i32vec4(vals0, vals1, vals2, vals3);
+-#else // defined(DATA_A_Q5_K)
+     const uint qh_idx = iqs;
+     const uint qh_shift = iqs_k / 8;
+ 
+@@ -338,7 +364,6 @@ i32vec4 repack4(uint ib, uint iqs) {
+                   (((data_a_packed32[ib_k].qh[qh_idx + 2] >> qh_shift) & 0x01010101) << 4),
+                    ((data_a_packed32[ib_k].qs[qs_idx + 3] >> qs_shift) & 0x0F0F0F0F) |
+                   (((data_a_packed32[ib_k].qh[qh_idx + 3] >> qh_shift) & 0x01010101) << 4));
+-#endif
+ }
+ 
+ vec2 get_dm_scale(uint ib, uint iqs) {
+@@ -380,7 +405,42 @@ FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+ }
+ #endif
+ 
+-#if defined(DATA_A_Q6_K)
++#if defined(MALI_Q6K_WIDE)
++// Mali-Pfad Q6_K v2 auf 224-B-Geraete-Layout (Host-Repack): Block = 14 uvec4: ql 0..7, qh 8..11, scales 12, d in 13 (.x low half).
++// Thread = 32er-Subblock j (h=j/4 Haelfte, r=j%4). Wert 4(q-32) = ((q<<2)^0x80) als signed Byte; 2 Skalen (je 16 Elemente).
++FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
++    const uint ib_k = ib_a / 8;
++    const uint j = ib_a % 8;
++    const uint h = j >> 2, r = j & 3u;
++    const uint base = ib_k * 14u;
++    const uvec4 ql0 = data_a_q4k_v4[base + h * 4u + (r & 1u) * 2u];
++    const uvec4 ql1 = data_a_q4k_v4[base + h * 4u + (r & 1u) * 2u + 1u];
++    const uvec4 qh0 = data_a_q4k_v4[base + 8u + h * 2u];
++    const uvec4 qh1 = data_a_q4k_v4[base + 8u + h * 2u + 1u];
++    const uvec4 scv = data_a_q4k_v4[base + 12u];
++    const uint  dw  = data_a_q4k_v4[base + 13u].x;
++    const uint ql_shift = (r >> 1) * 4u;
++    const uint qh_shift = r * 2u;
++    // scales[h*8 + 2r], [h*8 + 2r + 1]: Wort (h*8+2r)/4 = 2h + (r>>1), Byte-Offset (2r)&3 = (r&1)*2
++    const uint scw = scv[2u * h + (r >> 1)] >> ((r & 1u) * 16u);
++    const float sc_a = float(int(scw << 24) >> 24);
++    const float sc_b = float(int((scw << 16) & 0xFF000000u) >> 24);
++    const float d = unpackHalf2x16(dw & 0xFFFFu).x;
++    int32_t qa = 0, qb = 0;
++    uint v;
++    v = ((((ql0.x >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh0.x >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qa = dotPacked4x8AccSatEXT(int(v), cache_b_qs[0], qa);
++    v = ((((ql0.y >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh0.y >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qa = dotPacked4x8AccSatEXT(int(v), cache_b_qs[1], qa);
++    v = ((((ql0.z >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh0.z >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qa = dotPacked4x8AccSatEXT(int(v), cache_b_qs[2], qa);
++    v = ((((ql0.w >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh0.w >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qa = dotPacked4x8AccSatEXT(int(v), cache_b_qs[3], qa);
++    v = ((((ql1.x >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh1.x >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qb = dotPacked4x8AccSatEXT(int(v), cache_b_qs[4], qb);
++    v = ((((ql1.y >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh1.y >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qb = dotPacked4x8AccSatEXT(int(v), cache_b_qs[5], qb);
++    v = ((((ql1.z >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh1.z >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qb = dotPacked4x8AccSatEXT(int(v), cache_b_qs[6], qb);
++    v = ((((ql1.w >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh1.w >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qb = dotPacked4x8AccSatEXT(int(v), cache_b_qs[7], qb);
++    return FLOAT_TYPE(float(cache_b_ds.x) * d * 0.25 * (sc_a * float(qa) + sc_b * float(qb)));
++}
++#endif
++
++#if defined(DATA_A_Q6_K) && !defined(MALI_Q6K_WIDE)
+ // 2-byte loads for Q6_K blocks (210 bytes)
+ i32vec4 repack4(uint ib, uint iqs) {
+     const uint ib_k = ib / 8;
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/types.glsl b/ggml/src/ggml-vulkan/vulkan-shaders/types.glsl
+index 9616a26..b314b28 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/types.glsl
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/types.glsl
+@@ -408,12 +408,14 @@ struct block_q5_K_packed128
+ 
+ #define QUANT_K_Q6_K 256
+ 
++// Q6K_DEV_PAD: Geraete-Layout 224 B je Block (210 + 14 Padding) -> 16-Byte-aligned; Host repackt bei set/get_tensor (Mali-Fork)
+ struct block_q6_K
+ {
+     uint8_t ql[QUANT_K_Q6_K/2];
+     uint8_t qh[QUANT_K_Q6_K/4];
+     int8_t scales[QUANT_K_Q6_K/16];
+     float16_t d;
++    uint8_t pad[14];
+ };
+ 
+ struct block_q6_K_packed16
+@@ -422,6 +424,7 @@ struct block_q6_K_packed16
+     uint16_t qh[QUANT_K_Q6_K/4/2];
+     int16_t scales[QUANT_K_Q6_K/16/2];
+     float16_t d;
++    uint16_t pad[7];
+ };
+ 
+ #if defined(DATA_A_Q6_K)

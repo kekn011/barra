@@ -1,0 +1,12 @@
+[Unit]
+Description=barra Dashboard-Steuerung (Panel an/aus per dispctl)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/opt/hwbridge/dashctl-loop.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

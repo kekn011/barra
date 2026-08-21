@@ -1,0 +1,20 @@
+#!/bin/bash
+# Wendet eine in barra-config vorgemerkte Benutzer-Umbenennung an - beim Boot, bevor
+# jemand eingeloggt ist (ein eingeloggter Benutzer kann sich nicht selbst umbenennen).
+# /etc/barra-rename enthaelt: "altname neuname".
+f=/etc/barra-rename
+[ -f "$f" ] || exit 0
+read -r old new _ < "$f"
+[ -n "$old" ] && [ -n "$new" ] || { rm -f "$f"; exit 0; }
+id "$old" >/dev/null 2>&1 || { rm -f "$f"; exit 0; }
+id "$new" >/dev/null 2>&1 && { rm -f "$f"; exit 0; }
+if pgrep -u "$old" >/dev/null 2>&1; then
+  logger -t barra-userrename "Umbenennung $old->$new verschoben: Prozesse von $old laufen noch"
+  exit 0
+fi
+usermod -l "$new" "$old" || { logger -t barra-userrename "usermod -l fehlgeschlagen"; exit 0; }
+[ -d "/home/$old" ] && usermod -d "/home/$new" -m "$new" 2>/dev/null
+getent group "$old" >/dev/null 2>&1 && groupmod -n "$new" "$old" 2>/dev/null
+for s in /etc/sudoers.d/*; do [ -f "$s" ] && sed -i "s/\b$old\b/$new/g" "$s" 2>/dev/null; done
+logger -t barra-userrename "Benutzer $old -> $new umbenannt"
+rm -f "$f"

@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in barra doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. barra depends on measured, reproducible facts —
+        the more concrete you are, the faster it gets fixed.
+  - type: input
+    id: build
+    attributes:
+      label: barra build
+      description: "Payload/image version and, if relevant, commit. From the node: `cat /data/adb/baseos/state` and the release tag you flashed."
+      placeholder: "v0.1.0 (payload v9, sha adc92d9a)"
+    validations:
+      required: true
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device
+      options:
+        - Pixel 8a (akita)
+        - Other (unsupported — please note this is not yet expected to work)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got. Include exact commands and output.
+    validations:
+      required: true
+  - type: textarea
+    id: measure
+    attributes:
+      label: How you measured it (for performance/behavior issues)
+      description: "Numbers with the method behind them. `barra-smi` output, timings, PPL, etc."
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "e.g. `/data/adb/baseos/boot.log`, `llmserver.sh log`, or `%LOCALAPPDATA%\\barra\\setup.log` for flashing issues."
+      render: text

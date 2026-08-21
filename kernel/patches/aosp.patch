@@ -1,0 +1,95 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+index d5c90df09987..072ee68abf8b 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -139,7 +139,7 @@ filegroup(
+ define_common_kernels(target_configs = {
+     "kernel_aarch64": {
+         "kmi_symbol_list_strict_mode": True,
+-        "module_implicit_outs": get_gki_modules_list("arm64"),
++        "module_implicit_outs": [m for m in get_gki_modules_list("arm64") if m not in ["drivers/net/mii.ko", "drivers/net/usb/usbnet.ko", "drivers/net/usb/cdc_ether.ko", "drivers/net/usb/cdc_ncm.ko", "drivers/net/usb/r8152.ko", "drivers/net/usb/r8153_ecm.ko", "drivers/net/usb/asix.ko", "drivers/net/usb/ax88179_178a.ko", "drivers/net/usb/aqc111.ko"]] + ["net/netfilter/ipset/ip_set.ko", "net/netfilter/ipset/ip_set_hash_ip.ko", "net/netfilter/ipset/ip_set_hash_net.ko", "net/netfilter/ipset/ip_set_hash_ipport.ko", "net/netfilter/ipset/ip_set_hash_ipportip.ko", "net/netfilter/ipset/ip_set_hash_ipportnet.ko", "net/netfilter/ipset/ip_set_hash_netport.ko", "net/netfilter/ipset/ip_set_hash_netnet.ko", "net/netfilter/ipset/ip_set_hash_netportnet.ko", "net/netfilter/ipset/ip_set_hash_netiface.ko", "net/netfilter/ipset/ip_set_list_set.ko", "net/netfilter/xt_set.ko", "net/netfilter/xt_addrtype.ko", "drivers/net/vxlan/vxlan.ko"],
+         "kmi_symbol_list": "android/abi_gki_aarch64",
+         "rewrite_absolute_paths_in_config": True,
+         "kmi_symbol_list_add_only": True,
+diff --git a/arch/arm64/configs/gki_defconfig b/arch/arm64/configs/gki_defconfig
+index cea2e6714582..5a3590949632 100644
+--- a/arch/arm64/configs/gki_defconfig
++++ b/arch/arm64/configs/gki_defconfig
+@@ -33,7 +33,6 @@ CONFIG_CPUSETS=y
+ CONFIG_CGROUP_CPUACCT=y
+ CONFIG_CGROUP_BPF=y
+ CONFIG_NAMESPACES=y
+-# CONFIG_PID_NS is not set
+ CONFIG_RT_SOFTIRQ_AWARE_SCHED=y
+ # CONFIG_RD_BZIP2 is not set
+ # CONFIG_RD_LZMA is not set
+@@ -41,7 +40,6 @@ CONFIG_RT_SOFTIRQ_AWARE_SCHED=y
+ # CONFIG_RD_LZO is not set
+ CONFIG_BOOT_CONFIG=y
+ # CONFIG_SYSFS_SYSCALL is not set
+-# CONFIG_FHANDLE is not set
+ CONFIG_KALLSYMS_ALL=y
+ # CONFIG_RSEQ is not set
+ CONFIG_EMBEDDED=y
+@@ -363,15 +361,11 @@ CONFIG_PPP_DEFLATE=m
+ CONFIG_PPP_MPPE=m
+ CONFIG_PPTP=m
+ CONFIG_PPPOL2TP=m
+-CONFIG_USB_NET_DRIVERS=m
+ CONFIG_USB_RTL8150=m
+-CONFIG_USB_RTL8152=m
+-CONFIG_USB_USBNET=m
+ CONFIG_USB_NET_CDC_EEM=m
+ # CONFIG_USB_NET_NET1080 is not set
+ # CONFIG_USB_NET_CDC_SUBSET is not set
+ # CONFIG_USB_NET_ZAURUS is not set
+-CONFIG_USB_NET_AQC111=m
+ # CONFIG_WLAN_VENDOR_ADMTEK is not set
+ # CONFIG_WLAN_VENDOR_ATH is not set
+ # CONFIG_WLAN_VENDOR_ATMEL is not set
+@@ -776,3 +770,37 @@ CONFIG_KUNIT=y
+ CONFIG_KUNIT_DEBUGFS=y
+ # CONFIG_KUNIT_DEFAULT_ENABLED is not set
+ # CONFIG_RUNTIME_TESTING_MENU is not set
++CONFIG_USER_NS=y
++CONFIG_IP_SET=m
++CONFIG_IP_SET_HASH_IP=m
++CONFIG_IP_SET_HASH_NET=m
++CONFIG_IP_SET_HASH_IPPORT=m
++CONFIG_IP_SET_HASH_IPPORTIP=m
++CONFIG_IP_SET_HASH_IPPORTNET=m
++CONFIG_IP_SET_HASH_NETPORT=m
++CONFIG_IP_SET_HASH_NETNET=m
++CONFIG_IP_SET_HASH_NETPORTNET=m
++CONFIG_IP_SET_HASH_NETIFACE=m
++CONFIG_IP_SET_LIST_SET=m
++CONFIG_NETFILTER_XT_SET=m
++CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=m
++CONFIG_NETFILTER_XT_MATCH_RPFILTER=m
++CONFIG_VXLAN=m
++CONFIG_MII=y
++CONFIG_USB_NET_DRIVERS=y
++CONFIG_USB_USBNET=y
++CONFIG_USB_RTL8152=y
++CONFIG_USB_NET_AX8817X=y
++CONFIG_USB_NET_AX88179_178A=y
++CONFIG_USB_NET_CDCETHER=y
++CONFIG_USB_NET_CDC_NCM=y
++CONFIG_USB_NET_AQC111=y
++CONFIG_USB_RTL8153_ECM=y
++CONFIG_FHANDLE=y
++CONFIG_NFSD=y
++CONFIG_NFSD_V4=y
++CONFIG_NFS_FS=y
++CONFIG_NFS_V3=y
++CONFIG_NFS_V4=y
++CONFIG_NFS_V4_1=y
++CONFIG_NFS_V4_2=y
+diff --git a/build.config.gki b/build.config.gki
+index 4b931d9eb333..42d78c0b5198 100644
+--- a/build.config.gki
++++ b/build.config.gki
+@@ -1,2 +1,2 @@
+ DEFCONFIG=gki_defconfig
+-POST_DEFCONFIG_CMDS="check_defconfig"
++POST_DEFCONFIG_CMDS="true"

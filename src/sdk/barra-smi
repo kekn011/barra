@@ -1,0 +1,77 @@
+#!/bin/sh
+# barra-smi — System Management Interface for barra nodes (nvidia-smi lookalike).
+# Shows utilization, clocks, temperatures and bridge status of the Tensor G3
+# accelerators (GPU / TPU / DSP) plus CPU, memory and battery.
+#   barra-smi            one snapshot
+#   barra-smi -l [SEC]   loop every SEC seconds (default 2)
+# Data sources are sysfs only (readable from the container); utilization for
+# TPU (active cycle delta / 1.119 GHz) and DSP (job rate / 400 jobs/s) is
+# sampled over a 0.5 s window, GPU comes from the Mali utilization node.
+set -u
+GPU_UTIL=/sys/devices/platform/1f000000.mali/utilization
+GPU_FREQ=/sys/class/misc/mali0/device/cur_freq            # kHz
+TPU_FREQ=/sys/class/devfreq/1a000000.rio/cur_freq          # Hz
+TPU_CYC=/sys/class/edgetpu/edgetpu-soc/device/tpu_active_cycle_count
+DSP_FREQ=/sys/class/devfreq/20c00000.callisto/cur_freq     # Hz
+DSP_JOBS=/sys/devices/platform/20c00000.callisto/dsp_workload_count
+BRIDGE=/opt/hwbridge
+TPU_HZ=1119000000        # rated TPU clock for the busy-fraction estimate
+DSP_REF_JPS=400          # measured saturation is ~550-660 jobs/s; 400 = conservative 100 %
+
+rd(){ cat "$1" 2>/dev/null || echo ""; }
+num(){ v=$(rd "$1"); v=${v%% *}; case "$v" in ''|*[!0-9]*) echo 0;; *) echo "$v";; esac; }
+
+tz_temp(){  # $1 = thermal zone type -> degrees C (integer) or "-"
+  for z in /sys/class/thermal/thermal_zone*; do
+    [ "$(rd $z/type)" = "$1" ] || continue
+    t=$(num $z/temp)
+    if [ "$t" -gt 1000 ]; then echo $((t/1000)); else echo "$t"; fi
+    return
+  done
+  echo "-"
+}
+
+sock(){ [ -S "$BRIDGE/$1" ] && echo "up" || echo "DOWN"; }
+
+snapshot(){
+  # --- sample window (0.5 s) for the delta counters ---
+  tpu0=$(num $TPU_CYC); dsp0=$(num $DSP_JOBS)
+  cpu0=$(awk '/^cpu /{print $2+$3+$4+$6+$7+$8, $5}' /proc/stat)
+  sleep 0.5
+  tpu1=$(num $TPU_CYC); dsp1=$(num $DSP_JOBS)
+  cpu1=$(awk '/^cpu /{print $2+$3+$4+$6+$7+$8, $5}' /proc/stat)
+
+  gpu_u=$(num $GPU_UTIL)
+  gpu_f=$(( $(num $GPU_FREQ) / 1000 ))
+  tpu_f=$(( $(num $TPU_FREQ) / 1000000 ))
+  dsp_f=$(( $(num $DSP_FREQ) / 1000000 ))
+  tpu_u=$(awk -v a="$tpu0" -v b="$tpu1" -v hz=$TPU_HZ 'BEGIN{d=b-a; if(d<0)d=0; p=100*d/(0.5*hz); if(p>100)p=100; printf "%d", p}')
+  dsp_u=$(awk -v a="$dsp0" -v b="$dsp1" -v r=$DSP_REF_JPS 'BEGIN{d=b-a; if(d<0)d=0; p=100*(d/0.5)/r; if(p>100)p=100; printf "%d", p}')
+  cpu_u=$(echo "$cpu0 $cpu1" | awk '{b=$3-$1; i=$4-$2; t=b+i; if(t<=0){print 0} else printf "%d", 100*b/t}')
+
+  t_gpu=$(tz_temp G3D); t_tpu=$(tz_temp TPU); t_soc=$(tz_temp soc_therm)
+
+  mem=$(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{printf "%.1f / %.1f GiB free", a/1048576, t/1048576}' /proc/meminfo)
+  bat_c=$(num /sys/class/power_supply/battery/capacity)
+  bat_s=$(rd /sys/class/power_supply/battery/status)
+  bat_t=$(num /sys/class/power_supply/battery/temp)
+
+  ver=$(pkg-config --modversion barra 2>/dev/null || echo "0.2.0")
+  printf 'barra-smi        %s        libbarra %s\n' "$(date '+%a %b %e %H:%M:%S %Y')" "$ver"
+  printf '+------+-------+-----------+-------+---------------------------+\n'
+  printf '| %-4s | %5s | %9s | %5s | %-25s |\n' "Dev" "Util" "Clock" "Temp" "Bridge"
+  printf '+------+-------+-----------+-------+---------------------------+\n'
+  printf '| %-4s | %4s%% | %5s MHz | %4sC | %-25s |\n' "GPU"  "$gpu_u" "$gpu_f" "$t_gpu" "gpu $(sock gpu.sock) / zc $(sock gpuzc.sock)"
+  printf '| %-4s | %4s%% | %5s MHz | %4sC | %-25s |\n' "TPU"  "$tpu_u" "$tpu_f" "$t_tpu" "tpu $(sock tpu.sock)"
+  printf '| %-4s | %4s%% | %5s MHz | %5s | %-25s |\n' "DSP"  "$dsp_u" "$dsp_f" "-"      "gxp $(sock gxp.sock)"
+  printf '| %-4s | %4s%% | %9s | %4sC | %-25s |\n' "CPU"  "$cpu_u" "-"       "$t_soc" "audio $(sock audio.sock)"
+  printf '+------+-------+-----------+-------+---------------------------+\n'
+  printf 'Memory: %s   Battery: %s%% (%s, %s.%sC)\n' "$mem" "$bat_c" "${bat_s:-?}" "$((bat_t/10))" "$((bat_t%10))"
+}
+
+case "${1:-}" in
+  -l) iv=${2:-2}
+      while :; do clear 2>/dev/null || printf '\033[2J\033[H'; snapshot; sleep "$iv"; done;;
+  -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//';;
+  *) snapshot;;
+esac

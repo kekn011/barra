@@ -1,0 +1,45 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// ggml-barra v2.4 (16x8, q gechunkt, k+v GEMERGT): wie rope_qk_l4, aber k kommt aus dem kv-Package
+// (Zeile = [k(1024) | v(1024)] int16, Stride 2048). Workgroup=(head-row 0..39, token), 16 Threads.
+layout(local_size_x=16) in;
+layout(std430,binding=0) readonly  buffer Q1B { uint q1b[]; };       // q Haelfte 1 int16 [S,2048] (Heads 0..15)
+layout(std430,binding=1) readonly  buffer Q2B { uint q2b[]; };       // q Haelfte 2 int16 [S,2048] (Heads 16..31)
+layout(std430,binding=2) readonly  buffer KVB { uint kvb[]; };       // kv int16 [S,2048] = [k|v]
+layout(std430,binding=3) writeonly buffer QK  { float16_t qk[]; };   // q f16 [S*4096] + k f16 [S*1024]
+layout(std430,binding=4) readonly  buffer AUX { float aux[]; };
+layout(std430,binding=5) readonly  buffer SR  { float srow[]; };
+layout(push_constant) uniform P { float q1osc; float q1ozp; float q2osc; float q2ozp; float kosc; float kozp; float eps; uint gqo; uint gko; uint tabo; } pc;
+shared float red[16];
+shared float srms;
+void main(){
+  uint hr=gl_WorkGroupID.x, t=gl_WorkGroupID.y, tid=gl_LocalInvocationID.x;
+  bool isq = hr<32u;
+  uint j = tid*4u;
+  uint w0a,w0b,w1a,w1b; float osc, ozp;
+  if(hr<16u){ uint rb=t*2048u+hr*128u; uint b=(rb+j)>>1; w0a=q1b[b]; w0b=q1b[b+1u]; uint b2=(rb+64u+j)>>1; w1a=q1b[b2]; w1b=q1b[b2+1u]; osc=pc.q1osc; ozp=pc.q1ozp; }
+  else if(hr<32u){ uint rb=t*2048u+(hr-16u)*128u; uint b=(rb+j)>>1; w0a=q2b[b]; w0b=q2b[b+1u]; uint b2=(rb+64u+j)>>1; w1a=q2b[b2]; w1b=q2b[b2+1u]; osc=pc.q2osc; ozp=pc.q2ozp; }
+  else   { uint rb=t*2048u+(hr-32u)*128u; uint b=(rb+j)>>1; w0a=kvb[b]; w0b=kvb[b+1u]; uint b2=(rb+64u+j)>>1; w1a=kvb[b2]; w1b=kvb[b2+1u]; osc=pc.kosc; ozp=pc.kozp; }
+  float sf = osc*srow[t];
+  float f0[4], f1[4]; float ss=0.0;
+  f0[0]=(float(bitfieldExtract(int(w0a),0,16))-ozp)*sf; f0[1]=(float(bitfieldExtract(int(w0a),16,16))-ozp)*sf;
+  f0[2]=(float(bitfieldExtract(int(w0b),0,16))-ozp)*sf; f0[3]=(float(bitfieldExtract(int(w0b),16,16))-ozp)*sf;
+  f1[0]=(float(bitfieldExtract(int(w1a),0,16))-ozp)*sf; f1[1]=(float(bitfieldExtract(int(w1a),16,16))-ozp)*sf;
+  f1[2]=(float(bitfieldExtract(int(w1b),0,16))-ozp)*sf; f1[3]=(float(bitfieldExtract(int(w1b),16,16))-ozp)*sf;
+  for(int u=0;u<4;u++) ss+=f0[u]*f0[u]+f1[u]*f1[u];
+  red[tid]=ss; barrier();
+  if(tid<8u) red[tid]+=red[tid+8u]; barrier();
+  if(tid<4u) red[tid]+=red[tid+4u]; barrier();
+  if(tid==0u) srms=inversesqrt((red[0]+red[1]+red[2]+red[3])/128.0+pc.eps); barrier();
+  float rms=srms;
+  uint gb = isq?pc.gqo:pc.gko;
+  uint outbase = isq ? (t*4096u+hr*128u) : (2097152u + t*1024u + (hr-32u)*128u);
+  for(int u=0;u<4;u++){
+    float g0=f0[u]*rms*aux[gb+j+uint(u)];
+    float g1=f1[u]*rms*aux[gb+64u+j+uint(u)];
+    float c =aux[pc.tabo        +t*64u+j+uint(u)];
+    float sn=aux[pc.tabo+32768u +t*64u+j+uint(u)];
+    qk[outbase+j+uint(u)]      = float16_t(g0*c-g1*sn);
+    qk[outbase+64u+j+uint(u)]  = float16_t(g1*c+g0*sn);
+  }
+}

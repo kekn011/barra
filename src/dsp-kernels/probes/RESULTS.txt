@@ -1,0 +1,27 @@
+FLIX/TIE legality sweep (16.8.) -- 12 verbatim reference bundles from inbuilt.elf spliced
+into the sync_submitter slot and executed on the Callisto core via gxpd3 selftest (isolated
+process each, GXPD_CACHE=1). Config: XtensaTools-14.09 / xt-clang 10.0.1, 64-bit FLIX,
+op0(low nibble of first byte)=0xf -> 2 slots, =0xe -> 3 slots.
+
+bundle(addr) op0  first-byte  result
+  f2a  (0x2a)  f   cf   RAN  st=0 (harmless, mem unchanged)
+  fb8  (0xb8)  f   7f   FAULT EXCCAUSE 201 exctype1 (illegal op) EPC1 efe00a72
+  fc0  (0xc0)  f   ff   RAN  st=0 (control: mem echoed unchanged 1 2 3 4)
+  fd3  (0xd3)  f   4f   RAN  st=0
+  fe3  (0xe3)  f   af   RAN  st=0
+  f110 (0x110) f   cf   RAN  st=0 but CLOBBERS pointer reg a3 (marker read stray addr)
+  f190 (0x190) f   cf   FAULT EXCCAUSE 103 exctype3 excvaddr=EPC (control-transfer to bad addr)
+  f93  (0x93)  f   2f   RAN  st=0
+  f202 (0x202) f   2f   RAN  st=0
+  efd  (0xfd)  e   8e   FAULT EXCCAUSE 201 (illegal)
+  e1079(0x1079)e   6e   FAULT EXCCAUSE 201 (illegal)
+  e1185(0x1185)e   7e   FAULT EXCCAUSE 201 (illegal)
+
+Conclusion: the op0=0xf 2-slot FLIX FORMAT is decoded+executed by the core in the user-kernel
+context (7/9 op0=f bundles ran, PC continued). This overturns "FLIX unreachable": that was a
+TOOLCHAIN limit (esp-elf can't assemble TIE), not a hardware one -- verbatim byte-splice runs.
+Ceiling that REMAINS: (1) op0=0xe format faults illegal (201) in this context; (2) specific
+op0=f op encodings are still illegal (fb8); (3) RUNNING != COMPUTING -- to get verified vector
+math we still need the TIE op semantics + vector load/store encodings with correct register
+setup. Next: empirical semantics -- sweep op0=f bundles that DO drive memory via a controlled
+address in a3, dump full buffer, correlate input->output to decode the vector load/MAC/store ops.

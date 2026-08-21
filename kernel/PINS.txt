@@ -1,0 +1,19 @@
+# Exact source pins for the shipped barra kernel (see README.md).
+# Workspace: repo init -u https://android.googlesource.com/kernel/manifest -b android-gs-akita-android16
+# Only aosp/ carries a local change (patches/aosp.patch); all other projects are clean at their pin.
+
+aosp                                HEAD=bde5fd109bd869563dfac689f1eed0c40aff28ff  (+ patches/aosp.patch)
+private/devices/google/akita        HEAD=b40eeb239b427c31762bcb1fcd0ac74ad54bd625
+private/devices/google/zuma         HEAD=eb90f2862e78b4c409ff992e116c44e81f836e9e
+private/devices/google/common       HEAD=397babd94c06783d8430c838475955f0b6ff63c2
+private/google-modules/amplifiers   HEAD=aba0cca145df5e55d1c5c4294a90bc382b0d2ec1
+private/google-modules/aoc          HEAD=cda4de7727f019dd432f5ad0748d7e025069e362
+private/google-modules/aoc_ipc      HEAD=13f181684aec31f2329f1ed8806a351b7e0befc1
+private/google-modules/bms          HEAD=0dc346205b6bd3fdc5a963df1ceffb625eae001e
+private/google-modules/gpu          HEAD=c009f0a10bf01666ee94f7a3f96e8ad1f122a2ed
+private/google-modules/lwis         HEAD=d44129763e045e0e6a5b12ca77f2255d8c372989
+private/google-modules/misc         HEAD=9eac86cd1621e0fdf7638a0b123bc2e83b0586e6
+private/google-modules/nfc          HEAD=b53ac218abc51ffe46537063639f28ac3a3e9a4a
+private/google-modules/perf         HEAD=7de380977283cc556eb6d00f68acb45f34c37eab
+private/google-modules/trusty       HEAD=a246a43b65f94226030655a9c6087addbbb9168e
+private/google-modules/typec        HEAD=333f14ac78cd2294343ed3edbf917776b13f4c43

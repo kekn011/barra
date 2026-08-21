@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// row-softmax in place MIT kausaler Maske: Zeile i sieht nur Spalten 0..i, Rest wird 0.
+layout(local_size_x=128) in;
+layout(std430,binding=0) buffer SB { float16_t s[]; };
+layout(push_constant) uniform P { uint S; } pc;
+shared float red[128];
+void main(){
+  uint S=pc.S;
+  uint row=gl_WorkGroupID.x;      // = h*S+i
+  uint i=row%S; uint lim=i+1u;    // kausal: nur 0..i
+  uint base=row*S;
+  uint tid=gl_LocalInvocationID.x;
+  float m=-1e30;
+  for(uint c=tid;c<lim;c+=128u) m=max(m,float(s[base+c]));
+  red[tid]=m; barrier();
+  for(uint off=64u;off>0u;off>>=1u){ if(tid<off) red[tid]=max(red[tid],red[tid+off]); barrier(); }
+  float mx=red[0]; barrier();
+  float sum=0.0;
+  for(uint c=tid;c<lim;c+=128u){ float e=exp(float(s[base+c])-mx); s[base+c]=float16_t(e); sum+=e; }
+  red[tid]=sum; barrier();
+  for(uint off=64u;off>0u;off>>=1u){ if(tid<off) red[tid]+=red[tid+off]; barrier(); }
+  float inv=1.0/red[0]; barrier();
+  for(uint c=tid;c<lim;c+=128u) s[base+c]=float16_t(float(s[base+c])*inv);
+  for(uint c=lim+tid;c<S;c+=128u) s[base+c]=float16_t(0.0);   // Maske ausnullen fuer A*V
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=barra: vorgemerkte Benutzer-Umbenennung anwenden
+After=local-fs.target
+Before=systemd-user-sessions.service ssh.service sshd.service
+ConditionPathExists=/etc/barra-rename
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/barra-apply-rename
+
+[Install]
+WantedBy=multi-user.target

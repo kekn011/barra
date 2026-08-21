@@ -1,0 +1,46 @@
+#!/bin/bash
+# barra-firstboot - laeuft EINMAL beim ersten Boot eines frisch geflashten Images
+# (Marker /etc/barra-firstboot.pending, wird vom Image-Bake gesetzt). Macht jeden
+# Node eindeutig und sicher: neue SSH-Host-Keys, neue machine-id, eindeutiger
+# Hostname, Passwort-Aenderung beim ersten Login erzwingen.
+M=/etc/barra-firstboot.pending
+[ -f "$M" ] || exit 0
+logger -t barra-firstboot "Erst-Boot-Einrichtung startet"
+
+# 1) SSH-Host-Keys neu (identische Keys auf allen Nodes waeren ein Sicherheitsproblem)
+rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
+ssh-keygen -A >/dev/null 2>&1 && logger -t barra-firstboot "SSH-Host-Keys neu erzeugt"
+
+# 2) machine-id neu (sonst DHCP/systemd-Kollisionen zwischen Nodes)
+rm -f /etc/machine-id /var/lib/dbus/machine-id
+systemd-machine-id-setup >/dev/null 2>&1
+[ -f /etc/machine-id ] && ln -sf /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
+
+# Pre-Einrichtung durch die Setup-GUI? Dann sind Hostname/Benutzer/Passwort schon gesetzt.
+PRE=0; [ -f /var/lib/barra/preconfigured ] && PRE=1
+# 3) Eindeutiger Hostname: barra-<4 hex aus machine-id>, nur wenn noch Default (und nicht vorkonfiguriert)
+cur=$(hostname)
+[ $PRE = 1 ] && cur=preconfigured
+case "$cur" in ubuntu|localhost|barra|"")
+  suf=$(cut -c1-4 /etc/machine-id 2>/dev/null); [ -z "$suf" ] && suf=$(head -c 2 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  h="barra-$suf"
+  hostnamectl set-hostname "$h" 2>/dev/null || { echo "$h" >/etc/hostname; hostname "$h"; }
+  if grep -q '127.0.1.1' /etc/hosts; then sed -i "s/^127.0.1.1.*/127.0.1.1\t$h/" /etc/hosts; else printf '127.0.1.1\t%s\n' "$h" >>/etc/hosts; fi
+  logger -t barra-firstboot "Hostname gesetzt: $h";;
+esac
+
+# 4) Passwort-Aenderung beim ersten Login erzwingen (Default ubuntu/ubuntu darf nicht bleiben) - NICHT bei Pre-Einrichtung
+if [ $PRE = 0 ]; then
+  u=$(getent passwd 1001 | cut -d: -f1); [ -z "$u" ] && u=ubuntu
+  id "$u" >/dev/null 2>&1 && chage -d 0 "$u" 2>/dev/null && logger -t barra-firstboot "Passwortwechsel fuer $u beim ersten Login erzwungen"
+fi
+
+# 4b) Linker-Cache neu: das Image traegt libbarra (/usr/local/lib), der gebackene ld.so.cache kennt sie nicht
+ldconfig 2>/dev/null && logger -t barra-firstboot "ldconfig ausgefuehrt (libbarra)"
+
+# 5) KEIN 'systemctl restart ssh' hier: dieser Dienst ist Before=ssh.service - ein
+#    blockierender restart wartet auf sich selbst -> Deadlock, alle Folgedienste haengen
+#    (16.8. am ersten Node erlebt). ssh startet NACH uns ohnehin frisch mit den neuen Keys.
+
+rm -f "$M"
+logger -t barra-firstboot "Erst-Boot-Einrichtung fertig"

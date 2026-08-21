@@ -1,0 +1,47 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+// QK^T aus f16-q/k (nach RoPE/Norm, GQA), gemm_best-Geometrie (8x8/Thread). Beide Seiten *1/16
+// gegen f16-Overflow (k-Werte bis ~270), Postskala = 256/sqrt(128) host-seitig.
+#define TM 128
+#define TN 128
+#define TK 32
+#define MM 8
+#define MNV 2
+#define S 512u
+#define KOFF 2097152u
+layout(local_size_x=16,local_size_y=16) in;
+layout(std430,binding=0) readonly  buffer QK { float16_t qk[]; };  // q [S,4096] + k [S,1024]
+layout(std430,binding=1) writeonly buffer SC { float16_t sc[]; };
+layout(push_constant) uniform P { float postscale; } pc;
+shared f16vec4 As[TM][TK/4];
+shared f16vec4 Bs[TK][TN/4];
+void main(){
+  const float16_t PRE=float16_t(0.0625);
+  uint h=gl_WorkGroupID.z; uint qch=h*128u, kch=(h/4u)*128u;
+  uint tx=gl_LocalInvocationID.x, ty=gl_LocalInvocationID.y;
+  uint brow=gl_WorkGroupID.y*TM, bcol=gl_WorkGroupID.x*TN; uint tid=ty*16u+tx; const uint NT=256u;
+  f16vec4 acc[MM][MNV]; [[unroll]] for(int i=0;i<MM;i++)[[unroll]] for(int v=0;v<MNV;v++) acc[i][v]=f16vec4(0.0);
+  for(uint k0=0u;k0<128u;k0+=TK){
+    for(uint idx=tid; idx<TM*(TK/4); idx+=NT){ uint r=idx/(TK/4), cc=idx%(TK/4);
+      uint base=(brow+r)*4096u + qch + k0 + cc*4u;
+      As[r][cc]=f16vec4(qk[base],qk[base+1u],qk[base+2u],qk[base+3u])*PRE; }
+    for(uint idx=tid; idx<TK*(TN/4); idx+=NT){ uint r=idx/(TN/4), cc=idx%(TN/4);
+      uint k=k0+r, j0=bcol+cc*4u;
+      Bs[r][cc]=f16vec4(qk[KOFF+j0*1024u+kch+k],qk[KOFF+(j0+1u)*1024u+kch+k],qk[KOFF+(j0+2u)*1024u+kch+k],qk[KOFF+(j0+3u)*1024u+kch+k])*PRE; }
+    barrier();
+    [[unroll]] for(uint k4=0u;k4<TK/4u;k4++){
+      f16vec4 av[MM]; [[unroll]] for(int i=0;i<MM;i++) av[i]=As[ty*MM+i][k4];
+      uint kb=k4*4u, cb=tx*MNV; f16vec4 b0[MNV],b1[MNV],b2[MNV],b3[MNV];
+      [[unroll]] for(int v=0;v<MNV;v++){ b0[v]=Bs[kb][cb+v]; b1[v]=Bs[kb+1u][cb+v]; b2[v]=Bs[kb+2u][cb+v]; b3[v]=Bs[kb+3u][cb+v]; }
+      [[unroll]] for(int i=0;i<MM;i++)[[unroll]] for(int v=0;v<MNV;v++){
+        acc[i][v]=fma(f16vec4(av[i].x),b0[v],acc[i][v]); acc[i][v]=fma(f16vec4(av[i].y),b1[v],acc[i][v]);
+        acc[i][v]=fma(f16vec4(av[i].z),b2[v],acc[i][v]); acc[i][v]=fma(f16vec4(av[i].w),b3[v],acc[i][v]); }
+    }
+    barrier();
+  }
+  float16_t ps=float16_t(pc.postscale);
+  [[unroll]] for(int i=0;i<MM;i++){ uint row=brow+ty*MM+uint(i);
+    [[unroll]] for(int v=0;v<MNV;v++){ uint col=bcol+(tx*MNV+uint(v))*4u; uint o=h*S*S+row*S+col;
+      sc[o]=acc[i][v].x*ps; sc[o+1u]=acc[i][v].y*ps; sc[o+2u]=acc[i][v].z*ps; sc[o+3u]=acc[i][v].w*ps; } }
+}

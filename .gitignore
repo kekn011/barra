@@ -1,0 +1,37 @@
+# Build artifacts
+*.o
+*.a
+src/barra/libbarra.so*
+src/barra/barra_demo
+src/barra/barra_zc_demo
+src/barra/barra_zc2_test
+src/barra/barra_tpu_zc_test
+src/barra/barra_dsp_zc_test
+src/barra/*.pc
+dist/debs/*.deb
+
+# Large binaries — published as GitHub release assets, never committed
+*.img
+*.zip
+*.tar.gz
+*.tar.zst
+*.gguf
+*.tflite
+*.package
+barra-setup/payload/
+barra-setup/stock/
+barra-setup/llm-kit/*.tar
+barra-setup/llm-kit/*.gguf
+images/
+backups/
+
+# Fetched at setup time from their original sources (never redistribute).
+# Exception: lpmake.exe is OUR OWN mingw build from AOSP sources (Apache-2.0) and ships in the repo.
+barra-setup/tools/*
+!barra-setup/tools/lpmake.exe
+Magisk-*.apk
+
+# Local / editor
+*.log
+*.tmp
+.DS_Store

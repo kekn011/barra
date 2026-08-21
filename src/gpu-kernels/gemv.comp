@@ -1,0 +1,361 @@
+#version 450
+// Mali-eigener Decode-GEMV: y[M] = W[M,K] * x[K]. Gewichts-Streaming-Kernel.
+// Varianten: FMT_F16 (2 B/elem), FMT_Q40 (eigene, ausgerichtete q4-Ablage: 16 B Nibbles + f16-Skala je 32er-Block),
+//            FMT_Q4K (echtes llama.cpp q4_K-Superblock-Layout, 144 B je 256).
+// Parameter: WG (Threads/Workgroup), TPR (Lanes je Zeile, teilen K), R (Zeilen je Thread, teilen x-Loads).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : enable
+#ifndef WG
+#define WG 64
+#endif
+#ifndef TPR
+#define TPR 16
+#endif
+#ifndef R
+#define R 2
+#endif
+layout(local_size_x = WG) in;
+layout(std430, binding=0) readonly  buffer Wb { uvec4 w[]; };
+layout(std430, binding=0) readonly  buffer Wu { uint wu[]; };
+layout(std430, binding=1) readonly  buffer Xb { vec4 x[]; };
+layout(std430, binding=2) writeonly buffer Yb { float y[]; };
+layout(std430, binding=3) readonly  buffer Sb { float16_t s[]; };
+layout(std430, binding=4) readonly  buffer Xh { uvec4 xh[]; };
+layout(std430, binding=5) readonly  buffer Sx { float sxb[]; };
+layout(push_constant) uniform P { uint M; uint K; } p;
+
+// 32er-Block: q = 16 B, Nibbles lo = elem 0..15, hi = elem 16..31 (wie q4_0)
+float dot_q4block(uvec4 q, uint xb){            // xb = Index des ersten vec4 von x fuer diesen Block (8 vec4)
+  float acc = 0.0;
+  [[unroll]] for(int i=0;i<4;i++){
+    uint u = q[i];
+    vec4 lo = vec4(float(u & 0xFu), float((u>>8)&0xFu), float((u>>16)&0xFu), float((u>>24)&0xFu));
+    vec4 hi = vec4(float((u>>4)&0xFu), float((u>>12)&0xFu), float((u>>20)&0xFu), float(u>>28));
+    acc += dot(lo, x[xb+uint(i)]) + dot(hi, x[xb+4u+uint(i)]);
+  }
+  return acc;
+}
+
+void main(){
+  uint lid  = gl_LocalInvocationID.x;
+  uint lane = lid % TPR;                 // Position entlang K
+  uint rg   = lid / TPR;                 // Zeilengruppe im Workgroup
+  const uint RPW = (WG/TPR)*R;           // Zeilen je Workgroup
+  uint row0 = gl_WorkGroupID.x*RPW + rg*R;
+  float acc[R];
+  [[unroll]] for(int r=0;r<R;r++) acc[r]=0.0;
+
+#if defined(FMT_F16)
+  // Block = 8 Elemente (ein uvec4 = 8 halfs); NB = K/8
+  uint NB = p.K/8u;
+  for(uint b=lane; b<NB; b+=TPR){
+    vec4 x0 = x[b*2u], x1 = x[b*2u+1u];
+    [[unroll]] for(int r=0;r<R;r++){
+      uvec4 q = w[(row0+uint(r))*NB + b];
+      vec2 a=unpackHalf2x16(q.x), bb=unpackHalf2x16(q.y), c=unpackHalf2x16(q.z), d=unpackHalf2x16(q.w);
+      acc[r] += dot(vec4(a,bb), x0) + dot(vec4(c,d), x1);
+    }
+  }
+#elif defined(FMT_Q40)
+  uint NB = p.K/32u;
+  for(uint b=lane; b<NB; b+=TPR){
+    // Summe x des Blocks fuer die -8-Korrektur: dot(q-8,x) = dot(q,x) - 8*sum(x)
+    float sx = 0.0; [[unroll]] for(int i=0;i<8;i++){ vec4 xv = x[b*8u+uint(i)]; sx += xv.x+xv.y+xv.z+xv.w; }
+    [[unroll]] for(int r=0;r<R;r++){
+      uint idx = (row0+uint(r))*NB + b;
+      uvec4 q = w[idx];
+      float d = float(s[idx]);
+      acc[r] += d * (dot_q4block(q, b*8u) - 8.0*sx);
+    }
+  }
+#elif defined(FMT_Q4K)
+  // Superblock 256 Elemente = 144 B = 9 uvec4: [d f16][dmin f16][scales 12 B] = uvec4 0; qs 128 B = uvec4 1..8
+  // qs: 4 Chunks a 32 B (je 2 uvec4), Chunk l: lo-Nibbles = Sub-Block 2l (32 elem), hi = Sub-Block 2l+1
+  uint NSB = p.K/256u;
+  for(uint b=lane; b<NSB; b+=TPR){
+    // Sub-Block x-Summen (8 Stueck) fuer den dmin*m-Term
+    float sx[8];
+    [[unroll]] for(int j=0;j<8;j++){ float t=0.0; [[unroll]] for(int i=0;i<8;i++){ vec4 xv=x[b*64u+uint(j)*8u+uint(i)]; t+=xv.x+xv.y+xv.z+xv.w; } sx[j]=t; }
+    [[unroll]] for(int r=0;r<R;r++){
+      uint base = ((row0+uint(r))*NSB + b)*9u;
+      uvec4 h = w[base];
+      float d    = unpackHalf2x16(h.x).x;
+      float dmin = unpackHalf2x16(h.x).y;
+      // scales[12] = bytes: h.y (0..3), h.z (4..7), h.w (8..11)
+      uint sc0=h.y, sc1=h.z, sc2=h.w;
+      [[unroll]] for(int l=0;l<4;l++){
+        uvec4 q0 = w[base+1u+uint(l)*2u], q1 = w[base+2u+uint(l)*2u];
+        // Sub-Block j=2l (lo), j=2l+1 (hi)
+        float dlo=0.0, dhi=0.0;
+        [[unroll]] for(int i=0;i<4;i++){
+          uint u=q0[i]; uint v=q1[i];
+          vec4 lo0 = vec4(float(u&0xFu),float((u>>8)&0xFu),float((u>>16)&0xFu),float((u>>24)&0xFu));
+          vec4 lo1 = vec4(float(v&0xFu),float((v>>8)&0xFu),float((v>>16)&0xFu),float((v>>24)&0xFu));
+          vec4 hi0 = vec4(float((u>>4)&0xFu),float((u>>12)&0xFu),float((u>>20)&0xFu),float(u>>28));
+          vec4 hi1 = vec4(float((v>>4)&0xFu),float((v>>12)&0xFu),float((v>>20)&0xFu),float(v>>28));
+          uint xo = b*64u + uint(l)*16u;   // 64 Elemente je Chunk = 16 vec4; lo-Subblock = erste 8 vec4, hi = naechste 8
+          dlo += dot(lo0, x[xo+uint(i)]) + dot(lo1, x[xo+4u+uint(i)]);
+          dhi += dot(hi0, x[xo+8u+uint(i)]) + dot(hi1, x[xo+12u+uint(i)]);
+        }
+        // Skalen (get_scale_min_k4): j<4: sc=scales[j]&63, m=scales[j+4]&63 ; j>=4: sc=(scales[j+4]&0xF)|((scales[j-4]>>6)<<4), m=(scales[j+4]>>4)|((scales[j]>>6)<<4)
+        uint j0=uint(l)*2u, j1=j0+1u;
+        float scl, ml, sch, mh;
+        if(j0<4u){
+          scl = float((sc0>>(8u*j0))&63u);            ml = float((sc1>>(8u*j0))&63u);
+          sch = float((sc0>>(8u*j1))&63u);            mh = float((sc1>>(8u*j1))&63u);
+        } else {
+          uint a0=(sc2>>(8u*(j0-4u)))&0xFFu, a1=(sc2>>(8u*(j1-4u)))&0xFFu;   // scales[j+4]
+          uint b0=(sc0>>(8u*(j0-4u)))&0xFFu, b1=(sc0>>(8u*(j1-4u)))&0xFFu;   // scales[j-4]
+          uint c0=(sc1>>(8u*(j0-4u)))&0xFFu, c1=(sc1>>(8u*(j1-4u)))&0xFFu;   // scales[j]
+          scl = float((a0&0xFu)|((b0>>6u)<<4u)); ml = float((a0>>4u)|((c0>>6u)<<4u));
+          sch = float((a1&0xFu)|((b1>>6u)<<4u)); mh = float((a1>>4u)|((c1>>6u)<<4u));
+        }
+        acc[r] += d*(scl*dlo + sch*dhi) - dmin*(ml*sx[j0] + mh*sx[j1]);
+      }
+    }
+  }
+
+#elif defined(FMT_Q40U)
+  // unpackUnorm4x8: 4 Nibbles -> vec4 (q/255) in einem Op. Standard-q4_0-Nibble-Ordnung (lo -> elem 4i..4i+3, hi -> 16+4i..).
+  uint NB = p.K/32u;
+  for(uint b=lane; b<NB; b+=TPR){
+    vec4 xv[8]; [[unroll]] for(int i=0;i<8;i++) xv[i]=x[b*8u+uint(i)];
+    [[unroll]] for(int r=0;r<R;r++){
+      uint idx = (row0+uint(r))*NB + b;
+      uvec4 q = w[idx];
+      float d = float(s[idx]) * 255.0;
+      float a = 0.0;
+      [[unroll]] for(int i=0;i<4;i++){
+        vec4 lo = unpackUnorm4x8(q[i] & 0x0F0F0F0Fu) - (8.0/255.0);
+        vec4 hi = unpackUnorm4x8((q[i]>>4) & 0x0F0F0F0Fu) - (8.0/255.0);
+        a += dot(lo, xv[i]) + dot(hi, xv[4+i]);
+      }
+      acc[r] = fma(d, a, acc[r]);
+    }
+  }
+#elif defined(FMT_Q40H)
+  // gepackte f16: (u & 0x000F000F) | 0x64006400 -> (1024+q0, 1024+q2); -1032 -> (q-8) exakt. x als f16, PERMUTIERT:
+  // xh-Wort (4i+0): Elemente (4i,4i+2), (4i+1): (4i+1,4i+3), (4i+2): (16+4i,16+4i+2), (4i+3): (16+4i+1,16+4i+3)
+  uint NB = p.K/32u;
+  for(uint b=lane; b<NB; b+=TPR){
+    uvec4 xw[4]; [[unroll]] for(int i=0;i<4;i++) xw[i]=xh[b*4u+uint(i)];
+    [[unroll]] for(int r=0;r<R;r++){
+      uint idx = (row0+uint(r))*NB + b;
+      uvec4 q = w[idx];
+      float d = float(s[idx]);
+      f16vec2 a2 = f16vec2(0.0);
+      [[unroll]] for(int i=0;i<4;i++){
+        uint u=q[i];
+        f16vec2 v0 = unpackFloat2x16((u      & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0);
+        f16vec2 v1 = unpackFloat2x16(((u>>8) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0);
+        f16vec2 v2 = unpackFloat2x16(((u>>4) & 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0);
+        f16vec2 v3 = unpackFloat2x16(((u>>12)& 0x000F000Fu) | 0x64006400u) - f16vec2(1032.0);
+        a2 = fma(v0, unpackFloat2x16(xw[i].x), a2);
+        a2 = fma(v1, unpackFloat2x16(xw[i].y), a2);
+        a2 = fma(v2, unpackFloat2x16(xw[i].z), a2);
+        a2 = fma(v3, unpackFloat2x16(xw[i].w), a2);
+      }
+      acc[r] = fma(d, float(a2.x)+float(a2.y), acc[r]);
+    }
+  }
+#elif defined(FMT_Q40S)
+  // f16-Subnormal-Trick: unpackFloat2x16(u & 0x000F000F) = (q0*2^-24, q2*2^-24), kein OR. x (f16, permutiert wie Q40H) vom Host mit 2^10 vorskaliert;
+  // Produkt = q*x*2^-14 -> *16384 zurueck. -8-Korrektur via Block-Summe sxb[NB] = 8*sum(x_block) (Host, f32).
+  uint NB = p.K/32u;
+  for(uint b=lane; b<NB; b+=TPR){
+    uvec4 xw[4]; [[unroll]] for(int i=0;i<4;i++) xw[i]=xh[b*4u+uint(i)];
+    float sx8 = sxb[b];
+    [[unroll]] for(int r=0;r<R;r++){
+      uint idx = (row0+uint(r))*NB + b;
+      uvec4 q = w[idx];
+      float d = float(s[idx]);
+      f16vec2 a2 = f16vec2(0.0);
+      [[unroll]] for(int i=0;i<4;i++){
+        uint u=q[i];
+        a2 = fma(unpackFloat2x16( u      & 0x000F000Fu), unpackFloat2x16(xw[i].x), a2);
+        a2 = fma(unpackFloat2x16((u>>8)  & 0x000F000Fu), unpackFloat2x16(xw[i].y), a2);
+        a2 = fma(unpackFloat2x16((u>>4)  & 0x000F000Fu), unpackFloat2x16(xw[i].z), a2);
+        a2 = fma(unpackFloat2x16((u>>12) & 0x000F000Fu), unpackFloat2x16(xw[i].w), a2);
+      }
+      acc[r] = fma(d, (float(a2.x)+float(a2.y))*16384.0 - sx8, acc[r]);
+    }
+  }
+
+#elif defined(FMT_Q40D)
+  // Integer-Dot signed x signed (auf Mali beschleunigt; mixed NICHT): Nibble-Bytes als 16*(q-8) via (q<<4)^0x80 (exakt),
+  // x pro 32er-Block int8 (Skala dx_b). xh: 2 uvec4 je Block (32 int8), sxb[2b]=dx_b. Kein -8-Term noetig.
+  uint NB = p.K/32u;
+  for(uint b=lane; b<NB; b+=TPR){
+    ivec4 x0 = ivec4(xh[b*2u]), x1 = ivec4(xh[b*2u+1u]);
+    float dx = sxb[2u*b];
+    [[unroll]] for(int r=0;r<R;r++){
+      uint idx = (row0+uint(r))*NB + b;
+      uvec4 q = w[idx];
+      float d = float(s[idx]) * (dx * (1.0/16.0));
+      int a = 0;
+      [[unroll]] for(int i=0;i<4;i++){
+        uint u=q[i];
+        int lo = int(((u<<4) & 0xF0F0F0F0u) ^ 0x80808080u);   // Bytes = 16*(qlo-8), elem 4i..4i+3
+        int hi = int(( u     & 0xF0F0F0F0u) ^ 0x80808080u);   // Bytes = 16*(qhi-8), elem 16+4i..
+        a = dotPacked4x8AccSatEXT(lo, x0[i], a);
+        a = dotPacked4x8AccSatEXT(hi, x1[i], a);
+      }
+      acc[r] = fma(d, float(a), acc[r]);
+    }
+  }
+#elif defined(FMT_Q4KD)
+  // Echtes q4_K-Layout (144 B / 256) mit signed Int-Dot. Arbeitseinheit = 64er-Chunk (2 uvec4 qs): lo-Nibbles = Sub-Block 2l, hi = 2l+1.
+  // x als int8 je 32er-Block (= Sub-Block): xh 2 uvec4 je Sub-Block; sxb[2b]=dx_b, sxb[2b+1]=sum(x8_b).
+  // y += dx*( d*sc*sum(q*x8) - dmin*m*sum(x8) ), sum(q*x8) = dot(16(q-8),x8)/16 + 8*sum(x8)
+  uint NU = p.K/64u;
+  for(uint u=lane; u<NU; u+=TPR){
+    uint sb = u>>2, l = u&3u;
+    uint bl = sb*8u + 2u*l, bh = bl+1u;                     // Sub-Block-Indizes
+    ivec4 xl0 = ivec4(xh[bl*2u]), xl1 = ivec4(xh[bl*2u+1u]);
+    ivec4 xh0 = ivec4(xh[bh*2u]), xh1 = ivec4(xh[bh*2u+1u]);
+    float dxl = sxb[2u*bl], sxl = sxb[2u*bl+1u];
+    float dxh = sxb[2u*bh], sxh = sxb[2u*bh+1u];
+    [[unroll]] for(int r=0;r<R;r++){
+      uint base = ((row0+uint(r))*(p.K/256u) + sb)*9u;
+      uvec4 h  = w[base];
+      uvec4 q0 = w[base+1u+2u*l], q1 = w[base+2u+2u*l];
+      float d = unpackHalf2x16(h.x).x, dmin = unpackHalf2x16(h.x).y;
+      // Skalen fuer j0=2l, j1=2l+1 (get_scale_min_k4). scales-Bytes: h.y=0..3, h.z=4..7, h.w=8..11
+      uint j0 = 2u*l; float scl, ml, sch, mh;
+      if(j0<4u){ uint sh=8u*j0;
+        scl=float((h.y>>sh)&63u); ml=float((h.z>>sh)&63u); sch=float((h.y>>(sh+8u))&63u); mh=float((h.z>>(sh+8u))&63u);
+      } else { uint sh=8u*(j0-4u);
+        uint a0=(h.w>>sh)&0xFFu, a1=(h.w>>(sh+8u))&0xFFu, b0=(h.y>>sh)&0xFFu, b1=(h.y>>(sh+8u))&0xFFu, c0=(h.z>>sh)&0xFFu, c1=(h.z>>(sh+8u))&0xFFu;
+        scl=float((a0&0xFu)|((b0>>6u)<<4u)); ml=float((a0>>4u)|((c0>>6u)<<4u));
+        sch=float((a1&0xFu)|((b1>>6u)<<4u)); mh=float((a1>>4u)|((c1>>6u)<<4u)); }
+      int al=0, ah=0;
+      [[unroll]] for(int i=0;i<4;i++){
+        uint v=q0[i];
+        al = dotPacked4x8AccSatEXT(int(((v<<4)&0xF0F0F0F0u)^0x80808080u), xl0[i], al);
+        ah = dotPacked4x8AccSatEXT(int(( v    &0xF0F0F0F0u)^0x80808080u), xh0[i], ah);
+      }
+      [[unroll]] for(int i=0;i<4;i++){
+        uint v=q1[i];
+        al = dotPacked4x8AccSatEXT(int(((v<<4)&0xF0F0F0F0u)^0x80808080u), xl1[i], al);
+        ah = dotPacked4x8AccSatEXT(int(( v    &0xF0F0F0F0u)^0x80808080u), xh1[i], ah);
+      }
+      float sql = float(al)*(1.0/16.0) + 8.0*sxl;
+      float sqh = float(ah)*(1.0/16.0) + 8.0*sxh;
+      acc[r] += dxl*(d*scl*sql - dmin*ml*sxl) + dxh*(d*sch*sqh - dmin*mh*sxh);
+    }
+  }
+#elif defined(FMT_Q4KD2)
+  // q4_K, Lane bearbeitet ganze Superbloecke (Header 1x je 128 B qs), Skalen byteweise vorextrahiert (gepackte Worte),
+  // Chunk-Schleife innen mit x-Loads geteilt ueber R Zeilen. Signed Int-Dot.
+  uint NSB = p.K/256u;
+  for(uint sb=lane; sb<NSB; sb+=TPR){
+    float dd[R], dm[R]; uvec4 hdr[R]; uint base[R];
+    [[unroll]] for(int r=0;r<R;r++){
+      base[r] = ((row0+uint(r))*NSB + sb)*9u; hdr[r] = w[base[r]];
+      dd[r] = unpackHalf2x16(hdr[r].x).x; dm[r] = unpackHalf2x16(hdr[r].x).y; }
+    [[unroll]] for(uint l=0u; l<4u; l++){
+      uint bl = sb*8u + 2u*l, bh = bl+1u;
+      ivec4 xl0 = ivec4(xh[bl*2u]), xl1 = ivec4(xh[bl*2u+1u]);
+      ivec4 xh0 = ivec4(xh[bh*2u]), xh1 = ivec4(xh[bh*2u+1u]);
+      float dxl = sxb[2u*bl], sxl = sxb[2u*bl+1u];
+      float dxh = sxb[2u*bh], sxh = sxb[2u*bh+1u];
+      [[unroll]] for(int r=0;r<R;r++){
+        uvec4 q0 = w[base[r]+1u+2u*l], q1 = w[base[r]+2u+2u*l];
+        uvec4 h = hdr[r];
+        // Skalen j0=2l, j1=2l+1: j<4 -> sc=scales[j]&63 (h.y), m=scales[j+4]&63 (h.z)
+        //                      j>=4 -> sc=(scales[j+4]&0xF)|((scales[j-4]>>6)<<4), m=(scales[j+4]>>4)|((scales[j]>>6)<<4)
+        float scl, ml, sch, mh;
+        if(l<2u){ uint sh=16u*l;
+          scl=float((h.y>>sh)&63u); sch=float((h.y>>(sh+8u))&63u); ml=float((h.z>>sh)&63u); mh=float((h.z>>(sh+8u))&63u);
+        } else { uint sh=16u*(l-2u);
+          uint a=(h.w>>sh), b=(h.y>>sh), c=(h.z>>sh);
+          scl=float((a&0xFu)|((b>>6u)&3u)<<4u);          ml=float(((a>>4u)&0xFu)|((c>>6u)&3u)<<4u);
+          sch=float(((a>>8u)&0xFu)|((b>>14u)&3u)<<4u);   mh=float(((a>>12u)&0xFu)|((c>>14u)&3u)<<4u); }
+        int al=0, ah=0;
+        [[unroll]] for(int i=0;i<4;i++){ uint v=q0[i];
+          al = dotPacked4x8AccSatEXT(int(((v<<4)&0xF0F0F0F0u)^0x80808080u), xl0[i], al);
+          ah = dotPacked4x8AccSatEXT(int(( v    &0xF0F0F0F0u)^0x80808080u), xh0[i], ah); }
+        [[unroll]] for(int i=0;i<4;i++){ uint v=q1[i];
+          al = dotPacked4x8AccSatEXT(int(((v<<4)&0xF0F0F0F0u)^0x80808080u), xl1[i], al);
+          ah = dotPacked4x8AccSatEXT(int(( v    &0xF0F0F0F0u)^0x80808080u), xh1[i], ah); }
+        float sql = float(al)*(1.0/16.0) + 8.0*sxl;
+        float sqh = float(ah)*(1.0/16.0) + 8.0*sxh;
+        acc[r] += dxl*(dd[r]*scl*sql - dm[r]*ml*sxl) + dxh*(dd[r]*sch*sqh - dm[r]*mh*sxh);
+      }
+    }
+  }
+#elif defined(FMT_Q6KD)
+  // Echtes q6_K-Layout (210 B / 256): identische Mathematik wie der llama.cpp-Mali-Pfad (Funnel-u32-Loads, 4(q-32) via (q<<2)^0x80, 2 Skalen je 32er).
+  uint NB = p.K/32u;
+  for(uint b=lane; b<NB; b+=TPR){
+    ivec4 x0 = ivec4(xh[b*2u]), x1 = ivec4(xh[b*2u+1u]);
+    float dx = sxb[2u*b];
+    uint j = b & 7u; uint h = j >> 2, rr = j & 3u;
+    uint ql_shift = (rr >> 1) * 4u, qh_shift = rr * 2u;
+    [[unroll]] for(int r=0;r<R;r++){
+      uint ib_k = (row0+uint(r))*(p.K/256u) + (b >> 3);
+      uint base = ib_k * 210u;
+      uint ql_ofs = base + h*64u + (rr&1u)*32u;
+      uint qh_ofs = base + 128u + h*32u;
+      uint sc_ofs = base + 192u + h*8u + rr*2u;
+      uint scw = wu[sc_ofs >> 2] >> ((sc_ofs & 3u) * 8u);
+      float sc_a = float(int(scw << 24) >> 24);
+      float sc_b = float(int((scw << 16) & 0xFF000000u) >> 24);
+      uint dofs = base + 208u;
+      uint dw = wu[dofs >> 2];           // ACHTUNG: bei geradem base liest das 2 Byte hinter das Blockende (wie der erste llama-Patch)
+      float d = unpackHalf2x16((dw >> ((dofs & 2u) * 8u)) & 0xFFFFu).x;
+      int qa=0, qb=0;
+      [[unroll]] for(uint i=0u;i<4u;i++){
+        uint o1 = ql_ofs + i*4u, o2 = qh_ofs + i*4u;
+        uint ql = ((o1&2u)==0u) ? wu[o1>>2] : ((wu[o1>>2] >> 16) | (wu[(o1>>2)+1u] << 16));
+        uint qh = ((o2&2u)==0u) ? wu[o2>>2] : ((wu[o2>>2] >> 16) | (wu[(o2>>2)+1u] << 16));
+        uint v = ((((ql >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u;
+        qa = dotPacked4x8AccSatEXT(int(v), x0[i], qa);
+      }
+      [[unroll]] for(uint i=4u;i<8u;i++){
+        uint o1 = ql_ofs + i*4u, o2 = qh_ofs + i*4u;
+        uint ql = ((o1&2u)==0u) ? wu[o1>>2] : ((wu[o1>>2] >> 16) | (wu[(o1>>2)+1u] << 16));
+        uint qh = ((o2&2u)==0u) ? wu[o2>>2] : ((wu[o2>>2] >> 16) | (wu[(o2>>2)+1u] << 16));
+        uint v = ((((ql >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u;
+        qb = dotPacked4x8AccSatEXT(int(v), x1[i-4u], qb);
+      }
+      acc[r] += dx * d * 0.25 * (sc_a*float(qa) + sc_b*float(qb));
+    }
+  }
+#elif defined(FMT_Q6KP)
+  // q6_K auf 224-B-Layout (Repack): 14 uvec4 je Block, 16-Byte-Loads. Identisch zum llama.cpp-Mali-Pfad v2.
+  uint NB = p.K/32u;
+  for(uint b=lane; b<NB; b+=TPR){
+    ivec4 x0 = ivec4(xh[b*2u]), x1 = ivec4(xh[b*2u+1u]);
+    float dx = sxb[2u*b];
+    uint j = b & 7u; uint h = j >> 2, rr = j & 3u;
+    uint ql_shift = (rr >> 1) * 4u, qh_shift = rr * 2u;
+    [[unroll]] for(int r=0;r<R;r++){
+      uint base = ((row0+uint(r))*(p.K/256u) + (b >> 3)) * 14u;
+      uvec4 ql0 = w[base + h*4u + (rr&1u)*2u], ql1 = w[base + h*4u + (rr&1u)*2u + 1u];
+      uvec4 qh0 = w[base + 8u + h*2u], qh1 = w[base + 8u + h*2u + 1u];
+      uvec4 scv = w[base + 12u]; uint dw = w[base + 13u].x;
+      uint scw = scv[2u*h + (rr>>1)] >> ((rr&1u)*16u);
+      float sc_a = float(int(scw << 24) >> 24);
+      float sc_b = float(int((scw << 16) & 0xFF000000u) >> 24);
+      float d = unpackHalf2x16(dw & 0xFFFFu).x;
+      int qa=0, qb=0; uint v;
+      [[unroll]] for(int i=0;i<4;i++){
+        v = ((((ql0[i] >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh0[i] >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qa = dotPacked4x8AccSatEXT(int(v), x0[i], qa);
+        v = ((((ql1[i] >> ql_shift) & 0x0F0F0F0Fu) << 2) | (((qh1[i] >> qh_shift) & 0x03030303u) << 6)) ^ 0x80808080u; qb = dotPacked4x8AccSatEXT(int(v), x1[i], qb);
+      }
+      acc[r] += dx * d * 0.25 * (sc_a*float(qa) + sc_b*float(qb));
+    }
+  }
+#else
+#error "FMT?"
+#endif
+  [[unroll]] for(int r=0;r<R;r++){
+    float t = subgroupClusteredAdd(acc[r], TPR);
+    if(lane==0u) y[row0+uint(r)] = t;
+  }
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=barra: Erst-Boot-Einrichtung (Host-Keys, machine-id, Hostname, Passwortzwang)
+After=local-fs.target
+Before=ssh.service sshd.service systemd-user-sessions.service
+ConditionPathExists=/etc/barra-firstboot.pending
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/barra-firstboot
+
+[Install]
+WantedBy=multi-user.target

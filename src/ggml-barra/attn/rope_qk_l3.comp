@@ -1,0 +1,43 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// ggml-barra v2.3 (16x8): RMSNorm+RoPE aus GETRENNTEN q/k-INT16-Puffern. Wie rope_qk_l2, nur
+// 16-Bit-Werte (2 je uint, bitfieldExtract). Workgroup=(head-row 0..39, token), 16 Threads.
+layout(local_size_x=16) in;
+layout(std430,binding=0) readonly  buffer QB  { uint qb[]; };        // q int16 [S,4096]
+layout(std430,binding=1) readonly  buffer KB  { uint kb[]; };        // k int16 [S,1024]
+layout(std430,binding=2) writeonly buffer QK  { float16_t qk[]; };   // q f16 [S*4096] + k f16 [S*1024]
+layout(std430,binding=3) readonly  buffer AUX { float aux[]; };
+layout(std430,binding=4) readonly  buffer SR  { float srow[]; };
+layout(push_constant) uniform P { float qosc; float qozp; float kosc; float kozp; float eps; uint gqo; uint gko; uint tabo; } pc;
+shared float red[16];
+shared float srms;
+void main(){
+  uint hr=gl_WorkGroupID.x, t=gl_WorkGroupID.y, tid=gl_LocalInvocationID.x;
+  bool isq = hr<32u;
+  uint j = tid*4u;
+  uint w0a,w0b,w1a,w1b; float osc, ozp;
+  if(isq){ uint rb=t*4096u+hr*128u; uint b=(rb+j)>>1; w0a=qb[b]; w0b=qb[b+1u]; uint b2=(rb+64u+j)>>1; w1a=qb[b2]; w1b=qb[b2+1u]; osc=pc.qosc; ozp=pc.qozp; }
+  else   { uint rb=t*1024u+(hr-32u)*128u; uint b=(rb+j)>>1; w0a=kb[b]; w0b=kb[b+1u]; uint b2=(rb+64u+j)>>1; w1a=kb[b2]; w1b=kb[b2+1u]; osc=pc.kosc; ozp=pc.kozp; }
+  float sf = osc*srow[t];
+  float f0[4], f1[4]; float ss=0.0;
+  f0[0]=(float(bitfieldExtract(int(w0a),0,16))-ozp)*sf; f0[1]=(float(bitfieldExtract(int(w0a),16,16))-ozp)*sf;
+  f0[2]=(float(bitfieldExtract(int(w0b),0,16))-ozp)*sf; f0[3]=(float(bitfieldExtract(int(w0b),16,16))-ozp)*sf;
+  f1[0]=(float(bitfieldExtract(int(w1a),0,16))-ozp)*sf; f1[1]=(float(bitfieldExtract(int(w1a),16,16))-ozp)*sf;
+  f1[2]=(float(bitfieldExtract(int(w1b),0,16))-ozp)*sf; f1[3]=(float(bitfieldExtract(int(w1b),16,16))-ozp)*sf;
+  for(int u=0;u<4;u++) ss+=f0[u]*f0[u]+f1[u]*f1[u];
+  red[tid]=ss; barrier();
+  if(tid<8u) red[tid]+=red[tid+8u]; barrier();
+  if(tid<4u) red[tid]+=red[tid+4u]; barrier();
+  if(tid==0u) srms=inversesqrt((red[0]+red[1]+red[2]+red[3])/128.0+pc.eps); barrier();
+  float rms=srms;
+  uint gb = isq?pc.gqo:pc.gko;
+  uint outbase = isq ? (t*4096u+hr*128u) : (2097152u + t*1024u + (hr-32u)*128u);
+  for(int u=0;u<4;u++){
+    float g0=f0[u]*rms*aux[gb+j+uint(u)];
+    float g1=f1[u]*rms*aux[gb+64u+j+uint(u)];
+    float c =aux[pc.tabo        +t*64u+j+uint(u)];
+    float sn=aux[pc.tabo+32768u +t*64u+j+uint(u)];
+    qk[outbase+j+uint(u)]      = float16_t(g0*c-g1*sn);
+    qk[outbase+64u+j+uint(u)]  = float16_t(g1*c+g0*sn);
+  }
+}

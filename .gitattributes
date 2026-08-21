@@ -1,0 +1,28 @@
+# Line endings are load-bearing here: everything that runs ON THE DEVICE
+# (toybox sh, the container, the i18n loader) must stay LF — CRLF breaks it.
+# Windows-side PowerShell stays CRLF (with UTF-8 BOM, required by PS 5.1).
+* text=auto
+
+*.sh          text eol=lf
+*.properties  text eol=lf
+*.c           text eol=lf
+*.h           text eol=lf
+*.hpp         text eol=lf
+*.cpp         text eol=lf
+*.py          text eol=lf
+*.comp        text eol=lf
+*.S           text eol=lf
+*.patch       text eol=lf
+gki_defconfig text eol=lf
+*.md          text eol=lf
+*.yml         text eol=lf
+
+*.ps1         text eol=crlf
+*.vbs         text eol=crlf
+
+*.exe         binary
+*.elf         binary
+*.spv         binary
+*.wav         binary
+*.tgz         binary
+*.ks          binary

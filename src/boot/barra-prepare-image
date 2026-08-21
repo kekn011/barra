@@ -1,0 +1,22 @@
+#!/bin/bash
+# barra-prepare-image - IM CONTAINER ausfuehren, unmittelbar bevor das Image gezogen wird.
+# Macht das Rootfs "generisch": entfernt alles Node-Spezifische/Geheime, setzt den
+# Erst-Boot-Marker (barra-firstboot erzeugt beim ersten Start alles neu).
+# ACHTUNG: danach ist DIESER Node bis zum naechsten Boot ohne SSH-Host-Keys.
+[ "$(id -u)" = 0 ] || { echo "als root"; exit 1; }
+echo "== barra-prepare-image =="
+# Geheimnisse / Node-Identitaet
+rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub && echo "ssh-host-keys entfernt"
+: > /etc/machine-id; rm -f /var/lib/dbus/machine-id && echo "machine-id geleert"
+rm -f /root/.bash_history /home/*/.bash_history /root/.ssh/known_hosts 2>/dev/null
+rm -f /etc/barra-rename 2>/dev/null
+# WLAN-Creds liegen ANDROID-seitig im Store (/data/adb/baseos/config) - dort separat leeren
+# (siehe barra-prepare-image-android.sh); hier nur Container-Seite.
+# Logs/Caches
+journalctl --rotate 2>/dev/null; journalctl --vacuum-size=1M 2>/dev/null
+find /var/log -type f -delete 2>/dev/null; apt-get clean 2>/dev/null; rm -rf /var/lib/apt/lists/* /tmp/* 2>/dev/null
+# Hostname auf generisch (firstboot setzt eindeutig)
+echo barra > /etc/hostname; sed -i 's/^127.0.1.1.*/127.0.1.1\tbarra/' /etc/hosts 2>/dev/null
+# Marker fuer den ersten Boot
+touch /etc/barra-firstboot.pending
+echo "firstboot-Marker gesetzt. Rootfs ist image-bereit."

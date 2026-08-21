@@ -1,0 +1,28 @@
+#!/system/bin/sh
+# barra-perf — Leistungsmodi der Beschleuniger auf akita (als root; Image-Pfad /data/adb/baseos/bin/barra-perf)
+#   barra-perf status                 Takte/Governor von GPU (Mali-G715) und TPU (rio)
+#   barra-perf gpu max|auto           GPU-Mindesttakt auf Maximum pinnen (890 MHz; Messungen ohne DVFS-Rauschen) / zurueck auf DVFS
+#   barra-perf tpu on|off             TPU-Governor performance + min 1,119 GHz (2,7x Rechentakt; idle-gated, zieht nur unter Last) / powersave
+#   barra-perf all max|auto           beides
+# Boot-Standard: TPU on (Hook /data/adb/service.d/99-tpu-boost.sh), GPU auto (DVFS).
+G=/sys/class/misc/mali0/device
+T=/sys/class/devfreq/1a000000.rio
+gpu(){ case "$1" in
+  max)  MAX=$(tr ' ' '\n' < $G/available_frequencies | grep -v '^$' | sort -n | tail -1)
+        echo $MAX > $G/scaling_min_freq 2>/dev/null; echo $MAX > $G/hint_min_freq 2>/dev/null; echo "gpu: min -> $MAX ($(cat $G/cur_freq))";;
+  auto) MIN=$(tr ' ' '\n' < $G/available_frequencies | grep -v '^$' | sort -n | head -1)
+        echo $MIN > $G/scaling_min_freq 2>/dev/null; echo $MIN > $G/hint_min_freq 2>/dev/null; echo "gpu: min -> $MIN (DVFS)";;
+  *) echo "gpu max|auto"; return 1;; esac; }
+tpu(){ [ -d $T ] || { echo "tpu: kein devfreq"; return 1; }; case "$1" in
+  on)  echo performance > $T/governor; echo 1119000000 > $T/min_freq; echo "tpu: governor=$(cat $T/governor) min=$(cat $T/min_freq)";;
+  off) echo 226000000 > $T/min_freq 2>/dev/null; echo powersave > $T/governor; echo "tpu: governor=$(cat $T/governor)";;
+  *) echo "tpu on|off"; return 1;; esac; }
+case "$1" in
+  status)
+    echo "gpu: cur=$(cat $G/cur_freq 2>/dev/null) min=$(cat $G/scaling_min_freq 2>/dev/null) hint_min=$(cat $G/hint_min_freq 2>/dev/null) avail=$(cat $G/available_frequencies 2>/dev/null | tr '\n' ' ')"
+    [ -d $T ] && echo "tpu: governor=$(cat $T/governor) cur=$(cat $T/cur_freq) min=$(cat $T/min_freq) max=$(cat $T/max_freq)";;
+  gpu) gpu "$2";;
+  tpu) tpu "$2";;
+  all) case "$2" in max) gpu max; tpu on;; auto) gpu auto; tpu off;; *) echo "all max|auto"; exit 1;; esac;;
+  *) sed -n 2,8p "$0"; exit 1;;
+esac

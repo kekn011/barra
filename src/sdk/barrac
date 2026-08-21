@@ -1,0 +1,56 @@
+#!/bin/sh
+# barrac — compile a TFLite model into a Pixel-TPU package, on the device itself.
+#   barrac model.tflite [-o model.package]
+# The actual compiler (tpuc1 + libcomp_std) lives on the Android side of the node;
+# barrac hands the job over through the compile bridge (/opt/hwbridge/compile/,
+# served by the baseos-cfgd agent) and waits for the result. Jobs are serialized.
+# Typical compile time: 30-120 s per package, depending on model size.
+# See /usr/share/barra/docs/your-model-on-the-tpu.md for the export rules
+# (fixed shapes, int8 or 16x8 quantization, <=16 MB weights per package).
+set -u
+CQ=/opt/hwbridge/compile
+TIMEOUT=600
+
+usage(){ sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ $# -ge 1 ] || usage
+IN=""; OUT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) OUT=$2; shift 2;;
+    -h|--help) usage;;
+    *) IN=$1; shift;;
+  esac
+done
+[ -n "$IN" ] && [ -f "$IN" ] || { echo "barrac: input not found: ${IN:-<missing>}" >&2; exit 1; }
+[ -n "$OUT" ] || OUT="${IN%.tflite}.package"
+[ -d "$CQ" ] || { echo "barrac: compile bridge not available ($CQ missing — is the node's baseos-cfgd running?)" >&2; exit 1; }
+
+JOB="barrac-$$-$(date +%s)"
+cp "$IN" "$CQ/$JOB.tflite" || exit 1
+: > "$CQ/$JOB.req"
+printf 'barrac: compiling %s (%s bytes) on the TPU toolchain ' "$(basename "$IN")" "$(wc -c < "$IN")"
+
+i=0
+while [ $i -lt $TIMEOUT ]; do
+  if [ -f "$CQ/$JOB.done" ]; then
+    echo ""
+    RES=$(head -1 "$CQ/$JOB.done")
+    case "$RES" in
+      OK*)
+        mv "$CQ/$JOB.package" "$OUT"
+        rm -f "$CQ/$JOB.tflite" "$CQ/$JOB.done" "$CQ/$JOB.log"
+        echo "barrac: wrote $OUT ($(wc -c < "$OUT") bytes)"
+        exit 0;;
+      *)
+        echo "barrac: $RES" >&2
+        echo "--- compiler log (last 15 lines) ---" >&2
+        tail -15 "$CQ/$JOB.log" >&2 2>/dev/null
+        rm -f "$CQ/$JOB.tflite" "$CQ/$JOB.done" "$CQ/$JOB.log" "$CQ/$JOB.package"
+        exit 1;;
+    esac
+  fi
+  sleep 2; i=$((i+2)); printf '.'
+done
+echo ""
+echo "barrac: timeout after ${TIMEOUT}s — job left in $CQ/$JOB.* for inspection" >&2
+exit 1

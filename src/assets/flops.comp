@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) writeonly buffer O { float o[]; };
+layout(std430, binding = 1) readonly  buffer P { uint iters; };
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    float c = 1.0000001, d = 0.0000001;
+    float a0=float(id)*1e-7, a1=a0+0.1, a2=a0+0.2, a3=a0+0.3,
+          a4=a0+0.4, a5=a0+0.5, a6=a0+0.6, a7=a0+0.7;
+    for (uint i = 0u; i < iters; i++) {
+        a0=a0*c+d; a1=a1*c+d; a2=a2*c+d; a3=a3*c+d;
+        a4=a4*c+d; a5=a5*c+d; a6=a6*c+d; a7=a7*c+d;   // 8 FMA = 16 FLOP/iter
+    }
+    o[id] = a0+a1+a2+a3+a4+a5+a6+a7;
+}

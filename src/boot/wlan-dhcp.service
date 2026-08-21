@@ -1,0 +1,11 @@
+[Unit]
+Description=Selbstheilendes DHCP fuer wlan0 (bcmdhd-panic-sicher, kein nl80211 dump_station)
+After=multi-user.target
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'ip link set wlan0 up 2>/dev/null; true'
+ExecStart=/opt/hwbridge/wlan-dhcp-loop.sh
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target

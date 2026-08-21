@@ -1,0 +1,52 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+// A*V: A=P(f16), B=V(int8 MIT Zero-Point, GQA), Out=int8 gepackt MIT Ausgangs-Zero-Point.
+// gemm_best-Geometrie. M=512 N=128 K=512. postscale=16*qkv_osc/o_isc, vzp=qkv_ozp, ozp=o_izp.
+#define TM 128
+#define TN 128
+#define TK 32
+#define MM 8
+#define MNV 2
+#define S 512u
+layout(local_size_x=16,local_size_y=16) in;
+layout(std430,binding=0) readonly  buffer SC  { float16_t sc[]; };  // P [H,S,S]
+layout(std430,binding=1) readonly  buffer QKV { uint qkv[]; };      // V int8
+layout(std430,binding=2) writeonly buffer AO  { uint ao[]; };       // int8 gepackt [S,4096]
+layout(push_constant) uniform P { float postscale; float vzp; float ozp; } pc;
+shared f16vec4 As[TM][TK/4];
+shared f16vec4 Bs[TK][TN/4];
+void main(){
+  const float16_t PRE=float16_t(0.0625);
+  const float16_t VZP=float16_t(pc.vzp);
+  uint h=gl_WorkGroupID.z; uint vch=5120u+(h/4u)*128u;
+  uint tx=gl_LocalInvocationID.x, ty=gl_LocalInvocationID.y;
+  uint brow=gl_WorkGroupID.y*TM, bcol=gl_WorkGroupID.x*TN; uint tid=ty*16u+tx; const uint NT=256u;
+  f16vec4 acc[MM][MNV]; [[unroll]] for(int i=0;i<MM;i++)[[unroll]] for(int v=0;v<MNV;v++) acc[i][v]=f16vec4(0.0);
+  for(uint k0=0u;k0<512u;k0+=TK){
+    for(uint idx=tid; idx<TM*(TK/4); idx+=NT){ uint r=idx/(TK/4), cc=idx%(TK/4);
+      uint base=h*S*S + (brow+r)*S + k0 + cc*4u;
+      As[r][cc]=f16vec4(sc[base],sc[base+1u],sc[base+2u],sc[base+3u]); }
+    for(uint idx=tid; idx<TK*(TN/4); idx+=NT){ uint r=idx/(TN/4), cc=idx%(TN/4);
+      uint base=(k0+r)*6144u + vch + bcol + cc*4u; uint w=qkv[base>>2];
+      Bs[r][cc]=(f16vec4(float16_t(bitfieldExtract(int(w),0,8)),float16_t(bitfieldExtract(int(w),8,8)),float16_t(bitfieldExtract(int(w),16,8)),float16_t(bitfieldExtract(int(w),24,8)))-f16vec4(VZP))*PRE; }
+    barrier();
+    [[unroll]] for(uint k4=0u;k4<TK/4u;k4++){
+      f16vec4 av[MM]; [[unroll]] for(int i=0;i<MM;i++) av[i]=As[ty*MM+i][k4];
+      uint kb=k4*4u, cb=tx*MNV; f16vec4 b0[MNV],b1[MNV],b2[MNV],b3[MNV];
+      [[unroll]] for(int v=0;v<MNV;v++){ b0[v]=Bs[kb][cb+v]; b1[v]=Bs[kb+1u][cb+v]; b2[v]=Bs[kb+2u][cb+v]; b3[v]=Bs[kb+3u][cb+v]; }
+      [[unroll]] for(int i=0;i<MM;i++)[[unroll]] for(int v=0;v<MNV;v++){
+        acc[i][v]=fma(f16vec4(av[i].x),b0[v],acc[i][v]); acc[i][v]=fma(f16vec4(av[i].y),b1[v],acc[i][v]);
+        acc[i][v]=fma(f16vec4(av[i].z),b2[v],acc[i][v]); acc[i][v]=fma(f16vec4(av[i].w),b3[v],acc[i][v]); }
+    }
+    barrier();
+  }
+  float ps=pc.postscale; float oz=pc.ozp;
+  [[unroll]] for(int i=0;i<MM;i++){ uint row=brow+ty*MM+uint(i);
+    [[unroll]] for(int v=0;v<MNV;v++){ uint col=bcol+(tx*MNV+uint(v))*4u;
+      f16vec4 a=acc[i][v]; uint word=0u;
+      int q0=int(round(float(a.x)*ps+oz)); int q1=int(round(float(a.y)*ps+oz)); int q2=int(round(float(a.z)*ps+oz)); int q3=int(round(float(a.w)*ps+oz));
+      q0=clamp(q0,-128,127); q1=clamp(q1,-128,127); q2=clamp(q2,-128,127); q3=clamp(q3,-128,127);
+      word=(uint(q0)&0xFFu)|((uint(q1)&0xFFu)<<8)|((uint(q2)&0xFFu)<<16)|((uint(q3)&0xFFu)<<24);
+      ao[(row*4096u + h*128u + col)>>2]=word; } }
+}

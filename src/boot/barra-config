@@ -1,0 +1,275 @@
+#!/bin/bash
+# ============================================================================
+# barra-config - headless Konfiguration des Pixel-Base-OS "barra" (raspi-config-Stil).
+# whiptail-TUI, laeuft IM Ubuntu-Container ueber SSH. Android-seitiges (Ladegrenzen/
+# WLAN/Display/Button/Power) via geteilte Bruecke /opt/hwbridge/cfg (Agent baseos-cfgd).
+# Alle UI-Texte kommen aus /usr/share/barra/i18n/<lang>.properties (t <key> [args]).
+# Menue-Tags sind sprachneutral (Nummern/Tokens); nur Beschreibungen sind lokalisiert.
+#   Aufruf:  sudo barra-config
+# ============================================================================
+set -o pipefail
+[ -r /usr/share/barra/barra-i18n.sh ] && . /usr/share/barra/barra-i18n.sh
+command -v t >/dev/null 2>&1 || t() { printf '%s\n' "$1"; }
+[ "$(id -u)" = "0" ] || { t cfg.need_sudo; exit 1; }
+command -v whiptail >/dev/null || { t cfg.no_whiptail; exit 1; }
+
+BRIDGE=/opt/hwbridge
+BT="barra-config"
+mkdir -p /var/lib/barra 2>/dev/null; touch /var/lib/barra/configured 2>/dev/null   # Login-Hinweis "noch nicht eingerichtet" aus
+
+# Widget mit Rueckgabe (menu/inputbox/passwordbox): Wert auf stdout, Cancel/ESC -> exit != 0
+WT(){ whiptail --backtitle "$BT" "$@" 3>&1 1>&2 2>&3; }
+msg(){ whiptail --backtitle "$BT" --title "$1" --msgbox "$2" "${3:-12}" 72; }
+yn(){ whiptail --backtitle "$BT" --title "$1" --yesno "$2" "${3:-10}" 72; }
+
+cfg_send(){ local C="$BRIDGE/cfg"; mkdir -p "$C" 2>/dev/null; rm -f "$C/resp"; echo "$1" > "$C/req"; local i=0
+  while [ $i -lt 40 ]; do [ -f "$C/resp" ] && { cat "$C/resp"; rm -f "$C/resp"; return; }; sleep 0.25; i=$((i+1)); done
+  t cfg.bridge_err; }
+
+_set_password(){   # $1 = Benutzer
+  local u="$1" p1 p2
+  p1=$(WT --title "$(t cfg.pw.title)" --passwordbox "$(t cfg.pw.new "$u")" 9 72) || return
+  p2=$(WT --title "$(t cfg.pw.title)" --passwordbox "$(t cfg.pw.confirm)" 9 72) || return
+  [ -z "$p1" ] && { msg "$(t cfg.pw.title)" "$(t cfg.pw.empty)"; return; }
+  [ "$p1" != "$p2" ] && { msg "$(t cfg.pw.title)" "$(t cfg.pw.mismatch)"; return; }
+  if echo "$u:$p1" | chpasswd; then msg "$(t cfg.pw.title)" "$(t cfg.pw.changed "$u")"; else msg "$(t cfg.pw.title)" "$(t cfg.pw.fail)"; fi
+}
+
+cfg_user(){
+  local cur ch new
+  # Den ECHTEN Login-User nehmen (der, der 'sudo barra-config' aufrief), NICHT blind uid 1000
+  # (uid 1000 kann eine Altlast sein, z.B. 'knews' aus der Cluster-Aera).
+  cur="$SUDO_USER"; { [ -z "$cur" ] || [ "$cur" = root ]; } && cur=""
+  [ -z "$cur" ] && id ubuntu >/dev/null 2>&1 && cur=ubuntu
+  [ -z "$cur" ] && cur=$(getent passwd 1000 2>/dev/null | cut -d: -f1)
+  [ -z "$cur" ] && cur=ubuntu
+  while :; do
+    ch=$(WT --title "$(t cfg.user.title)" --menu "$(t cfg.user.cur "$cur")" 12 72 2 \
+      "1" "$(t cfg.user.m_name)" \
+      "2" "$(t cfg.user.m_pw "$cur")") || return
+    case "$ch" in
+      1)
+        new=$(WT --title "$(t cfg.user.name_title)" --inputbox "$(t cfg.user.name_prompt)" 11 72 "$cur") || continue
+        [ -z "$new" ] && continue; [ "$new" = "$cur" ] && continue
+        echo "$new" | grep -qE '^[a-z][a-z0-9_-]{0,31}$' || { msg "$(t cfg.user.name_title)" "$(t cfg.user.invalid)"; continue; }
+        id "$new" >/dev/null 2>&1 && { msg "$(t cfg.user.name_title)" "$(t cfg.user.exists "$new")"; continue; }
+        printf '%s %s\n' "$cur" "$new" > /etc/barra-rename
+        systemctl enable barra-userrename.service >/dev/null 2>&1
+        if yn "$(t cfg.user.name_title)" "$(t cfg.user.rename_q "$cur" "$new")"; then
+          cfg_send 'power reboot' >/dev/null; msg "$(t cfg.user.reboot_title)" "$(t cfg.user.reboot_msg "$new")"
+          return
+        else
+          msg "$(t cfg.user.name_title)" "$(t cfg.user.pending "$new")"
+        fi
+        cur="$new";;
+      2) _set_password "$cur";;
+    esac
+  done
+}
+
+cfg_hostname(){
+  local h
+  h=$(WT --title "$(t cfg.host.title)" --inputbox "$(t cfg.host.prompt)" 9 72 "$(hostname)") || return
+  [ -z "$h" ] && return
+  hostnamectl set-hostname "$h" 2>/dev/null || { echo "$h" >/etc/hostname; hostname "$h"; }
+  if grep -q '127.0.1.1' /etc/hosts; then sed -i "s/^127.0.1.1.*/127.0.1.1\t$h/" /etc/hosts
+  else printf '127.0.1.1\t%s\n' "$h" >>/etc/hosts; fi
+  msg "$(t cfg.host.title)" "$(t cfg.host.set "$h")"
+}
+
+cfg_time(){
+  local ntp syn ch tz
+  while :; do
+    ntp=$(timedatectl show -p NTP --value 2>/dev/null); syn=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+    ch=$(WT --title "$(t cfg.time.title)" --menu "$(t cfg.time.menu "$(date '+%Y-%m-%d %H:%M %Z')" "$(cat /etc/timezone 2>/dev/null)" "${ntp:-?}" "${syn:-?}")" 15 72 3 \
+      "1" "$(t cfg.time.m_tz)" \
+      "2" "$(t cfg.time.m_ntp)" \
+      "3" "$(t cfg.time.m_sync)") || return
+    case "$ch" in
+      1) tz=$(WT --title "$(t cfg.time.tz_title)" --inputbox "$(t cfg.time.tz_prompt)" 9 72 "$(cat /etc/timezone 2>/dev/null)") || continue
+        [ -f "/usr/share/zoneinfo/$tz" ] || { msg "$(t cfg.time.tz_title)" "$(t cfg.time.tz_unknown "$tz")"; continue; }
+        timedatectl set-timezone "$tz" 2>/dev/null || { ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime; echo "$tz" >/etc/timezone; }
+        msg "$(t cfg.time.tz_title)" "$(t cfg.time.tz_set "$tz")";;
+      2) if [ "$ntp" = yes ]; then timedatectl set-ntp false 2>/dev/null; msg NTP "$(t cfg.time.ntp_off)"; else timedatectl set-ntp true 2>/dev/null; msg NTP "$(t cfg.time.ntp_on)"; fi;;
+      3) systemctl restart systemd-timesyncd 2>/dev/null && msg NTP "$(t cfg.time.sync_ok)" || msg NTP "$(t cfg.time.sync_fail)";;
+    esac
+  done
+}
+
+cfg_ssh(){
+  local pa ch u hd key new
+  while :; do
+    pa=$(grep -iE '^\s*PasswordAuthentication' /etc/ssh/sshd_config | tail -1 | awk '{print $2}')
+    ch=$(WT --title "$(t cfg.ssh.title)" --menu "$(t cfg.ssh.menu "${pa:-$(t cfg.ssh.default)}")" 12 72 2 \
+      "1" "$(t cfg.ssh.m_key)" \
+      "2" "$(t cfg.ssh.m_pw)") || return
+    case "$ch" in
+      1) u=$(WT --title "$(t cfg.ssh.key_title)" --inputbox "$(t cfg.ssh.user_prompt)" 9 72 "ubuntu") || continue
+        hd=$(getent passwd "$u" | cut -d: -f6); [ -z "$hd" ] && { msg "$(t cfg.ssh.title)" "$(t cfg.ssh.no_user "$u")"; continue; }
+        key=$(WT --title "$(t cfg.ssh.key_title)" --inputbox "$(t cfg.ssh.key_prompt)" 11 72) || continue
+        [ -z "$key" ] && continue
+        mkdir -p "$hd/.ssh"; echo "$key" >>"$hd/.ssh/authorized_keys"
+        chmod 700 "$hd/.ssh"; chmod 600 "$hd/.ssh/authorized_keys"; chown -R "$u:$u" "$hd/.ssh"
+        msg "$(t cfg.ssh.title)" "$(t cfg.ssh.key_added "$u")";;
+      2) new=yes; [ "${pa,,}" = yes ] && new=no
+        if grep -qiE '^\s*#?\s*PasswordAuthentication' /etc/ssh/sshd_config; then
+          sed -i -E "s/^\s*#?\s*PasswordAuthentication.*/PasswordAuthentication $new/I" /etc/ssh/sshd_config
+        else echo "PasswordAuthentication $new" >>/etc/ssh/sshd_config; fi
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+        msg "$(t cfg.ssh.title)" "$(t cfg.ssh.pw_now "$new")";;
+    esac
+  done
+}
+
+hw_status(){
+  local txt n ip s
+  txt="$(t cfg.hw.bridges)\n"
+  for s in tpu gpu gxp; do
+    case "$s" in tpu) n="TPU (EdgeTPU) ";; gpu) n="GPU (Mali)    ";; gxp) n="DSP (Callisto)";; esac
+    if [ -S "$BRIDGE/$s.sock" ]; then txt="$txt   [OK]  $n\n"; else txt="$txt   [--]  $n\n"; fi
+  done
+  ip=$(ip -4 addr show 2>/dev/null | awk '/inet /{print $2" ("$NF")"}' | tr '\n' ' ')
+  txt="$txt\n$(t cfg.hw.net):    $ip\n$(t cfg.hw.uptime): $(uptime -p 2>/dev/null | sed 's/up/ /')"
+  msg "$(t cfg.hw.title)" "$txt" 16
+}
+
+cfg_charge(){
+  local ch S E
+  ch=$(WT --title "$(t cfg.charge.title)" --menu "$(t cfg.charge.menu "$(cfg_send state)")" 16 72 4 \
+    "Longlife" "$(t cfg.charge.longlife)" \
+    "Balanced" "$(t cfg.charge.balanced)" \
+    "USV-Max"  "$(t cfg.charge.usv)" \
+    "4"        "$(t cfg.charge.free)") || return
+  case "$ch" in
+    Longlife) S=50 E=55;; Balanced) S=60 E=65;; USV-Max) S=75 E=80;;
+    4) S=$(WT --title "$(t cfg.charge.title)" --inputbox "$(t cfg.charge.start)" 9 72) || return
+       E=$(WT --title "$(t cfg.charge.title)" --inputbox "$(t cfg.charge.stop)" 9 72) || return;;
+  esac
+  msg "$(t cfg.charge.title)" "$(cfg_send "charge $S $E")"
+}
+
+cfg_display(){
+  local ch s
+  while :; do
+    ch=$(WT --title "$(t cfg.disp.title)" --menu "$(t cfg.disp.menu "$(cfg_send 'display status')")" 15 72 3 \
+      "1" "$(t cfg.disp.m_on)" \
+      "2" "$(t cfg.disp.m_off)" \
+      "3" "$(t cfg.disp.m_timeout)") || return
+    case "$ch" in
+      1) cfg_send 'display on' >/dev/null; msg "$(t cfg.disp.title)" "$(t cfg.disp.on)";;
+      2) cfg_send 'display off' >/dev/null; msg "$(t cfg.disp.title)" "$(t cfg.disp.off)";;
+      3) s=$(WT --title "$(t cfg.disp.title)" --inputbox "$(t cfg.disp.timeout_prompt)" 9 72) || continue; msg "$(t cfg.disp.title)" "$(cfg_send "display timeout $s")";;
+    esac
+  done
+}
+
+cfg_buttons(){
+  local K A
+  while :; do
+    K=$(WT --title "$(t cfg.btn.title)" --menu "$(t cfg.btn.menu "$(cfg_send buttons)")" 15 72 4 \
+      "POWER"      "$(t cfg.btn.power)" \
+      "POWER_LONG" "$(t cfg.btn.power_long)" \
+      "VOLUMEUP"   "$(t cfg.btn.volup)" \
+      "VOLUMEDOWN" "$(t cfg.btn.voldown)") || return
+    A=$(WT --title "$(t cfg.btn.action_title "$K")" --menu "$(t cfg.btn.action_menu)" 17 72 7 \
+      "none"     "$(t cfg.btn.a_none)" \
+      "display"  "$(t cfg.btn.a_display)" \
+      "shutdown" "$(t cfg.btn.a_shutdown)" \
+      "reboot"   "$(t cfg.btn.a_reboot)" \
+      "volup"    "$(t cfg.btn.a_volup)" \
+      "voldown"  "$(t cfg.btn.a_voldown)" \
+      "log"      "$(t cfg.btn.a_log)") || continue
+    msg "$(t cfg.btn.title)" "$(cfg_send "button $K $A")"
+  done
+}
+
+_wlan_setup(){
+  local ss pk pk2
+  ss=$(WT --title "$(t cfg.wlan.setup_title)" --inputbox "$(t cfg.wlan.ssid)" 9 72) || return
+  [ -z "$ss" ] && return
+  pk=$(WT --title "$(t cfg.wlan.setup_title)" --passwordbox "$(t cfg.wlan.psk "$ss")" 10 72) || return
+  if [ -n "$pk" ]; then
+    pk2=$(WT --title "$(t cfg.wlan.setup_title)" --passwordbox "$(t cfg.wlan.psk2)" 9 72) || return
+    [ "$pk" != "$pk2" ] && { msg "$(t cfg.wlan.title)" "$(t cfg.wlan.psk_mismatch)"; return; }
+    [ ${#pk} -lt 8 ] && { msg "$(t cfg.wlan.title)" "$(t cfg.wlan.psk_short)"; return; }
+  fi
+  msg "$(t cfg.wlan.title)" "$(t cfg.wlan.setup_done "$(cfg_send "wlan setup $ss $pk")")"
+}
+
+cfg_wlan(){
+  local ch scon srvip wip overwlan=0
+  # Kam DIESE SSH-Sitzung ueber WLAN rein? Dann an/aus gesperrt (man wuerde sich aussperren).
+  scon="${SSH_CONNECTION:-$(tr '\0' '\n' < /proc/$PPID/environ 2>/dev/null | sed -n 's/^SSH_CONNECTION=//p')}"
+  srvip=$(echo "$scon" | awk '{print $3}')
+  wip=$(ip -4 addr show wlan0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+  [ -n "$srvip" ] && [ "$srvip" = "$wip" ] && overwlan=1
+  while :; do
+    if [ $overwlan = 1 ]; then
+      ch=$(WT --title "$(t cfg.wlan.title)" --menu "$(t cfg.wlan.menu_locked "$(cfg_send 'wlan status')" "$wip")" 16 72 1 \
+        "1" "$(t cfg.wlan.m_setup)") || return
+    else
+      ch=$(WT --title "$(t cfg.wlan.title)" --menu "$(t cfg.wlan.menu "$(cfg_send 'wlan status')")" 15 72 3 \
+        "1" "$(t cfg.wlan.m_setup)" \
+        "2" "$(t cfg.wlan.m_on)" \
+        "3" "$(t cfg.wlan.m_off)") || return
+    fi
+    case "$ch" in
+      1) _wlan_setup;;
+      2) msg "$(t cfg.wlan.title)" "$(cfg_send 'wlan on')";;
+      3) msg "$(t cfg.wlan.title)" "$(cfg_send 'wlan off')";;
+    esac
+  done
+}
+
+cfg_bt(){
+  if [ -e /sys/class/bluetooth/hci0 ]; then msg "$(t cfg.bt.title)" "$(t cfg.bt.ok)"
+  else msg "$(t cfg.bt.title)" "$(t cfg.bt.na)" 13; fi
+}
+
+cfg_power(){
+  local ch
+  ch=$(WT --title "$(t cfg.power.title)" --menu "$(t cfg.power.menu)" 11 72 2 \
+    "1" "$(t cfg.power.m_reboot)" \
+    "2" "$(t cfg.power.m_shutdown)") || return
+  case "$ch" in
+    1) yn "$(t cfg.power.m_reboot)" "$(t cfg.power.reboot_q)" && { cfg_send 'power reboot' >/dev/null; msg "$(t cfg.power.title)" "$(t cfg.power.rebooting)"; };;
+    2) yn "$(t cfg.power.m_shutdown)" "$(t cfg.power.shutdown_q)" && { cfg_send 'power shutdown' >/dev/null; msg "$(t cfg.power.title)" "$(t cfg.power.shutting)"; };;
+  esac
+}
+
+cfg_lang(){
+  local ch args f code name
+  args=()
+  for f in /usr/share/barra/i18n/*.properties; do
+    code=$(basename "$f" .properties)
+    case "$code" in de) name=Deutsch;; en) name=English;; *) name=$code;; esac
+    args+=("$code" "$name")
+  done
+  ch=$(WT --title "$(t cfg.lang.title)" --menu "$(t cfg.lang.menu)" 12 72 "${#args[@]}" "${args[@]}") || return
+  echo "$ch" > /etc/barra-lang
+  cfg_send "lang $ch" >/dev/null    # Android-Seite (Splash etc.) mitziehen
+  _bi18n_lang=$ch
+  msg "$(t cfg.lang.title)" "$(t cfg.lang.set "$ch")"
+}
+
+# ---- Hauptmenue ----
+while :; do
+  CH=$(WT --title "barra-config" --menu "$(t cfg.main.menu)" 21 72 12 \
+    "1"  "$(t cfg.main.1)" \
+    "2"  "$(t cfg.main.2)" \
+    "3"  "$(t cfg.main.3)" \
+    "4"  "$(t cfg.main.4)" \
+    "5"  "$(t cfg.main.5)" \
+    "6"  "$(t cfg.main.6)" \
+    "7"  "$(t cfg.main.7)" \
+    "8"  "$(t cfg.main.8)" \
+    "9"  "$(t cfg.main.9)" \
+    "10" "$(t cfg.main.10)" \
+    "11" "$(t cfg.main.11)" \
+    "12" "$(t cfg.main.12)") || { clear; exit 0; }
+  case "$CH" in
+    1) cfg_user;; 2) cfg_hostname;; 3) cfg_time;; 4) cfg_ssh;;
+    5) hw_status;; 6) cfg_charge;; 7) cfg_display;; 8) cfg_buttons;;
+    9) cfg_wlan;; 10) cfg_bt;; 11) cfg_power;; 12) cfg_lang;;
+  esac
+done
