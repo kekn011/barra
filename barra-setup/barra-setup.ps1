@@ -43,6 +43,7 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
   <Grid Margin="20">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <DockPanel Grid.Row="0" Margin="0,0,0,14">
+      <Image x:Name="Logo" Height="44" Margin="0,0,12,0" VerticalAlignment="Bottom"/>
       <TextBlock Text="barra" FontSize="30" FontWeight="SemiBold" Foreground="#F0F2F6"/>
       <TextBlock x:Name="Sub" Text="" FontSize="16" Foreground="#8B939F" VerticalAlignment="Bottom" Margin="0,0,0,5"/>
       <ComboBox x:Name="FLang" DockPanel.Dock="Right" Width="110" VerticalAlignment="Bottom" Margin="12,0,0,3"/>
@@ -127,7 +128,13 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
 </Window>
 "@
 $W = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
-$ui=@{}; foreach ($n in 'Sub','Pager','FLang','Page1','Page2','Page3','P1Title','P1Intro','LUser','LPass','LPass2','LHost','LTz','LSsid','LPsk','LChg','LTo','LChgHint','LDisp','LKey','FUser','FPass','FPass2','FHost','FTz','FSsid','BtnWifi','FPsk','FKey','FKeyHint','FChgS','FChgE','FDisp','FErr','BtnNext1','BtnUnflash','Steps','StepTitle','StateBox','StateDot','StateText','Prog','ProgText','FeedScroll','Feed','ActionBox','ActionText','BtnYes','BtnNo','BtnStart','BtnLog','BtnBack','Status','LogBox','Log','DoneTitle','DoneSub','DoneCmd','BtnCopy','DoneHint','BtnAgain','BtnClose') { $ui[$n]=$W.FindName($n) }
+$ui=@{}; foreach ($n in 'Logo','Sub','Pager','FLang','Page1','Page2','Page3','P1Title','P1Intro','LUser','LPass','LPass2','LHost','LTz','LSsid','LPsk','LChg','LTo','LChgHint','LDisp','LKey','FUser','FPass','FPass2','FHost','FTz','FSsid','BtnWifi','FPsk','FKey','FKeyHint','FChgS','FChgE','FDisp','FErr','BtnNext1','BtnUnflash','Steps','StepTitle','StateBox','StateDot','StateText','Prog','ProgText','FeedScroll','Feed','ActionBox','ActionText','BtnYes','BtnNo','BtnStart','BtnLog','BtnBack','Status','LogBox','Log','DoneTitle','DoneSub','DoneCmd','BtnCopy','DoneHint','BtnAgain','BtnClose') { $ui[$n]=$W.FindName($n) }
+
+# Logo (barra-setup\logo.png) in Header + Fenster-Icon — fehlt die Datei, bleibt nur die Wortmarke
+$logoFile = Join-Path $Kit 'logo.png'
+if (Test-Path $logoFile) {
+  try { $bi=New-Object Windows.Media.Imaging.BitmapImage; $bi.BeginInit(); $bi.UriSource=[Uri]$logoFile; $bi.EndInit(); $ui.Logo.Source=$bi; $W.Icon=$bi } catch {}
+}
 
 # ---------- Sprache anwenden (alle statischen Texte; wird auch beim Dropdown-Wechsel gerufen) ----------
 $script:mode='setup'

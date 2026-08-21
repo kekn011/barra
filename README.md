@@ -1,3 +1,5 @@
+<p align="center"><img src="logo.png" alt="" width="230"></p>
+
 # barra
 
 **CUDA for your pocket.** barra turns a Google Pixel 8a into a headless Ubuntu

@@ -10,6 +10,9 @@ case "$1" in
     # WiFi-Stack zuerst, damit niemand mehr nach wlan0 greift
     setprop ctl.stop wpa_supplicant
     setprop ctl.stop wificond
+    # bootanim (class core, von 'stop' nicht erfasst) laeuft seit base-boot durch —
+    # jetzt beenden, direkt danach uebernimmt unser bootsplash das Panel.
+    setprop ctl.stop bootanim
     stop                      # class main (zygote, system_server, ...)
     setprop ctl.stop zygote
     setprop ctl.stop zygote_secondary

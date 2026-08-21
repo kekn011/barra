@@ -55,12 +55,30 @@ log "=== base-boot start (headless) ==="
 
 # --- 1. Systemstart abwarten ------------------------------------------------
 stage boot-wait
+# barra-Bootanimation (Magisk-Modul barra-bootanim -> /product/media/bootanimation.zip)
+# WEITER anzeigen: nach boot_completed beendet SurfaceFlinger die Animation und gaebe
+# den Launcher frei — SOFORT neu starten (vor dem 10s-Settle-Sleep, sonst 10+s Launcher
+# sichtbar); sie laeuft dann durchgehend, bis fw-quiet.sh off sie beim framework-aus
+# stoppt (Uebergabe an unseren bootsplash). Nur wenn das Framework laeuft (Re-Run: nein).
+anim_hold() {
+  if [ -n "$(pidof surfaceflinger)" ]; then
+    setprop service.bootanim.exit 0
+    setprop service.bootanim.progress 0
+    setprop ctl.start bootanim
+    log "bootanim neu gestartet (barra-Anim bleibt bis framework-aus)"
+  fi
+}
 if [ "$(getprop sys.boot_completed)" != "1" ]; then
   i=0
   while [ "$(getprop sys.boot_completed)" != "1" ] && [ $i -lt 120 ]; do
     sleep 2; i=$((i+1))
   done
+  anim_hold
   sleep 10
+  # Race-Absicherung: hat SF die Anim direkt nach unserem Start doch beendet -> nochmal
+  [ -z "$(pidof bootanimation)" ] && anim_hold
+else
+  anim_hold
 fi
 log "boot_completed=$(getprop sys.boot_completed) nach ${i:-0} Runden"
 
@@ -75,10 +93,11 @@ echo 180 > /proc/sys/vm/swappiness 2>/dev/null
 echo 0   > /proc/sys/vm/page-cluster 2>/dev/null
 setprop ctl.stop vendor.camera-provider-2-7-google
 setprop ctl.stop cameraserver
-# Display sicher aus: Backlight runter (kein Renderer haelt das Panel -> Panel ohnehin dunkel)
-echo 4 > /sys/class/backlight/panel0-backlight/bl_power 2>/dev/null   # FB_BLANK_POWERDOWN
-echo 0 > /sys/class/backlight/panel0-backlight/brightness 2>/dev/null
-log "display aus, wakelock=$(cat /sys/power/wake_lock 2>/dev/null)"
+# Display AN lassen: der Boot zeigt durchgehend barra (Bootanimation -> bootsplash ->
+# Dashboard); dash2 blankt am Ende von selbst nach DISPLAY_TIMEOUT. (Frueher wurde hier
+# hart abgeschaltet — Headless-Erbe; Folge war: Android sichtbar, dann minutenlang schwarz.)
+echo 0 > /sys/class/backlight/panel0-backlight/bl_power 2>/dev/null
+log "display bleibt an (Boot-Anzeige), wakelock=$(cat /sys/power/wake_lock 2>/dev/null)"
 
 # --- 3. Ubuntu-Userland -----------------------------------------------------
 stage ubuntu-userland

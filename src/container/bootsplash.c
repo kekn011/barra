@@ -21,6 +21,9 @@
 #include <drm/drm_mode.h>
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#include "stb_image.h"
 
 static int DFD; static uint8_t* FB; static uint32_t W,H,PITCH; static struct drm_mode_crtc CRT; static uint32_t CONN;
 static volatile int g_stop=0;
@@ -63,10 +66,18 @@ static void text(int x,int baseline,int px,uint32_t c,const char* s){ float sc=s
     pen+=adv*sc; } }
 static void textc(int xc,int baseline,int px,uint32_t c,const char* s){ text(xc-textw(px,s)/2,baseline,px,c,s); }
 
+/* --- Logo (vorskaliertes RGBA-PNG, Layout passend zur Bootanimation) --- */
+static unsigned char* LOGO; static int LW,LH;
+static void logo_load(void){ int n; LOGO=stbi_load("/data/adb/baseos/logo.png",&LW,&LH,&n,4); }
+static void logo_draw(int cx,int cy){ if(!LOGO)return; int x0=cx-LW/2,y0=cy-LH/2;
+  for(int j=0;j<LH;j++)for(int i=0;i<LW;i++){ const unsigned char* p=LOGO+((size_t)j*LW+i)*4;
+    if(p[3]) blend(x0+i,y0+j,col(p[0],p[1],p[2]),p[3]); } }
+
 int main(int argc,char**argv){
   const char* sf=argc>1?argv[1]:"/data/adb/baseos/run/splash.status"; int maxs=argc>2?atoi(argv[2]):240;
   signal(SIGTERM,on_term); signal(SIGINT,on_term);
   if(font_load()){ fprintf(stderr,"bootsplash: kein Roboto\n"); return 1; }
+  logo_load();   /* optional: ohne /data/adb/baseos/logo.png bleibt das alte Text-Layout */
   DFD=open("/dev/dri/card0",O_RDWR|O_CLOEXEC); if(DFD<0){perror("card0");return 1;}
   { int t; for(t=0;t<25;t++){ if(ioctl(DFD,DRM_IOCTL_SET_MASTER,0)==0) break; usleep(200000);} fprintf(stderr,"bootsplash: SET_MASTER nach %d\n",t+1); }
   struct drm_mode_card_res res; memset(&res,0,sizeof res); ioctl(DFD,DRM_IOCTL_MODE_GETRESOURCES,&res);
@@ -107,10 +118,19 @@ int main(int argc,char**argv){
     if(pct>=100) break;
     if(shown<pct) shown+= (pct-shown)*0.25f+0.4f; if(shown>pct) shown=pct;   /* weich nachziehen */
     for(uint32_t yy=0;yy<H;yy++){uint32_t*row=(uint32_t*)(FB+yy*PITCH);for(uint32_t xx=0;xx<W;xx++)row[xx]=BG;}
-    textc(W/2, H/2-40, 150, TXT, "barra");
-    int bw=640,bh=20; bar((W-bw)/2, H/2+40, bw, bh, shown/100.0f, ACC, TRACK);
-    textc(W/2, H/2+118, 30, MUT, last);
-    char pc[16]; snprintf(pc,sizeof pc,"%d %%",(int)shown); textc(W/2, H/2+164, 24, col(96,103,114), pc);
+    int bw=640,bh=20;
+    if(LOGO){ /* Layout wie die Bootanimation: Logo-Mitte bei 3/8 H, Wortmarke darunter -> nahtloser Uebergang */
+      logo_draw(W/2, (int)(H*3/8));
+      textc(W/2, (int)(H*61/100), 110, TXT, "barra");
+      bar((W-bw)/2, (int)(H*64/100), bw, bh, shown/100.0f, ACC, TRACK);
+      textc(W/2, (int)(H*64/100)+84, 30, MUT, last);
+      char pc[16]; snprintf(pc,sizeof pc,"%d %%",(int)shown); textc(W/2, (int)(H*64/100)+130, 24, col(96,103,114), pc);
+    } else {
+      textc(W/2, H/2-40, 150, TXT, "barra");
+      bar((W-bw)/2, H/2+40, bw, bh, shown/100.0f, ACC, TRACK);
+      textc(W/2, H/2+118, 30, MUT, last);
+      char pc[16]; snprintf(pc,sizeof pc,"%d %%",(int)shown); textc(W/2, H/2+164, 24, col(96,103,114), pc);
+    }
     if(first==0){ struct drm_mode_crtc offc; memset(&offc,0,sizeof offc); offc.crtc_id=crtc;
       ioctl(DFD,DRM_IOCTL_MODE_SETCRTC,&offc); usleep(150000); ioctl(DFD,DRM_IOCTL_MODE_SETCRTC,&CRT);
       blw("bl_power","0"); blw("brightness","3000"); usleep(30000); ioctl(DFD,DRM_IOCTL_MODE_SETCRTC,&CRT); }
