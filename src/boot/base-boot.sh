@@ -54,35 +54,30 @@ trap 'rm -f "$LOCK/pid"; rmdir "$LOCK" 2>/dev/null' EXIT
 log "=== base-boot start (headless) ==="
 
 # --- 1. Systemstart abwarten ------------------------------------------------
+# Waehrend dieser Phase zeigt Androids bootanim die barra-Animation (Magisk-Modul
+# barra-bootanim; dessen service.sh restartet bootanim einmal, weil die erste
+# Instanz VOR dem Modul-Mount startet und sonst die Stock-Zip offen haelt).
+# SF beendet die Anim bei "boot finished" und laesst danach KEINE bootanim mehr
+# rendern (gemessen: Restart-Instanzen zeigen 0 ms) — deshalb geht es direkt
+# nach boot_completed SOFORT weiter zum framework-aus, wo unser bootsplash das
+# Panel uebernimmt. Kein langes Settle mehr (das hiess: Lockscreen + Android-
+# Display-Timeout = lange Schwarzphase).
 stage boot-wait
-# barra-Bootanimation (Magisk-Modul barra-bootanim -> /product/media/bootanimation.zip)
-# WEITER anzeigen: nach boot_completed beendet SurfaceFlinger die Animation und gaebe
-# den Launcher frei — SOFORT neu starten (vor dem 10s-Settle-Sleep, sonst 10+s Launcher
-# sichtbar); sie laeuft dann durchgehend, bis fw-quiet.sh off sie beim framework-aus
-# stoppt (Uebergabe an unseren bootsplash). Nur wenn das Framework laeuft (Re-Run: nein).
-anim_hold() {
-  if [ -n "$(pidof surfaceflinger)" ]; then
-    setprop service.bootanim.exit 0
-    setprop service.bootanim.progress 0
-    setprop ctl.start bootanim
-    log "bootanim neu gestartet (barra-Anim bleibt bis framework-aus)"
-  fi
-}
 if [ "$(getprop sys.boot_completed)" != "1" ]; then
   i=0
   while [ "$(getprop sys.boot_completed)" != "1" ] && [ $i -lt 120 ]; do
     sleep 2; i=$((i+1))
   done
-  anim_hold
-  sleep 10
-  # Race-Absicherung: hat SF die Anim direkt nach unserem Start doch beendet -> nochmal
-  [ -z "$(pidof bootanimation)" ] && anim_hold
-else
-  anim_hold
+  sleep 3
 fi
 log "boot_completed=$(getprop sys.boot_completed) nach ${i:-0} Runden"
+# Uebergang kaschieren: endet die Bootanimation (SF-bootFinished oder fw-quiet),
+# SOFORT abdunkeln — statt Lockscreen-Blitz bleibt der Schirm schwarz, bis der
+# bootsplash das Backlight wieder hochdreht. Anim laeuft dabei ungestoert zu Ende.
+( j=0; while [ $j -lt 60 ] && pgrep -x bootanimation >/dev/null 2>&1; do sleep 0.2; j=$((j+1)); done
+  echo 0 > /sys/class/backlight/panel0-backlight/brightness 2>/dev/null ) &
 
-# --- 2. Grundsystem + DISPLAY AUS -------------------------------------------
+# --- 2. Grundsystem ----------------------------------------------------------
 stage grundsystem
 dumpsys deviceidle disable >>"$LOG" 2>&1
 MP=$(command -v magiskpolicy || echo /system_ext/bin/magiskpolicy)
@@ -99,26 +94,33 @@ setprop ctl.stop cameraserver
 echo 0 > /sys/class/backlight/panel0-backlight/bl_power 2>/dev/null
 log "display bleibt an (Boot-Anzeige), wakelock=$(cat /sys/power/wake_lock 2>/dev/null)"
 
-# --- 3. Ubuntu-Userland -----------------------------------------------------
+# --- 3. Android stillstellen + Splash uebernimmt -----------------------------
+# BEWUSST VOR dem Ubuntu-Start (umsortiert 21.8.): so uebernimmt der barra-Splash
+# das Panel schon ~25 s nach dem Einschalten und deckt Ubuntu-Start + WLAN ab —
+# vorher lief hier erst der Ubuntu-Start (~40 s Lockscreen/Schwarzphase).
+# boot-systemd.sh braucht nichts vom Framework (chroot/nsenter/Mounts).
+stage framework-aus
+sh $T/fw-quiet.sh off >>"$LOG" 2>&1
+log "system_server=$(pidof system_server) netd=$(pidof netd)"
+# Composer ist jetzt weg -> Panel frei -> Boot-Splash starten (laeuft bis Status 100)
+splash 20 "$(t splash.userland)"
+if [ -x $T/bootsplash ]; then
+  setsid $T/bootsplash "$SPL" 300 </dev/null >>"$D/run/splash.log" 2>&1 &
+  log "bootsplash gestartet"
+fi
+
+# --- 4. Ubuntu-Userland -----------------------------------------------------
 stage ubuntu-userland
 sh $T/boot-systemd.sh >>"$LOG" 2>&1
 SDPID=$(cat $D/run/systemd.hostpid 2>/dev/null)
 if [ -n "$SDPID" ] && [ -d "/proc/$SDPID" ]; then
   log "Ubuntu-Userland laeuft (host-pid $SDPID)"
+  splash 55 "$(t splash.net_setup)"
 else
-  log "FEHLER: Ubuntu-Userland nicht hochgekommen - Abbruch (adb bleibt, Android an)"
+  log "FEHLER: Ubuntu-Userland nicht hochgekommen - Framework zurueck, Abbruch (adb bleibt)"
+  splash 100 ""
+  sh $T/fw-quiet.sh on >>"$LOG" 2>&1
   exit 1
-fi
-
-# --- 4. Android stillstellen ------------------------------------------------
-stage framework-aus
-sh $T/fw-quiet.sh off >>"$LOG" 2>&1
-log "system_server=$(pidof system_server) netd=$(pidof netd)"
-# Composer ist jetzt weg -> Panel frei -> Boot-Splash starten (laeuft bis Status 100)
-splash 55 "$(t splash.net_setup)"
-if [ -x $T/bootsplash ]; then
-  setsid $T/bootsplash "$SPL" 300 </dev/null >>"$D/run/splash.log" 2>&1 &
-  log "bootsplash gestartet"
 fi
 
 # --- 5. Eigenes WLAN (optional) ---------------------------------------------

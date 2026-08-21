@@ -16,7 +16,8 @@ PATH_IN=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # systemd-Host-PID: cmdline BEGINNT mit /lib/systemd/systemd (nicht der unshare-Wrapper).
 # Nach einem daemon-reexec heisst argv[0] /usr/lib/systemd/systemd (--deserialize=N) - beide matchen.
 sd_match() {
-    c=$({ tr '\0' ' ' < "/proc/$1/cmdline"; } 2>/dev/null)
+    # timeout 2: cmdline-Read haengt an gerade sterbenden Prozessen (mmap_lock)
+    c=$({ timeout -s KILL 2 tr '\0' ' ' < "/proc/$1/cmdline"; } 2>/dev/null)
     case "$c" in
         "/lib/systemd/systemd --system"*|"/usr/lib/systemd/systemd --system"*|"systemd --system"*) return 0;;
     esac

@@ -67,7 +67,9 @@ do_mount "-o bind /sys/fs/bpf" "$ROOTFS/sys/fs/bpf"
 # Deshalb cmdline UND die systemd-run-dir im Ziel-NS pruefen, sonst frisch starten.
 OLDPID=$(cat "$PIDF" 2>/dev/null)
 if [ -n "$OLDPID" ] && [ -d "/proc/$OLDPID" ]; then
-    OC=$({ tr '\0' ' ' < "/proc/$OLDPID/cmdline"; } 2>/dev/null)
+    # timeout 2: cmdline-Read HAENGT, wenn die PID gerade stirbt (exit_mmap haelt
+    # mmap_lock) — nach framework-aus voller sterbender Prozesse (21.8. Boot-Haenger)
+    OC=$({ timeout -s KILL 2 tr '\0' ' ' < "/proc/$OLDPID/cmdline"; } 2>/dev/null)
     case "$OC" in
         "/lib/systemd/systemd --system"*|"/usr/lib/systemd/systemd --system"*)
             if [ -d "/proc/$OLDPID/root/run/systemd/system" ]; then
@@ -104,7 +106,8 @@ sleep 6
 # Host-PID der Container-PID1: cmdline-Scan (ps zeigt argv nicht zuverlaessig)
 SDPID=""
 for p in /proc/[0-9]*; do
-    c=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null)
+    # timeout 2 gegen cmdline-Haenger an sterbenden Prozessen (s. o.)
+    c=$({ timeout -s KILL 2 tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null)
     case "$c" in
         "/lib/systemd/systemd --system"*|"/usr/lib/systemd/systemd --system"*) SDPID=${p##*/}; break;;
     esac
