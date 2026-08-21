@@ -256,7 +256,11 @@ function Start-Core($precfg){
   $script:ps.BeginInvoke() | Out-Null
 }
 $script:askKind=''
-function Send-Answer($a){ Write-LogFile "## Antwort: $a"; $sync.answerQ.Enqueue($a); $ui.ActionBox.Visibility='Collapsed' }
+function Send-Answer($a){ Write-LogFile "## Antwort: $a"; $sync.answerQ.Enqueue($a); $ui.ActionBox.Visibility='Collapsed'
+  # Zustandsanzeige zuruecksetzen — sonst bleibt "Warte auf Nutzer" stehen, bis der naechste
+  # step-Event kommt (der kann bei langen Phasen wie Download/Flash minutenlang ausbleiben)
+  $st = if ($script:lastState -and $script:lastState -ne 'wait_user') { $script:lastState } else { 'run' }
+  $ui.StateDot.Foreground=$stateColors[$st]; $ui.StateText.Text=$script:stateWords[$st] }
 
 $ui.BtnYes.Add_Click({ Send-Answer $(if($script:askKind -eq 'yn'){'j'}else{'ok'}) })
 $ui.BtnNo.Add_Click({ Send-Answer 'n' })

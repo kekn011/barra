@@ -409,6 +409,9 @@ function Step3_KernelRoot(){
   Tel (T 'core.s3.tel1')
   Tel (T 'core.s3.tel2')
   Tel (T 'core.s3.tel3')
+  # Magisk-App direkt oeffnen — der "Zusaetzliche Einrichtung"-Dialog steht dann sofort auf dem Schirm
+  Info (T 'core.s3.open_app')
+  [void](AdbSh 'monkey -p com.topjohnwu.magisk -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1' 15)
   $t0=Get-Date; $down=$false; $reminded=$false
   while (((Get-Date)-$t0).TotalSeconds -lt 480) {
     Chk
@@ -471,8 +474,10 @@ function Step5_Boot(){
   [void](AdbOut 'reboot' 10); Start-Sleep 5
   if (-not (WaitFor 'device' 300 (T 'core.s5.restarting'))) { Fail (T 'core.s5.no_adb') }
   $t0=Get-Date; $hn=''; $ip=''
-  while (((Get-Date)-$t0).TotalSeconds -lt 360) {
+  while (((Get-Date)-$t0).TotalSeconds -lt 600) {
     Chk
+    # Erst-Einrichtung startet das Telefon mehrfach neu — waehrend adb weg ist, das ehrlich anzeigen
+    if ((AdbState) -ne 'device') { $el=[int]((Get-Date)-$t0).TotalSeconds; Progress -1 ("{0} · {1}" -f (T 'core.s5.reboots'), (MMSS $el)); Start-Sleep 5; continue }
     $st = AdbSu 'cat /data/adb/baseos/state 2>/dev/null' 10
     $h  = AdbSu 'grep -c Uebergabe /data/adb/baseos/boot.log 2>/dev/null' 10
     $el=[int]((Get-Date)-$t0).TotalSeconds; Progress -1 ("{0} · {1}" -f (T 'core.s5.stage' ($st -replace '\s','')), (MMSS $el))
@@ -495,14 +500,18 @@ function Run-Unflash(){
     Step 1 (T 'setup.steps.u_bl') 'run'
     if ((AdbState) -eq 'device') {
       Info (T 'core.uf.to_bl'); [void](AdbOut 'reboot bootloader' 10); Start-Sleep 3
+      Step 1 (T 'setup.steps.u_bl') 'wait_dev'
       if (-not (WaitFor 'bootloader' 120 (T 'core.fs.wait_bl'))) { Fail (T 'core.s1.bl_unreach') }
+      Step 1 (T 'setup.steps.u_bl') 'run'
     } elseif ((AdbState) -eq 'unauthorized') {
       Step 1 (T 'setup.steps.u_bl') 'wait_user'; Tel (T 'core.uf.allow')
       if (-not (WaitFor 'device' 120 (T 'core.uf.wait_grant'))) { Fail (T 'core.uf.no_grant') }
       [void](AdbOut 'reboot bootloader' 10); Start-Sleep 3
+      Step 1 (T 'setup.steps.u_bl') 'wait_dev'
       if (-not (WaitFor 'bootloader' 120 (T 'core.fs.wait_bl'))) { Fail (T 'core.s1.bl_unreach') }
+      Step 1 (T 'setup.steps.u_bl') 'run'
     }
-    if ((FbState) -eq 'fastbootd') { [void](FbOut 'reboot bootloader' 10); if (-not (WaitFor 'bootloader' 120 (T 'core.fs.wait_bl'))) { Fail (T 'core.s1.bl_unreach') } }
+    if ((FbState) -eq 'fastbootd') { [void](FbOut 'reboot bootloader' 10); Step 1 (T 'setup.steps.u_bl') 'wait_dev'; if (-not (WaitFor 'bootloader' 120 (T 'core.fs.wait_bl'))) { Fail (T 'core.s1.bl_unreach') }; Step 1 (T 'setup.steps.u_bl') 'run' }
     if ((FbState) -ne 'bootloader') { Fail (T 'core.uf.neither') }
     if ((FbVar 'unlocked') -ne 'yes') { Fail (T 'core.uf.locked_already') }
     Ok (T 'core.uf.bl_ok'); Step 1 (T 'setup.steps.u_bl') 'ok'
