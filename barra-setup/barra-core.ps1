@@ -557,7 +557,7 @@ function Run-Flash(){
       try { Run-KitsInner; Step 6 (T 'setup.steps.packages') 'ok' }
       catch {
         if ("$_" -eq 'CANCEL' -or "$_" -like '*CANCEL*') { throw 'CANCEL' }
-        Warn (T 'core.kit.fail' "$_"); Emit 'pkg' @{ text=(T 'core.kit.fail' "$_"); state='fail' }
+        Warn (Kit-FailText "$_"); Emit 'pkg' @{ text=(Kit-FailText "$_"); state='fail' }
         Step 6 (T 'setup.steps.packages') 'ok'
       }
     }
@@ -580,11 +580,17 @@ function KitPush($src,$dst,$label){
         } } 1800 'out'
   if ($r.code -ne 0) { throw "push failed: $src" }
 }
+function Kit-FailText($err){
+  # Innere throws nutzen teils schon core.kit.fail — nicht doppelt wickeln (23.8.: "fehlgeschlagen: fehlgeschlagen:")
+  $pfx = (T 'core.kit.fail' ([string][char]1)).Split([char]1)[0]
+  if ($pfx -and "$err".StartsWith($pfx)) { return "$err" }
+  T 'core.kit.fail' "$err"
+}
 function Run-Kits(){
   try { Run-KitsInner }
   catch {
     if ("$_" -eq 'CANCEL' -or "$_" -like '*CANCEL*') { Pkg (T 'core.cancelled') 'fail' }
-    else { Pkg (T 'core.kit.fail' "$_") 'fail' }
+    else { Pkg (Kit-FailText "$_") 'fail' }
   }
 }
 function Run-KitsInner(){
@@ -614,7 +620,7 @@ function Run-KitsInner(){
           Pkg (T 'core.kit.push' $name)
           KitPush (Join-Path $script:Kit "llm-kit\$attnTar") '/data/local/tmp/llm-kit.tar' $name
           Pkg (T 'core.kit.extract' $name)
-          $o = AdbSu 'mkdir -p /data/local/barra-attn && cd /data/local/barra-attn && tar -xf /data/local/tmp/llm-kit.tar && chmod -R 755 /data/local/barra-attn && rm /data/local/tmp/llm-kit.tar && echo KIT_OK' 600
+          $o = AdbSu 'i=0; while [ $i -lt 24 ]; do mkdir -p /data/local/barra-attn 2>/dev/null && touch /data/local/barra-attn/.wt 2>/dev/null && rm -f /data/local/barra-attn/.wt && break; sleep 5; i=$((i+1)); done; cd /data/local/barra-attn && tar -xf /data/local/tmp/llm-kit.tar && chmod -R 755 /data/local/barra-attn && rm /data/local/tmp/llm-kit.tar && echo KIT_OK' 600
           if ($o -notmatch 'KIT_OK') { throw (T 'core.kit.fail' "$name (tar)") }
         }
         Pkg (T 'core.kit.push_model' $name)
@@ -639,7 +645,7 @@ function Run-KitsInner(){
           Pkg (T 'core.kit.push' $name)
           KitPush (Join-Path $script:Kit "whisper-kit\$ptar") '/data/local/tmp/whisper-kit.tar' $name
           Pkg (T 'core.kit.extract' $name)
-          $o = AdbSu 'mkdir -p /data/local/barra-stt && cd /data/local/barra-stt && tar -xf /data/local/tmp/whisper-kit.tar && mkdir -p models && chmod -R 755 /data/local/barra-stt && rm /data/local/tmp/whisper-kit.tar && echo KIT_OK' 600
+          $o = AdbSu 'i=0; while [ $i -lt 24 ]; do mkdir -p /data/local/barra-stt 2>/dev/null && touch /data/local/barra-stt/.wt 2>/dev/null && rm -f /data/local/barra-stt/.wt && break; sleep 5; i=$((i+1)); done; cd /data/local/barra-stt && tar -xf /data/local/tmp/whisper-kit.tar && mkdir -p models && chmod -R 755 /data/local/barra-stt && rm /data/local/tmp/whisper-kit.tar && echo KIT_OK' 600
           if ($o -notmatch 'KIT_OK') { throw (T 'core.kit.fail' "$name (tar)") }
         }
         Pkg (T 'core.kit.push_model' $name)
@@ -658,7 +664,7 @@ function Run-KitsInner(){
         Pkg (T 'core.kit.push' $name)
         KitPush (Join-Path $script:Kit 'pyannote-kit\pyannote-kit.tar') '/data/local/tmp/pya-kit.tar' $name
         Pkg (T 'core.kit.extract' $name)
-        $o = AdbSu 'cd /data/local/tmp && rm -rf pya-kit && mkdir pya-kit && cd pya-kit && tar -xf ../pya-kit.tar && U=/data/local/ubuntu && mkdir -p $U/opt/barra-pya $U/opt/barra/pya && cp kit/* $U/opt/barra-pya/ && chmod 644 $U/opt/barra-pya/* && cp base/sherpa-onnx-offline-speaker-diarization $U/opt/barra/pya/ && chmod 755 $U/opt/barra/pya/sherpa-onnx-offline-speaker-diarization && cp base/barra-diarize $U/usr/local/bin/barra-diarize && chmod 755 $U/usr/local/bin/barra-diarize && cp base/pyaserver.sh /data/adb/baseos/bin/pyaserver.sh && chmod 755 /data/adb/baseos/bin/pyaserver.sh && cd /data/local/tmp && rm -rf pya-kit pya-kit.tar && echo KIT_OK' 600
+        $o = AdbSu 'i=0; while [ $i -lt 24 ]; do touch /data/local/ubuntu/opt/.wt 2>/dev/null && rm -f /data/local/ubuntu/opt/.wt && break; sleep 5; i=$((i+1)); done; cd /data/local/tmp && rm -rf pya-kit && mkdir pya-kit && cd pya-kit && tar -xf ../pya-kit.tar && U=/data/local/ubuntu && mkdir -p $U/opt/barra-pya $U/opt/barra/pya && cp kit/* $U/opt/barra-pya/ && chmod 644 $U/opt/barra-pya/* && cp base/sherpa-onnx-offline-speaker-diarization $U/opt/barra/pya/ && chmod 755 $U/opt/barra/pya/sherpa-onnx-offline-speaker-diarization && cp base/barra-diarize $U/usr/local/bin/barra-diarize && chmod 755 $U/usr/local/bin/barra-diarize && cp base/pyaserver.sh /data/adb/baseos/bin/pyaserver.sh && chmod 755 /data/adb/baseos/bin/pyaserver.sh && cd /data/local/tmp && rm -rf pya-kit pya-kit.tar && echo KIT_OK' 600
         if ($o -notmatch 'KIT_OK') { throw (T 'core.kit.fail' "$name (tar)") }
         if ($mdl -eq 'resnet34-zh') {
           # zh-Variante (TPU): gleiche Architektur — Trunk-Package/Kopf/ONNX im Kit ersetzen

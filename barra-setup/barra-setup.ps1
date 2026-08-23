@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # barra-setup.ps1 — Die GUI. Ein Fenster, drei Seiten: Einrichten → Flashen → Fertig.
 # Windows-nativ (adb/fastboot aus .\tools), kein WSL/Admin. Kern: barra-core.ps1 im Runspace.
 # UI-Texte aus .\i18n\<lang>.properties (barra-i18n.ps1, T 'key' args...); Sprach-Dropdown auf Seite 1.
@@ -586,5 +586,5 @@ if ($env:BARRA_TESTPAGE) {
     if ($kid) { $script:selKits=@($kid); $script:kitModels=@{}; $script:modelIdx=0; Show-Model-Screen }
   }
 }
-$W.Add_Closing({ $sync.cancel=$true; try { if ($script:ps) { $script:ps.Stop() } } catch {} })
+$W.Add_Closing({ $sync.cancel=$true; try { if ($script:ps) { $script:ps.BeginStop($null,$null) | Out-Null } } catch {} })   # BeginStop: Stop() blockiert den UI-Thread, wenn der Kern in einem adb-Wait steckt (Freeze 23.8.)
 $W.ShowDialog() | Out-Null
