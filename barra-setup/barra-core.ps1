@@ -488,7 +488,7 @@ function Step5_Boot(){
   $ip   = AdbSu 'ip -4 -o addr show wlan0 2>/dev/null | grep -oE [0-9.]+/ | head -1 | cut -d/ -f1' 10
   if (-not $ip) { $t1=Get-Date; while (((Get-Date)-$t1).TotalSeconds -lt 120 -and -not $ip) { Progress -1 (T 'core.s5.wait_ip'); Start-Sleep 5; $ip = AdbSu 'ip -4 -o addr show wlan0 2>/dev/null | grep -oE [0-9.]+/ | head -1 | cut -d/ -f1' 10 } }
   Ok (T 'core.s5.ok' "$hn$(if($ip){" · $ip"})"); Step 5 (T 'setup.steps.firstboot') 'ok'
-  Emit 'done' @{ host=$hn; ip=$ip; user=$(if($script:PreCfg -and $script:PreCfg.USER){$script:PreCfg.USER}else{'ubuntu'}) }
+  return @{ host=$hn; ip=$ip }
 }
 
 # ---- Werkszustand (Unflash): barra/Root/Kernel weg, Google-Stock A16 + Wipe, optional Bootloader sperren ----
@@ -547,6 +547,162 @@ function Run-Unflash(){
 }
 
 function Run-Flash(){
-  try { Ensure-Tools; Step0_Verbindung; Step1_Unlock; Step2_Stock; Step3_KernelRoot; Step4_Base; Step5_Boot }
+  try {
+    Ensure-Tools; Step0_Verbindung; Step1_Unlock; Step2_Stock; Step3_KernelRoot; Step4_Base
+    $bootInfo = Step5_Boot
+    if ($script:PreCfg -and $script:PreCfg.KITS -and @($script:PreCfg.KITS).Count) {
+      # Pakete als 7. Schritt im Flow; ein Paket-Fehler bricht den Flash NICHT ab
+      # (der Node laeuft ja) — Warnung im Feed, Retry ueber das Panel der Fertig-Seite.
+      Step 6 (T 'setup.steps.packages') 'run'
+      try { Run-KitsInner; Step 6 (T 'setup.steps.packages') 'ok' }
+      catch {
+        if ("$_" -eq 'CANCEL' -or "$_" -like '*CANCEL*') { throw 'CANCEL' }
+        Warn (T 'core.kit.fail' "$_"); Emit 'pkg' @{ text=(T 'core.kit.fail' "$_"); state='fail' }
+        Step 6 (T 'setup.steps.packages') 'ok'
+      }
+    }
+    Emit 'done' @{ host=$bootInfo.host; ip=$bootInfo.ip; user=$(if($script:PreCfg -and $script:PreCfg.USER){$script:PreCfg.USER}else{'ubuntu'}) }
+  }
   catch { if ("$_" -eq 'CANCEL' -or "$_" -like '*CANCEL*') { Info (T 'core.cancelled') } elseif ("$_" -notlike 'FAIL:*') { Emit 'fail' (T 'core.unexpected' "$_") } }
+}
+
+# ---- Pakete (Fertig-Seite): LLM-Kit / STT-Kit auf den frisch geflashten Node ----
+# Events gehen ueber 'pkg' (eigener Status auf Seite 3); Log-Zeilen wie gehabt ins Detail-Log.
+function Pkg($text,$state='run'){
+  Emit 'pkg' @{ text=$text; state=$state }
+  Emit 'progress' @{ pct=-1; text=$text }   # zeigt den Text auch in der Statuskachel (In-Flow)
+}
+function KitPush($src,$dst,$label){
+  $r = Run $script:ADB "push `"$src`" $dst" { param($l)
+        if ($l -match '\[\s*(\d+)%\]') {
+          Emit 'pkg' @{ text=("$label " + $matches[1] + '%'); state='run' }
+          Emit 'progress' @{ pct=[int]$matches[1]; text=("$label " + $matches[1] + '%') }
+        } } 1800 'out'
+  if ($r.code -ne 0) { throw "push failed: $src" }
+}
+function Run-Kits(){
+  try { Run-KitsInner }
+  catch {
+    if ("$_" -eq 'CANCEL' -or "$_" -like '*CANCEL*') { Pkg (T 'core.cancelled') 'fail' }
+    else { Pkg (T 'core.kit.fail' "$_") 'fail' }
+  }
+}
+function Run-KitsInner(){
+    $kits = @(); if ($script:PreCfg -and $script:PreCfg.KITS) { $kits = @($script:PreCfg.KITS) }
+    if (-not $kits.Count) { Pkg (T 'core.kit.all_ok') 'ok'; return }
+    # Koexistenz-Verbot (22.8., am Geraet bewiesen): llm gleichzeitig mit stt/pya = OOM-Panic +
+    # TPU-Graph-Limit. Bei Konflikt-Auswahl wird alles INSTALLIERT, aber KEIN Dienst gestartet.
+    # stt+pya zusammen ist erlaubt (TPU-Graphen 104+1 unterm Limit).
+    $bothKits = ($kits -contains 'llm') -and (($kits -contains 'stt') -or ($kits -contains 'pya'))
+    Pkg (T 'core.kit.wait_dev')
+    if ((AdbState) -ne 'device') { [void](Run $script:ADB 'wait-for-device' $null 90) }
+    if ((AdbState) -ne 'device') { throw (T 'core.kit.no_dev') }
+    # Modellwahl aus dem Setup (precfg.KITMODELS); ohne Angabe das Standard-Modell je Kit
+    $km = @{}
+    if ($script:PreCfg -and $script:PreCfg.KITMODELS) { $km = $script:PreCfg.KITMODELS }
+    foreach ($k in $kits) {
+      Chk
+      if ($k -eq 'llm') {
+        $name = T 'core.kit.llm_name'
+        $mdl = if ($km['llm']) { $km['llm'] } else { 'qwen3-4b' }
+        $mf = @{ 'qwen3-4b'='qwen3-4b.gguf'; 'qwen2.5-1.5b'='qwen2.5-1.5b.gguf'; 'glm-edge-4b'='glm-edge-4b-chat.gguf'; 'qwen38-distill'='qwen38-4b-distill.gguf'; 'gemma-e2b'='gemma-4-e2b-q4_0.gguf'; 'gemma-e4b'='gemma-4-e4b-q3_k_s.gguf' }[$mdl]
+        if (-not $mf) { throw (T 'core.kit.fail' "$name (model id $mdl)") }
+        # TPU-Attention-Kit je Modell (v7/v8-Pipeline; llmserver erkennt es am GGUF-Basenamen).
+        # distill (nur 8/32 Full-Attention-Layer) und gemma-e4b (Q3, nicht im Base-Stack) haben keins.
+        $attnTar = @{ 'qwen3-4b'='llm-attn-qwen3-4b.tar'; 'qwen2.5-1.5b'='llm-attn-qwen2.5-1.5b.tar'; 'glm-edge-4b'='llm-attn-glm-edge-4b-chat.tar'; 'gemma-e2b'='llm-attn-gemma-4-e2b-q4_0.tar' }[$mdl]
+        if ($attnTar) {
+          Pkg (T 'core.kit.push' $name)
+          KitPush (Join-Path $script:Kit "llm-kit\$attnTar") '/data/local/tmp/llm-kit.tar' $name
+          Pkg (T 'core.kit.extract' $name)
+          $o = AdbSu 'mkdir -p /data/local/barra-attn && cd /data/local/barra-attn && tar -xf /data/local/tmp/llm-kit.tar && chmod -R 755 /data/local/barra-attn && rm /data/local/tmp/llm-kit.tar && echo KIT_OK' 600
+          if ($o -notmatch 'KIT_OK') { throw (T 'core.kit.fail' "$name (tar)") }
+        }
+        Pkg (T 'core.kit.push_model' $name)
+        KitPush (Join-Path $script:Kit "llm-kit\$mf") '/data/local/tmp/llm-model.gguf' $name
+        $o = AdbSu ('H=$(ls -d /data/local/ubuntu/home/* | head -1); mkdir -p $H/models && mv /data/local/tmp/llm-model.gguf $H/models/' + $mf + ' && chown -R 1001:1001 $H/models && echo MDL_OK') 180
+        if ($o -notmatch 'MDL_OK') { throw (T 'core.kit.fail' "$name (model)") }
+        if (-not $bothKits) {
+          Pkg (T 'core.kit.start' $name)
+          [void](AdbSu ('H=$(ls -d /data/local/ubuntu/home/* | head -1); sh /data/adb/baseos/bin/llmserver.sh start $H/models/' + $mf) 300)
+        }
+        Ok (T 'core.kit.ok' $name)
+      }
+      elseif ($k -eq 'stt') {
+        $name = T 'core.kit.stt_name'
+        $mdl = if ($km['stt']) { $km['stt'] } else { 'turbo' }
+        $mf = @{ 'turbo'='ggml-large-v3-turbo-q5_0.bin'; 'tiny'='ggml-tiny.bin'; 'base'='ggml-base.bin'; 'small'='ggml-small.bin'; 'medium'='ggml-medium-q5_0.bin' }[$mdl]
+        if (-not $mf) { throw (T 'core.kit.fail' "$name (model id $mdl)") }
+        # TPU-Encoder-Packages, wo ein Satz existiert (turbo, base); andere Modelle laufen auf der CPU
+        $ptar = @{ 'turbo'='whisper-kit-turbo.tar'; 'base'='whisper-kit-base.tar'; 'tiny'='whisper-kit-tiny.tar'; 'small'='whisper-kit-small.tar'; 'medium'='whisper-kit-medium.tar' }[$mdl]
+        if ($ptar -and -not (Test-Path (Join-Path $script:Kit "whisper-kit\$ptar"))) { $ptar = $null }
+        if ($ptar) {
+          Pkg (T 'core.kit.push' $name)
+          KitPush (Join-Path $script:Kit "whisper-kit\$ptar") '/data/local/tmp/whisper-kit.tar' $name
+          Pkg (T 'core.kit.extract' $name)
+          $o = AdbSu 'mkdir -p /data/local/barra-stt && cd /data/local/barra-stt && tar -xf /data/local/tmp/whisper-kit.tar && mkdir -p models && chmod -R 755 /data/local/barra-stt && rm /data/local/tmp/whisper-kit.tar && echo KIT_OK' 600
+          if ($o -notmatch 'KIT_OK') { throw (T 'core.kit.fail' "$name (tar)") }
+        }
+        Pkg (T 'core.kit.push_model' $name)
+        KitPush (Join-Path $script:Kit "whisper-kit\$mf") '/data/local/tmp/stt-model.bin' $name
+        $o = AdbSu ('mkdir -p /data/local/barra-stt/models && mv /data/local/tmp/stt-model.bin /data/local/barra-stt/models/' + $mf + ' && echo MDL_OK') 120
+        if ($o -notmatch 'MDL_OK') { throw (T 'core.kit.fail' "$name (model)") }
+        if (-not $bothKits) {
+          Pkg (T 'core.kit.start' $name)
+          [void](AdbSu ('sh /data/adb/baseos/bin/sttserver.sh start /data/local/barra-stt/models/' + $mf) 400)
+        }
+        Ok (T 'core.kit.ok' $name)
+      }
+      elseif ($k -eq 'pya') {
+        $name = T 'core.kit.pya_name'
+        $mdl = if ($km['pya']) { $km['pya'] } else { 'resnet34-en' }
+        Pkg (T 'core.kit.push' $name)
+        KitPush (Join-Path $script:Kit 'pyannote-kit\pyannote-kit.tar') '/data/local/tmp/pya-kit.tar' $name
+        Pkg (T 'core.kit.extract' $name)
+        $o = AdbSu 'cd /data/local/tmp && rm -rf pya-kit && mkdir pya-kit && cd pya-kit && tar -xf ../pya-kit.tar && U=/data/local/ubuntu && mkdir -p $U/opt/barra-pya $U/opt/barra/pya && cp kit/* $U/opt/barra-pya/ && chmod 644 $U/opt/barra-pya/* && cp base/sherpa-onnx-offline-speaker-diarization $U/opt/barra/pya/ && chmod 755 $U/opt/barra/pya/sherpa-onnx-offline-speaker-diarization && cp base/barra-diarize $U/usr/local/bin/barra-diarize && chmod 755 $U/usr/local/bin/barra-diarize && cp base/pyaserver.sh /data/adb/baseos/bin/pyaserver.sh && chmod 755 /data/adb/baseos/bin/pyaserver.sh && cd /data/local/tmp && rm -rf pya-kit pya-kit.tar && echo KIT_OK' 600
+        if ($o -notmatch 'KIT_OK') { throw (T 'core.kit.fail' "$name (tar)") }
+        if ($mdl -eq 'resnet34-zh') {
+          # zh-Variante (TPU): gleiche Architektur — Trunk-Package/Kopf/ONNX im Kit ersetzen
+          Pkg (T 'core.kit.push_model' $name)
+          KitPush (Join-Path $script:Kit 'pyannote-kit\r34zh_trunk.package') '/data/local/tmp/pya-zh.pkg' $name
+          KitPush (Join-Path $script:Kit 'pyannote-kit\head_zh.bin') '/data/local/tmp/pya-zh.head' $name
+          KitPush (Join-Path $script:Kit 'pyannote-kit\resnet34_zh.onnx') '/data/local/tmp/pya-zh.onnx' $name
+          $o = AdbSu 'K=/data/local/ubuntu/opt/barra-pya; mv /data/local/tmp/pya-zh.pkg $K/r34_trunk.package && mv /data/local/tmp/pya-zh.head $K/head.bin && mv /data/local/tmp/pya-zh.onnx $K/resnet34.onnx && chmod 644 $K/* && echo EMB_OK' 120
+          if ($o -notmatch 'EMB_OK') { throw (T 'core.kit.fail' "$name (model)") }
+          if (-not $bothKits) {
+            Pkg (T 'core.kit.start' $name)
+            [void](AdbSu 'sh /data/adb/baseos/bin/pyaserver.sh start' 180)
+          }
+        } elseif ($mdl -eq 'eres2net-zh') {
+          # eres2net auf TPU: Multi-Output-Rumpf + Float-Tail; ersetzt die r34-Kit-Dateien
+          Pkg (T 'core.kit.push_model' $name)
+          KitPush (Join-Path $script:Kit 'pyannote-kit\eres_body.package') '/data/local/tmp/pya-e1' $name
+          KitPush (Join-Path $script:Kit 'pyannote-kit\eres_tail.onnx') '/data/local/tmp/pya-e2' $name
+          KitPush (Join-Path $script:Kit 'pyannote-kit\head_eres.bin') '/data/local/tmp/pya-e3' $name
+          KitPush (Join-Path $script:Kit 'pyannote-kit\eres_params.txt') '/data/local/tmp/pya-e4' $name
+          $o = AdbSu 'K=/data/local/ubuntu/opt/barra-pya; rm -f $K/r34_trunk.package $K/emb_cpu.onnx; mv /data/local/tmp/pya-e1 $K/eres_body.package && mv /data/local/tmp/pya-e2 $K/eres_tail.onnx && mv /data/local/tmp/pya-e3 $K/head.bin && mv /data/local/tmp/pya-e4 $K/eres_params.txt && chmod 644 $K/* && echo EMB_OK' 120
+          if ($o -notmatch 'EMB_OK') { throw (T 'core.kit.fail' "$name (model)") }
+          if (-not $bothKits) {
+            Pkg (T 'core.kit.start' $name)
+            [void](AdbSu 'sh /data/adb/baseos/bin/pyaserver.sh start' 180)
+          }
+        } elseif ($mdl -eq 'titanet-en') {
+          # TitaNet auf TPU: 5-Segment-Kette + Float-Tail; ersetzt die r34-Kit-Dateien
+          Pkg (T 'core.kit.push_model' $name)
+          foreach ($tf in @('tita_seg0.package','tita_seg1.package','tita_seg2.package','tita_seg3.package','tita_seg4.package','tita_tail.onnx','tita_glue.bin','tita_params.txt')) {
+            KitPush (Join-Path $script:Kit "pyannote-kit\$tf") "/data/local/tmp/$tf" $name
+          }
+          $o = AdbSu 'K=/data/local/ubuntu/opt/barra-pya; rm -f $K/r34_trunk.package $K/eres_body.package $K/eres_tail.onnx $K/eres_params.txt $K/emb_cpu.onnx $K/head.bin; mv /data/local/tmp/tita_seg0.package /data/local/tmp/tita_seg1.package /data/local/tmp/tita_seg2.package /data/local/tmp/tita_seg3.package /data/local/tmp/tita_seg4.package /data/local/tmp/tita_tail.onnx /data/local/tmp/tita_glue.bin /data/local/tmp/tita_params.txt $K/ && chmod 644 $K/* && echo EMB_OK' 180
+          if ($o -notmatch 'EMB_OK') { throw (T 'core.kit.fail' "$name (model)") }
+          if (-not $bothKits) {
+            Pkg (T 'core.kit.start' $name)
+            [void](AdbSu 'sh /data/adb/baseos/bin/pyaserver.sh start' 180)
+          }
+        } elseif (-not $bothKits) {
+          Pkg (T 'core.kit.start' $name)
+          [void](AdbSu 'sh /data/adb/baseos/bin/pyaserver.sh start' 180)
+        }
+        Ok (T 'core.kit.ok' $name)
+      }
+    }
+    if ($bothKits) { Pkg (T 'core.kit.both_note') 'ok' } else { Pkg (T 'core.kit.all_ok') 'ok' }
 }

@@ -13,22 +13,39 @@ dist/debs/*.deb
 # Large binaries — published as GitHub release assets, never committed
 *.img
 *.zip
+*.tar
 *.tar.gz
 *.tar.zst
 *.gguf
 *.tflite
 *.package
+*.onnx
 barra-setup/payload/
 barra-setup/stock/
-barra-setup/llm-kit/*.tar
-barra-setup/llm-kit/*.gguf
+barra-setup/dev/
 images/
 backups/
 
+# Model kits: only the installers are ours; models/packages are release assets
+barra-setup/llm-kit/*
+!barra-setup/llm-kit/install-llm.ps1
+barra-setup/whisper-kit/*
+!barra-setup/whisper-kit/install-stt.ps1
+barra-setup/pyannote-kit/*
+!barra-setup/pyannote-kit/install-pya.ps1
+
 # Fetched at setup time from their original sources (never redistribute).
-# Exception: lpmake.exe is OUR OWN mingw build from AOSP sources (Apache-2.0) and ships in the repo.
+# Exceptions: lpmake.exe is OUR OWN mingw build from AOSP sources (Apache-2.0);
+# the barra-*-port tool chain and its generators are our own code.
 barra-setup/tools/*
 !barra-setup/tools/lpmake.exe
+!barra-setup/tools/barra-llm-port.sh
+!barra-setup/tools/barra-stt-port.sh
+!barra-setup/tools/barra-emb-port.sh
+!barra-setup/tools/gen_attn_gen.py
+!barra-setup/tools/wespeaker_r34_build.py
+!barra-setup/tools/gen-model.sh
+!barra-setup/tools/core-regroup.sh
 Magisk-*.apk
 
 # Local / editor

@@ -1,4 +1,4 @@
-﻿# ============================================================================
+# ============================================================================
 # barra-setup.ps1 — Die GUI. Ein Fenster, drei Seiten: Einrichten → Flashen → Fertig.
 # Windows-nativ (adb/fastboot aus .\tools), kein WSL/Admin. Kern: barra-core.ps1 im Runspace.
 # UI-Texte aus .\i18n\<lang>.properties (barra-i18n.ps1, T 'key' args...); Sprach-Dropdown auf Seite 1.
@@ -23,7 +23,7 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="barra Setup" Width="1060" Height="620" MinWidth="900" MinHeight="560" WindowStartupLocation="CenterScreen"
+        Title="barra Setup" Width="1060" Height="720" MinWidth="900" MinHeight="660" WindowStartupLocation="CenterScreen"
         Background="#0A0C10" FontFamily="Segoe UI" FontSize="14">
   <Window.Resources>
     <Style TargetType="Button">
@@ -88,6 +88,51 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
           </StackPanel>
         </Grid>
         <DockPanel Grid.Row="2" Margin="0,16,0,0"><Button x:Name="BtnUnflash" Content="" DockPanel.Dock="Left" Background="#2A2F3A" Foreground="#C9CFD8" Padding="12,6"/><Button x:Name="BtnNext1" Content="" DockPanel.Dock="Right" HorizontalAlignment="Right"/><TextBlock x:Name="FErr" Foreground="#FF453A" VerticalAlignment="Center" Margin="14,0,0,0"/></DockPanel>
+      </Grid>
+    </Border>
+
+    <!-- SEITE 1b: Pakete (eigener Bildschirm mit Erklaerungen) -->
+    <Border Grid.Row="1" x:Name="PagePkg" Background="#14181F" CornerRadius="14" Padding="26" Visibility="Collapsed">
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Grid.Row="0"><TextBlock x:Name="PkTitle" Text="" FontSize="22" FontWeight="SemiBold" Foreground="#F0F2F6"/><TextBlock x:Name="PkIntro" Text="" Margin="0,4,0,0" TextWrapping="Wrap"/></StackPanel>
+        <ScrollViewer Grid.Row="1" x:Name="SvPkg" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0">
+          <StackPanel>
+            <Border x:Name="CardLlm" Background="#0E1116" BorderBrush="#262A33" BorderThickness="1" CornerRadius="12" Padding="18,14" Margin="0,0,0,12">
+              <StackPanel>
+                <CheckBox x:Name="ChkLlm" Foreground="#F0F2F6" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock x:Name="DescLlm" Margin="26,6,0,0" TextWrapping="Wrap" FontSize="13"/>
+                <TextBlock x:Name="FactLlm" Style="{StaticResource Hint}" Margin="26,6,0,0"/>
+              </StackPanel>
+            </Border>
+            <Border x:Name="CardStt" Background="#0E1116" BorderBrush="#262A33" BorderThickness="1" CornerRadius="12" Padding="18,14" Margin="0,0,0,12">
+              <StackPanel>
+                <CheckBox x:Name="ChkStt" Foreground="#F0F2F6" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock x:Name="DescStt" Margin="26,6,0,0" TextWrapping="Wrap" FontSize="13"/>
+                <TextBlock x:Name="FactStt" Style="{StaticResource Hint}" Margin="26,6,0,0"/>
+              </StackPanel>
+            </Border>
+            <Border x:Name="CardPya" Background="#0E1116" BorderBrush="#262A33" BorderThickness="1" CornerRadius="12" Padding="18,14" Margin="0,0,0,12">
+              <StackPanel>
+                <CheckBox x:Name="ChkPya" Foreground="#F0F2F6" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock x:Name="DescPya" Margin="26,6,0,0" TextWrapping="Wrap" FontSize="13"/>
+                <TextBlock x:Name="FactPya" Style="{StaticResource Hint}" Margin="26,6,0,0"/>
+              </StackPanel>
+            </Border>
+            <TextBlock x:Name="PkCoexWarn" Foreground="#FFB020" TextWrapping="Wrap" FontSize="13" Margin="0,2,0,0" Visibility="Collapsed"/>
+          </StackPanel>
+        </ScrollViewer>
+        <DockPanel Grid.Row="2" Margin="0,16,0,0"><Button x:Name="BtnPkgBack" Content="" DockPanel.Dock="Left" Background="#2A2F3A" Foreground="#C9CFD8"/><Button x:Name="BtnPkgNext" Content="" DockPanel.Dock="Right" HorizontalAlignment="Right"/></DockPanel>
+      </Grid>
+    </Border>
+
+    <!-- SEITE 1c: Modellwahl je Paket -->
+    <Border Grid.Row="1" x:Name="PageModel" Background="#14181F" CornerRadius="14" Padding="26" Visibility="Collapsed">
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <StackPanel Grid.Row="0"><TextBlock x:Name="MTitle" Text="" FontSize="22" FontWeight="SemiBold" Foreground="#F0F2F6"/><TextBlock x:Name="MIntro" Text="" Margin="0,4,0,0" TextWrapping="Wrap"/></StackPanel>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0"><StackPanel x:Name="MList"/></ScrollViewer>
+        <DockPanel Grid.Row="2" Margin="0,16,0,0"><Button x:Name="BtnMBack" Content="" DockPanel.Dock="Left" Background="#2A2F3A" Foreground="#C9CFD8"/><Button x:Name="BtnMNext" Content="" DockPanel.Dock="Right" HorizontalAlignment="Right"/></DockPanel>
       </Grid>
     </Border>
 
@@ -159,6 +204,19 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
         <TextBlock x:Name="DoneSub" Text="" HorizontalAlignment="Center" Margin="0,6,0,18" TextWrapping="Wrap" TextAlignment="Center"/>
         <Border Background="#0A0C10" CornerRadius="10" Padding="16"><DockPanel><Button x:Name="BtnCopy" Content="" DockPanel.Dock="Right" Padding="12,6" Background="#2A2F3A" Margin="12,0,0,0"/><TextBox x:Name="DoneCmd" FontFamily="Consolas" FontSize="15" IsReadOnly="True" BorderThickness="0" Background="Transparent" Foreground="#F0F2F6" VerticalAlignment="Center"/></DockPanel></Border>
         <TextBlock x:Name="DoneHint" Text="" Margin="0,14,0,0" TextWrapping="Wrap" TextAlignment="Center" FontSize="13" Foreground="#8B939F"/>
+        <Border x:Name="PkgPanel" Background="#0E1116" BorderBrush="#262A33" BorderThickness="1" CornerRadius="12" Padding="16" Margin="0,18,0,0" Visibility="Collapsed">
+          <StackPanel>
+            <TextBlock x:Name="PkgTitle" Style="{StaticResource Grp}"/>
+            <TextBlock x:Name="PkgIntro" Style="{StaticResource Hint}"/>
+            <CheckBox x:Name="PkgLlm" Margin="0,8,0,0" Foreground="#C9CFD8"/>
+            <CheckBox x:Name="PkgStt" Margin="0,6,0,0" Foreground="#C9CFD8"/>
+            <CheckBox x:Name="PkgPya" Margin="0,6,0,0" Foreground="#C9CFD8"/>
+            <DockPanel Margin="0,12,0,0" LastChildFill="True">
+              <Button x:Name="BtnPkg" Content="" DockPanel.Dock="Left" Padding="14,7"/>
+              <TextBlock x:Name="PkgStatus" Text="" VerticalAlignment="Center" Margin="14,0,0,0" TextWrapping="Wrap" Foreground="#8B939F"/>
+            </DockPanel>
+          </StackPanel>
+        </Border>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,22,0,0"><Button x:Name="BtnAgain" Content="" Margin="0,0,12,0"/><Button x:Name="BtnClose" Content="" Background="#2A2F3A"/></StackPanel>
       </StackPanel>
     </Border>
@@ -166,7 +224,7 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
 </Window>
 "@
 $W = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
-$ui=@{}; foreach ($n in 'Logo','GrpAccess','GrpNet','GrpOp','SsidHint','HostHint','DispHint','Sub','Pager','FLang','Page1','Page2','Page3','P1Title','P1Intro','LUser','LPass','LPass2','LHost','LTz','LSsid','LPsk','LChg','LTo','LChgHint','LDisp','LKey','FUser','FPass','FPass2','FHost','FTz','FSsid','BtnWifi','FPsk','FKey','FKeyHint','FChgS','FChgE','FDisp','FErr','BtnNext1','BtnUnflash','Steps','StepTitle','StateBox','StateDot','StateText','Prog','ProgText','FeedScroll','Feed','ActionBox','ActionText','BtnYes','BtnNo','BtnStart','BtnLog','BtnBack','Status','LogBox','Log','DoneTitle','DoneSub','DoneCmd','BtnCopy','DoneHint','BtnAgain','BtnClose') { $ui[$n]=$W.FindName($n) }
+$ui=@{}; foreach ($n in 'Logo','GrpAccess','GrpNet','GrpOp','SsidHint','HostHint','DispHint','Sub','Pager','FLang','Page1','Page2','Page3','P1Title','P1Intro','LUser','LPass','LPass2','LHost','LTz','LSsid','LPsk','LChg','LTo','LChgHint','LDisp','LKey','FUser','FPass','FPass2','FHost','FTz','FSsid','BtnWifi','FPsk','FKey','FKeyHint','FChgS','FChgE','FDisp','FErr','BtnNext1','BtnUnflash','Steps','StepTitle','StateBox','StateDot','StateText','Prog','ProgText','FeedScroll','Feed','ActionBox','ActionText','BtnYes','BtnNo','BtnStart','BtnLog','BtnBack','Status','LogBox','Log','DoneTitle','DoneSub','DoneCmd','BtnCopy','DoneHint','BtnAgain','BtnClose','PkgPanel','PkgTitle','PkgIntro','PkgLlm','PkgStt','PkgPya','BtnPkg','PkgStatus','PagePkg','PkTitle','PkIntro','CardLlm','ChkLlm','DescLlm','FactLlm','CardStt','ChkStt','DescStt','FactStt','CardPya','ChkPya','DescPya','FactPya','PkCoexWarn','BtnPkgBack','BtnPkgNext','PageModel','MTitle','MIntro','MList','BtnMBack','BtnMNext','SvPkg') { $ui[$n]=$W.FindName($n) }
 
 # Logo (barra-setup\logo.png) in Header + Fenster-Icon — fehlt die Datei, bleibt nur die Wortmarke
 $logoFile = Join-Path $Kit 'logo.png'
@@ -191,6 +249,16 @@ function Apply-UiLang {
   $ui.BtnYes.Content=T 'setup.p2.done_btn'; $ui.BtnNo.Content=T 'setup.p2.cancel'
   $ui.BtnStart.Content=T 'setup.p2.start'; $ui.BtnLog.Content=T 'setup.p2.details_closed'; $ui.BtnBack.Content=T 'setup.p2.back'
   $ui.DoneTitle.Text=T 'setup.p3.done'; $ui.BtnCopy.Content=T 'setup.p3.copy'; $ui.BtnAgain.Content=T 'setup.p3.again'; $ui.BtnClose.Content=T 'setup.p3.close'
+  $ui.PkgTitle.Text=(T 'setup.p3.pkg_title').ToUpper(); $ui.PkgIntro.Text=T 'setup.p3.pkg_intro'
+  $ui.PkgLlm.Content=T 'setup.p3.pkg_llm'; $ui.PkgStt.Content=T 'setup.p3.pkg_stt'; $ui.PkgPya.Content=T 'setup.p3.pkg_pya'; $ui.BtnPkg.Content=T 'setup.p3.pkg_btn'
+  # Pakete-Bildschirm (Seite 1b) + Modellwahl (Seite 1c)
+  $ui.PkTitle.Text=T 'setup.pkg.title'; $ui.PkIntro.Text=T 'setup.pkg.intro'
+  $ui.ChkLlm.Content=T 'setup.pkg.llm_name'; $ui.DescLlm.Text=T 'setup.pkg.llm_desc'; $ui.FactLlm.Text=T 'setup.pkg.llm_fact'
+  $ui.ChkStt.Content=T 'setup.pkg.stt_name'; $ui.DescStt.Text=T 'setup.pkg.stt_desc'; $ui.FactStt.Text=T 'setup.pkg.stt_fact'
+  $ui.ChkPya.Content=T 'setup.pkg.pya_name'; $ui.DescPya.Text=T 'setup.pkg.pya_desc'; $ui.FactPya.Text=T 'setup.pkg.pya_fact'
+  $ui.PkCoexWarn.Text=T 'setup.pkg.coex_warn'
+  $ui.BtnPkgBack.Content=T 'setup.p2.back'; $ui.BtnPkgNext.Content=T 'setup.p1.next'
+  $ui.MIntro.Text=T 'setup.model.intro'; $ui.BtnMBack.Content=T 'setup.p2.back'; $ui.BtnMNext.Content=T 'setup.p1.next'
   Set-Mode $script:mode
 }
 
@@ -239,7 +307,15 @@ $ui.FLang.Add_SelectionChanged({
 })
 
 # ---------- Seiten ----------
-function Show-Page($n){ $ui.Page1.Visibility=if($n -eq 1){'Visible'}else{'Collapsed'}; $ui.Page2.Visibility=if($n -eq 2){'Visible'}else{'Collapsed'}; $ui.Page3.Visibility=if($n -eq 3){'Visible'}else{'Collapsed'}; $ui.Pager.Text=(T 'setup.pager' $n) }
+# 1=Formular, 'pkg'=Paket-Auswahl, 'model'=Modellwahl, 2=Flashen, 3=Fertig
+function Show-Page($n){
+  $ui.Page1.Visibility   = if($n -eq 1){'Visible'}else{'Collapsed'}
+  $ui.PagePkg.Visibility = if($n -eq 'pkg'){'Visible'}else{'Collapsed'}
+  $ui.PageModel.Visibility = if($n -eq 'model'){'Visible'}else{'Collapsed'}
+  $ui.Page2.Visibility   = if($n -eq 2){'Visible'}else{'Collapsed'}
+  $ui.Page3.Visibility   = if($n -eq 3){'Visible'}else{'Collapsed'}
+  $ui.Pager.Text = switch ($n) { 'pkg' { T 'setup.pager_pkg' } 'model' { T 'setup.pager_model' } default { T 'setup.pager' $n } }
+}
 
 # ---------- Seite 2: Schritte + Zustand ----------
 $script:stepNames=@(); $script:stepUI=@()
@@ -281,12 +357,13 @@ Show-Page 1
 # ---------- Kern im Runspace ----------
 $sync=[hashtable]::Synchronized(@{ q=[System.Collections.Concurrent.ConcurrentQueue[object]]::new(); answer=$null; cancel=$false; done=$false; running=$false })
 $script:rs=$null; $script:ps=$null
-function Start-Core($precfg){
+function Start-Core($precfg,$coreMode=$null){
   $sync.done=$false; $sync.running=$true; $sync.cancel=$false
   $script:rs=[runspacefactory]::CreateRunspace(); $script:rs.ApartmentState='MTA'; $script:rs.Open()
   # ACHTUNG: PowerShell-Variablen sind case-insensitiv und der Kern setzt beim Laden $script:PreCfg/$script:Kit
   # in DERSELBEN Scope -> die injizierten Variablen brauchen eindeutige Namen (sonst genullt).
-  $script:rs.SessionStateProxy.SetVariable('sync',$sync); $script:rs.SessionStateProxy.SetVariable('barraKitDir',$Kit); $script:rs.SessionStateProxy.SetVariable('barraPreCfgIn',$precfg); $script:rs.SessionStateProxy.SetVariable('barraModeIn',$script:mode); $script:rs.SessionStateProxy.SetVariable('barraLangIn',$script:lang)
+  $modeIn = if ($coreMode) { $coreMode } else { $script:mode }
+  $script:rs.SessionStateProxy.SetVariable('sync',$sync); $script:rs.SessionStateProxy.SetVariable('barraKitDir',$Kit); $script:rs.SessionStateProxy.SetVariable('barraPreCfgIn',$precfg); $script:rs.SessionStateProxy.SetVariable('barraModeIn',$modeIn); $script:rs.SessionStateProxy.SetVariable('barraLangIn',$script:lang)
   $script:ps=[powershell]::Create(); $script:ps.Runspace=$script:rs
   $script:ps.AddScript({
     . (Join-Path $barraKitDir 'barra-i18n.ps1')
@@ -297,7 +374,7 @@ function Start-Core($precfg){
     # Answer/Cancel aus der GUI durchreichen
     $script:Answer = $sync.answerQ
     $t = [System.Threading.Thread]::CurrentThread
-    try { if ($barraModeIn -eq 'unflash') { Run-Unflash } else { Run-Flash } } catch { $sync.q.Enqueue(@{ k='fail'; d=(T 'core.corefail' "$_") }) }
+    try { if ($barraModeIn -eq 'unflash') { Run-Unflash } elseif ($barraModeIn -eq 'kits') { Run-Kits } else { Run-Flash } } catch { $sync.q.Enqueue(@{ k='fail'; d=(T 'core.corefail' "$_") }) }
     $sync.done=$true
   }) | Out-Null
   $sync.answerQ=[System.Collections.Concurrent.ConcurrentQueue[string]]::new()
@@ -339,10 +416,103 @@ $ui.BtnNext1.Add_Click({
   # Passwort geht in die preconfig (wird auf dem Geraet als root per chpasswd gesetzt; Datei danach geloescht)
   $script:precfg = [ordered]@{ USER=$u; PASS=$p1; HOST=$h; TZ=$tz; SSID=$ssid; PSK=$psk; SSHKEY=($key -replace "`r?`n",' '); CHARGE_START=$ui.FChgS.Text; CHARGE_STOP=$ui.FChgE.Text; DISPLAY_TIMEOUT=$ui.FDisp.Text; LANG_UI=$script:lang }
   Save-Cfg @{ user=$u; host=$h; tz=$tz; ssid=$ssid; psk=$psk; key=$key; chgS=$ui.FChgS.Text; chgE=$ui.FChgE.Text; disp=$ui.FDisp.Text; lang=$script:lang }
-  Show-Page 2
-  Add-Feed (T 'setup.p2.saved' $u $h $(if($ssid){ T 'setup.p2.saved_wifi' $ssid } else { '' })) '#8B939F'
-  Add-Feed (T 'setup.p2.connect_hint') '#C9CFD8'
+  # Weiter zum Paket-Bildschirm (falls Kits vorliegen), sonst direkt zum Flashen
+  Detect-Kits
+  if ($script:kitAvail.Count) { Init-Pkg-Screen; Show-Page 'pkg' } else { Enter-FlashPage @() }
 })
+
+# ---------- Pakete-Bildschirm (1b) + Modellwahl (1c) ----------
+# Datengetriebener Katalog: nur Kits/Modelle anbieten, deren Dateien im Setup-Ordner liegen.
+$script:KitCatalog = @(
+  @{ id='llm'; name={T 'setup.pkg.llm_name'}; models=@(
+      @{ id='qwen3-4b';     name={T 'setup.model.llm_qwen4b'};    desc={T 'setup.model.llm_qwen4b_desc'};    files=@('llm-kit\llm-attn-qwen3-4b.tar','llm-kit\qwen3-4b.gguf') }
+      @{ id='qwen2.5-1.5b'; name={T 'setup.model.llm_qwen15b'};   desc={T 'setup.model.llm_qwen15b_desc'};   files=@('llm-kit\llm-attn-qwen2.5-1.5b.tar','llm-kit\qwen2.5-1.5b.gguf') }
+      @{ id='glm-edge-4b';  name={T 'setup.model.llm_glmedge'};   desc={T 'setup.model.llm_glmedge_desc'};   files=@('llm-kit\llm-attn-glm-edge-4b-chat.tar','llm-kit\glm-edge-4b-chat.gguf') }
+      @{ id='qwen38-distill'; name={T 'setup.model.llm_qwen38d'}; desc={T 'setup.model.llm_qwen38d_desc'};   files=@('llm-kit\qwen38-4b-distill.gguf') }
+      @{ id='gemma-e2b';    name={T 'setup.model.llm_gemma_e2b'}; desc={T 'setup.model.llm_gemma_e2b_desc'}; files=@('llm-kit\llm-attn-gemma-4-e2b-q4_0.tar','llm-kit\gemma-4-e2b-q4_0.gguf') }
+      @{ id='gemma-e4b';    name={T 'setup.model.llm_gemma_e4b'}; desc={T 'setup.model.llm_gemma_e4b_desc'}; files=@('llm-kit\gemma-4-e4b-q3_k_s.gguf') } ) }
+  @{ id='stt'; name={T 'setup.pkg.stt_name'}; models=@(
+      @{ id='turbo';  name={T 'setup.model.stt_turbo'};  desc={T 'setup.model.stt_turbo_desc'};  files=@('whisper-kit\whisper-kit-turbo.tar','whisper-kit\ggml-large-v3-turbo-q5_0.bin') }
+      @{ id='medium'; name={T 'setup.model.stt_medium'}; desc={T 'setup.model.stt_medium_desc'}; files=@('whisper-kit\whisper-kit-medium.tar','whisper-kit\ggml-medium-q5_0.bin') }
+      @{ id='small';  name={T 'setup.model.stt_small'};  desc={T 'setup.model.stt_small_desc'};  files=@('whisper-kit\whisper-kit-small.tar','whisper-kit\ggml-small.bin') }
+      @{ id='base';   name={T 'setup.model.stt_base'};   desc={T 'setup.model.stt_base_desc'};   files=@('whisper-kit\whisper-kit-base.tar','whisper-kit\ggml-base.bin') }
+      @{ id='tiny';   name={T 'setup.model.stt_tiny'};   desc={T 'setup.model.stt_tiny_desc'};   files=@('whisper-kit\whisper-kit-tiny.tar','whisper-kit\ggml-tiny.bin') } ) }
+  @{ id='pya'; name={T 'setup.pkg.pya_name'}; models=@(
+      @{ id='resnet34-en'; name={T 'setup.model.pya_r34'};     desc={T 'setup.model.pya_r34_desc'};     files=@('pyannote-kit\pyannote-kit.tar') }
+      @{ id='resnet34-zh'; name={T 'setup.model.pya_r34zh'};   desc={T 'setup.model.pya_r34zh_desc'};   files=@('pyannote-kit\pyannote-kit.tar','pyannote-kit\r34zh_trunk.package','pyannote-kit\head_zh.bin','pyannote-kit\resnet34_zh.onnx') }
+      @{ id='eres2net-zh'; name={T 'setup.model.pya_eres'};    desc={T 'setup.model.pya_eres_desc'};    files=@('pyannote-kit\pyannote-kit.tar','pyannote-kit\eres_body.package','pyannote-kit\eres_tail.onnx','pyannote-kit\head_eres.bin','pyannote-kit\eres_params.txt') }
+      @{ id='titanet-en';  name={T 'setup.model.pya_titanet'}; desc={T 'setup.model.pya_titanet_desc'}; files=@('pyannote-kit\pyannote-kit.tar','pyannote-kit\tita_seg0.package','pyannote-kit\tita_seg4.package','pyannote-kit\tita_tail.onnx','pyannote-kit\tita_glue.bin','pyannote-kit\tita_params.txt') } ) }
+)
+function Get-KitModels($kitId){
+  $k = $script:KitCatalog | Where-Object { $_.id -eq $kitId }
+  if (-not $k) { return ,@() }
+  # ,@(...): PowerShell entrollt Ein-Element-Arrays beim Return — das Komma erhaelt das Array
+  ,@($k.models | Where-Object { $m=$_; -not @($m.files | Where-Object { -not (Test-Path (Join-Path $Kit $_)) }).Count })
+}
+function Update-CoexWarn {
+  $llm = $ui.ChkLlm.IsEnabled -and $ui.ChkLlm.IsChecked
+  $other = ($ui.ChkStt.IsEnabled -and $ui.ChkStt.IsChecked) -or ($ui.ChkPya.IsEnabled -and $ui.ChkPya.IsChecked)
+  $ui.PkCoexWarn.Visibility = if ($llm -and $other) { 'Visible' } else { 'Collapsed' }
+}
+function Init-Pkg-Screen {
+  foreach ($row in @(@('llm',$ui.CardLlm,$ui.ChkLlm),@('stt',$ui.CardStt,$ui.ChkStt),@('pya',$ui.CardPya,$ui.ChkPya))) {
+    $have = [bool](Get-KitModels $row[0]).Count
+    $row[1].Visibility = if ($have) { 'Visible' } else { 'Collapsed' }
+    $row[2].IsEnabled = $have; if (-not $have) { $row[2].IsChecked = $false }
+  }
+  Update-CoexWarn
+  $ui.SvPkg.ScrollToTop()
+}
+foreach ($cb in @($ui.ChkLlm,$ui.ChkStt,$ui.ChkPya)) { $cb.Add_Checked({ Update-CoexWarn }); $cb.Add_Unchecked({ Update-CoexWarn }) }
+$ui.BtnPkgBack.Add_Click({ Show-Page 1 })
+$ui.BtnPkgNext.Add_Click({
+  $sel=@()
+  if ($ui.ChkLlm.IsEnabled -and $ui.ChkLlm.IsChecked) { $sel+='llm' }
+  if ($ui.ChkStt.IsEnabled -and $ui.ChkStt.IsChecked) { $sel+='stt' }
+  if ($ui.ChkPya.IsEnabled -and $ui.ChkPya.IsChecked) { $sel+='pya' }
+  $script:selKits=$sel; $script:kitModels=@{}
+  if ($sel.Count) { $script:modelIdx=0; Show-Model-Screen } else { Enter-FlashPage @() }
+})
+function Show-Model-Screen {
+  $kitId = $script:selKits[$script:modelIdx]
+  $k = $script:KitCatalog | Where-Object { $_.id -eq $kitId }
+  $ui.MTitle.Text = T 'setup.model.title' (& $k.name)
+  $ui.MList.Children.Clear(); $script:modelRadios=@()
+  $pre = $script:kitModels[$kitId]
+  $models = Get-KitModels $kitId
+  for ($i=0; $i -lt $models.Count; $i++) {
+    $m = $models[$i]
+    $rb = New-Object Windows.Controls.RadioButton
+    $rb.GroupName='mdl'; $rb.Tag=$m.id; $rb.FontSize=15; $rb.FontWeight='SemiBold'; $rb.Foreground='#F0F2F6'
+    $rb.Content = (& $m.name)
+    $rb.IsChecked = if ($pre) { $m.id -eq $pre } else { $i -eq 0 }
+    $desc = New-Object Windows.Controls.TextBlock
+    $desc.Text = (& $m.desc); $desc.TextWrapping='Wrap'; $desc.FontSize=13; $desc.Foreground='#8B939F'; $desc.Margin='26,4,0,0'
+    $card = New-Object Windows.Controls.Border
+    $card.Background='#0E1116'; $card.BorderBrush='#262A33'; $card.BorderThickness=1; $card.CornerRadius=12; $card.Padding='18,14,18,14'; $card.Margin='0,0,0,12'
+    $sp = New-Object Windows.Controls.StackPanel; [void]$sp.Children.Add($rb); [void]$sp.Children.Add($desc); $card.Child=$sp
+    [void]$ui.MList.Children.Add($card); $script:modelRadios+=$rb
+  }
+  Show-Page 'model'
+}
+$ui.BtnMBack.Add_Click({ if ($script:modelIdx -gt 0) { $script:modelIdx--; Show-Model-Screen } else { Show-Page 'pkg' } })
+$ui.BtnMNext.Add_Click({
+  $kitId = $script:selKits[$script:modelIdx]
+  $chosen = $script:modelRadios | Where-Object { $_.IsChecked } | Select-Object -First 1
+  $script:kitModels[$kitId] = if ($chosen) { $chosen.Tag } else { (Get-KitModels $kitId)[0].id }
+  if ($script:modelIdx -lt $script:selKits.Count-1) { $script:modelIdx++; Show-Model-Screen }
+  else { Enter-FlashPage $script:selKits }
+})
+function Enter-FlashPage($selKits){
+  if ($selKits.Count) { $script:precfg.KITS=$selKits; $script:precfg.KITMODELS=$script:kitModels }
+  else { $script:precfg.Remove('KITS'); $script:precfg.Remove('KITMODELS') }
+  Show-Page 2
+  if ($selKits.Count) {
+    Set-StepNames @((T 'setup.steps.connect'),(T 'setup.steps.unlock'),(T 'setup.steps.stock'),(T 'setup.steps.kernel'),(T 'setup.steps.payload'),(T 'setup.steps.firstboot'),(T 'setup.steps.packages'))
+  }
+  Add-Feed (T 'setup.p2.saved' $script:precfg.USER $script:precfg.HOST $(if($script:precfg.SSID){ T 'setup.p2.saved_wifi' $script:precfg.SSID } else { '' })) '#8B939F'
+  Add-Feed (T 'setup.p2.connect_hint') '#C9CFD8'
+}
 
 # ---------- Ereignisse ----------
 $timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromMilliseconds(120)
@@ -361,17 +531,60 @@ $timer.Add_Tick({
       'tel'   { Add-Feed $d '#FFD166' '📱  ' }
       'ask'   { $script:askKind=$d.id; $ui.ActionText.Text=$d.text; if ($d.id -eq 'yn') { $ui.BtnYes.Content=T 'setup.p2.yes'; $ui.BtnNo.Visibility='Visible' } else { $ui.BtnYes.Content=T 'setup.p2.done_btn'; $ui.BtnNo.Visibility='Collapsed' }; $ui.ActionBox.Visibility='Visible'; $ui.StateDot.Foreground='#FFD166'; $ui.StateText.Text=$script:stateWords.wait_user }
       'progress' { if ($d.pct -ge 0) { $ui.Prog.Visibility='Visible'; $ui.Prog.IsIndeterminate=$false; $ui.Prog.Value=$d.pct } else { $ui.Prog.Visibility='Visible'; $ui.Prog.IsIndeterminate=$true }; $ui.ProgText.Text=$d.text }
-      'done'  { if ($d.kind -eq 'unflash') { $ui.DoneTitle.Text=T 'setup.p3.u_title'; $ui.DoneSub.Text=T 'setup.p3.u_sub'; $ui.DoneCmd.Text=T 'setup.p3.u_cmd'; $ui.DoneHint.Text=T 'setup.p3.u_hint'; Show-Page 3; break }
-                $ui.DoneTitle.Text=(T 'setup.p3.done_host' $d.host); $ui.DoneSub.Text=$(if($d.ip){ T 'setup.p3.reach' $d.ip }else{ T 'setup.p3.noip' }); $ui.DoneCmd.Text=$(if($d.ip){"ssh $($d.user)@$($d.ip)"}else{"ssh $($d.user)@<ip>"}); $ui.DoneHint.Text=T 'setup.p3.hint'; Show-Page 3 }
+      'done'  { if ($d.kind -eq 'unflash') { $ui.DoneTitle.Text=T 'setup.p3.u_title'; $ui.DoneSub.Text=T 'setup.p3.u_sub'; $ui.DoneCmd.Text=T 'setup.p3.u_cmd'; $ui.DoneHint.Text=T 'setup.p3.u_hint'; $ui.PkgPanel.Visibility='Collapsed'; Show-Page 3; break }
+                $ui.DoneTitle.Text=(T 'setup.p3.done_host' $d.host); $ui.DoneSub.Text=$(if($d.ip){ T 'setup.p3.reach' $d.ip }else{ T 'setup.p3.noip' }); $ui.DoneCmd.Text=$(if($d.ip){"ssh $($d.user)@$($d.ip)"}else{"ssh $($d.user)@<ip>"}); $ui.DoneHint.Text=T 'setup.p3.hint'; Show-Pkg-Panel $true; Show-Page 3 }
+      'pkg'   { $ui.PkgStatus.Text=$d.text
+                $ui.PkgStatus.Foreground=$(if($d.state -eq 'ok'){'#34C759'}elseif($d.state -eq 'fail'){'#FF453A'}else{'#8B939F'})
+                if ($d.state -in 'ok','fail') { $ui.BtnPkg.IsEnabled=$true; $ui.PkgLlm.IsEnabled=$script:kitLlm; $ui.PkgStt.IsEnabled=$script:kitStt; $ui.PkgPya.IsEnabled=$script:kitPya } }
     }
     } catch { Write-LogFile "GUI-Fehler bei '$k': $_" }
   }
   if ($sync.done -and $sync.running) { $sync.running=$false; $ui.BtnStart.IsEnabled=$true; $ui.BtnStart.Content=T 'setup.p2.restart'; $ui.BtnBack.IsEnabled=$true; if ($script:lastState -ne 'ok') { $ui.Status.Text=T 'setup.p2.ended' } }
 })
 $timer.Start()
+# ---------- Pakete: Verfuegbarkeit + Fertig-Seiten-Panel (nachtraegliche Installation) ----------
+$script:kitLlm=$false; $script:kitStt=$false; $script:kitPya=$false; $script:kitAvail=@()
+function Detect-Kits {
+  $script:kitLlm = [bool](Get-KitModels 'llm').Count
+  $script:kitStt = [bool](Get-KitModels 'stt').Count
+  $script:kitPya = [bool](Get-KitModels 'pya').Count
+  $script:kitAvail = @(); foreach ($k in $script:KitCatalog) { if ((Get-KitModels $k.id).Count) { $script:kitAvail += $k.id } }
+}
+function Show-Pkg-Panel([bool]$keepStatus=$false) {
+  Detect-Kits
+  if (-not $script:kitAvail.Count) { $ui.PkgPanel.Visibility='Collapsed'; return }
+  $ui.PkgPanel.Visibility='Visible'; if (-not $keepStatus) { $ui.PkgStatus.Text='' }
+  $ui.BtnPkg.IsEnabled=$true
+  $ui.PkgLlm.IsEnabled=$script:kitLlm; $ui.PkgLlm.IsChecked=$script:kitLlm
+  $ui.PkgStt.IsEnabled=$script:kitStt; $ui.PkgStt.IsChecked=$script:kitStt
+  $ui.PkgPya.IsEnabled=$script:kitPya; $ui.PkgPya.IsChecked=$script:kitPya
+}
+$ui.BtnPkg.Add_Click({
+  if ($sync.running) { return }
+  $sel=@(); if ($ui.PkgLlm.IsChecked) { $sel+='llm' }; if ($ui.PkgStt.IsChecked) { $sel+='stt' }; if ($ui.PkgPya.IsChecked) { $sel+='pya' }
+  if (-not $sel.Count) { $ui.PkgStatus.Text=T 'setup.p3.pkg_pick'; return }
+  $ui.BtnPkg.IsEnabled=$false; $ui.PkgLlm.IsEnabled=$false; $ui.PkgStt.IsEnabled=$false; $ui.PkgPya.IsEnabled=$false
+  $ui.PkgStatus.Foreground='#8B939F'; $ui.PkgStatus.Text=T 'setup.p3.pkg_starting'
+  $cfg = if ($script:precfg) { $script:precfg } else { [ordered]@{} }
+  $cfg.KITS = $sel
+  # Modellwahl: vom Setup-Durchlauf uebernehmen, sonst Erst-Modell je Kit
+  $km=@{}; foreach ($k in $sel) { $km[$k] = if ($script:kitModels -and $script:kitModels[$k]) { $script:kitModels[$k] } else { (Get-KitModels $k)[0].id } }
+  $cfg.KITMODELS = $km
+  Start-Core $cfg 'kits'
+})
 $ui.BtnCopy.Add_Click({ try { [Windows.Clipboard]::SetText($ui.DoneCmd.Text); $ui.BtnCopy.Content=T 'setup.p3.copied' } catch {} })
 $ui.BtnAgain.Add_Click({ Set-Mode 'setup'; $ui.Feed.Children.Clear(); $ui.BtnStart.IsEnabled=$true; $ui.BtnStart.Content=T 'setup.p2.start'; $ui.FHost.Text=New-AutoHost; Show-Page 1 })
 $ui.BtnClose.Add_Click({ $W.Close() })
 if ($env:BARRA_TESTLOG) { $timer.Add_Tick({ try { [IO.File]::WriteAllText($env:BARRA_TESTLOG, $ui.Log.Text, [Text.Encoding]::UTF8) } catch {} }) }
+# Dev-Hilfe: BARRA_TESTPAGE=pkg | model:<kitid> springt direkt auf die neuen Bildschirme (Screenshot-Abnahme)
+if ($env:BARRA_TESTPAGE) {
+  Detect-Kits
+  if (-not $script:precfg) { $script:precfg = [ordered]@{ USER='test'; HOST='barra-test'; SSID='' } }
+  if ($env:BARRA_TESTPAGE -eq 'pkg') { Init-Pkg-Screen; Show-Page 'pkg' }
+  elseif ($env:BARRA_TESTPAGE -like 'model*') {
+    $kid = if ($env:BARRA_TESTPAGE -match ':(\w+)') { $matches[1] } else { $script:kitAvail[0] }
+    if ($kid) { $script:selKits=@($kid); $script:kitModels=@{}; $script:modelIdx=0; Show-Model-Screen }
+  }
+}
 $W.Add_Closing({ $sync.cancel=$true; try { if ($script:ps) { $script:ps.Stop() } } catch {} })
 $W.ShowDialog() | Out-Null
