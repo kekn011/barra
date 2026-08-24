@@ -1,0 +1,67 @@
+diff --git a/src/core/ggml_extend.hpp b/src/core/ggml_extend.hpp
+index 9ed2875..c3dc632 100644
+--- a/src/core/ggml_extend.hpp
++++ b/src/core/ggml_extend.hpp
+@@ -1,6 +1,7 @@
+ #ifndef __SD_CORE_GGML_EXTEND_HPP__
+ #define __SD_CORE_GGML_EXTEND_HPP__
+ 
++#include <chrono>
+ #include <assert.h>
+ #include <inttypes.h>
+ #include <stdarg.h>
+@@ -2798,6 +2799,9 @@ protected:
+             GraphWeightDoneGuard& operator=(const GraphWeightDoneGuard&) = delete;
+         };
+         GraphWeightDoneGuard graph_weight_done_guard(this, &params_to_prepare);
++        static const bool barra_time = getenv("BARRA_TIME") != nullptr;
++        const auto barra_te0 = std::chrono::steady_clock::now();
++        auto barra_te1 = barra_te0, barra_te2 = barra_te0, barra_te3 = barra_te0, barra_te4 = barra_te0;
+ 
+         if (!alloc_compute_buffer(gf)) {
+             LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
+@@ -2822,6 +2826,7 @@ protected:
+         };
+         ComputeBufferGuard compute_buffer_guard(this, free_compute_buffer);
+ 
++        barra_te1 = std::chrono::steady_clock::now();
+         if (sched != nullptr) {
+             ggml_backend_sched_reset(sched);
+             pin_multi_device_nodes(gf);  // reset clears the pins; re-apply before alloc
+@@ -2834,7 +2839,9 @@ protected:
+             return std::nullopt;
+         }
+ 
++        barra_te2 = std::chrono::steady_clock::now();
+         copy_data_to_backend_tensor(gf, !preserve_backend_tensor_data_map);
++        barra_te3 = std::chrono::steady_clock::now();
+         if (sd_backend_is_cpu(runtime_backend)) {
+             sd_backend_cpu_set_n_threads(runtime_backend, n_threads);
+         }
+@@ -2863,6 +2870,12 @@ protected:
+             LOG_ERROR("%s compute failed: %s", get_desc().c_str(), ggml_status_to_string(status));
+             return std::nullopt;
+         }
++        barra_te4 = std::chrono::steady_clock::now();
++        if (barra_time) {
++            auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
++            fprintf(stderr, "barra-sd %s: alloc_buf=%.1f ms sched_alloc=%.1f ms copy_in=%.1f ms compute+sync=%.1f ms\n",
++                    get_desc().c_str(), ms(barra_te0, barra_te1), ms(barra_te1, barra_te2), ms(barra_te2, barra_te3), ms(barra_te3, barra_te4));
++        }
+ 
+         if (!debug_tensors.empty()) {
+             std::unordered_set<const ggml_tensor*> debug_graph_tensor_set;
+@@ -3175,11 +3188,13 @@ public:
+         RunnerDoneGuard runner_done_guard(this, auto_free);
+ 
+         ggml_cgraph* gf = nullptr;
++        const auto barra_tp0 = std::chrono::steady_clock::now();
+         if (!prepare_compute_graph(get_graph, &gf)) {
+             return std::nullopt;
+         }
+         GGML_ASSERT(gf != nullptr);
+         rebuild_params_tensor_set();
++        if (getenv("BARRA_TIME") != nullptr) fprintf(stderr, "barra-sd %s: prepare_graph=%.1f ms nodes=%d\n", get_desc().c_str(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - barra_tp0).count(), ggml_graph_n_nodes(gf));
+ 
+         if (!assign_graph_cut_layer_split_backends(gf)) {
+             free_compute_ctx();

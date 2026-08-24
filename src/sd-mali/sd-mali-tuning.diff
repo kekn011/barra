@@ -1,0 +1,355 @@
+diff --git a/src/ggml-vulkan/ggml-vulkan.cpp b/src/ggml-vulkan/ggml-vulkan.cpp
+index 7ac745c7..ca2b862d 100644
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -896,6 +896,21 @@ struct vk_device_struct {
+     vk_matmul_pipeline pipeline_matmul_bf16 {};
+     vk_matmul_pipeline2 pipeline_matmul_f16;
+     vk_matmul_pipeline2 pipeline_matmul_f16_f32;
++    // barra: Mali-GEMM (gemm_best-Port) — persistente Pipelines fuer den load_shaders-Walk
++    vk_pipeline pipeline_mul_mm_mali_f16;
++    vk_pipeline pipeline_mul_mm_mali_f16_f32;
++    vk_pipeline pipeline_mul_mm_mali_n64_f16;
++    vk_pipeline pipeline_mul_mm_mali_n64_f16_f32;
++    vk_pipeline pipeline_mul_mm_mali_bm64_f16;
++    vk_pipeline pipeline_mul_mm_mali_bm64_f16_f32;
++    vk_pipeline pipeline_mul_mm_mali_f32acc_f16;
++    vk_pipeline pipeline_mul_mm_mali_f32acc_f16_f32;
++    vk_pipeline pipeline_mul_mm_mali_a32;
++    vk_pipeline pipeline_mul_mm_mali_a32b16;
++    vk_pipeline pipeline_mul_mm_mali_sc_f16_f32;
++    vk_pipeline pipeline_mul_mm_mali_mx_f16_f32;
++    vk_pipeline pipeline_mul_mm_mali_mxbm64_f16_f32;
++    vk_pipeline pipeline_fa_mali_var[16];
+ 
+     vk_matmul_pipeline2 pipeline_dequant_mul_mat_mat[GGML_TYPE_COUNT];
+     vk_matmul_pipeline2 pipeline_dequant_mul_mat_mat_f16[GGML_TYPE_COUNT];
+@@ -3792,6 +3807,44 @@ static vk_fa_tuning_params get_fa_tuning_params_scalar(const vk_device& device,
+         }
+     }
+ 
++    // barra: FA-Scalar-Override per Env (nur fuer grosse Query-Bloecke): GGML_VK_FA_TUNE=wg,sg,Br,Bc,dsplit,rowsplit,staging
++    if (n_rows >= 64) {
++        static int have = -1; static uint32_t t[7];
++        if (have < 0) {
++            have = 0;
++            const char * v = getenv("GGML_VK_FA_TUNE");
++            if (v != nullptr) {
++                int n = 0; uint32_t x = 0; bool d = false;
++                for (const char * p = v;; ++p) {
++                    if (*p >= '0' && *p <= '9') { x = x * 10u + uint32_t(*p - '0'); d = true; }
++                    else { if (d && n < 7) t[n++] = x; x = 0; d = false; if (*p == 0) break; }
++                }
++                have = (n == 7) ? 1 : 0;
++                if (!have) std::cerr << "barra: GGML_VK_FA_TUNE braucht 7 Zahlen" << std::endl;
++            }
++        }
++        if (have == 1) {
++            vk_fa_tuning_params o = result;
++            o.workgroup_size = t[0]; o.subgroup_size = t[1]; o.block_rows = t[2]; o.block_cols = t[3];
++            o.d_split = t[4]; o.row_split = t[5]; o.shmem_staging = t[6] != 0;
++            const uint32_t cpi = (o.d_split * o.row_split) ? o.workgroup_size / (o.d_split * o.row_split) : 0;
++            const bool ok = o.d_split > 0 && o.row_split > 0 && cpi > 0 &&
++                            (o.workgroup_size % (o.d_split * o.row_split)) == 0 &&
++                            (o.block_cols % cpi) == 0 && (o.block_rows % o.row_split) == 0 &&
++                            (hsk % (o.d_split * 4)) == 0 && (hsv % (o.d_split * 4)) == 0 &&
++                            (o.subgroup_size == 0 || (o.workgroup_size % o.subgroup_size) == 0);
++            if (ok && ggml_vk_flash_attn_scalar_shmem_support(device, o, hsk, hsv, f32acc, k_type, v_type)) {
++                static bool said = false;
++                if (!said) { said = true; std::cerr << "barra: FA_TUNE aktiv: "; o.print(); }
++                result = o;
++                if (o.subgroup_size == 0) result.disable_subgroups = true;
++            } else {
++                static bool warned = false;
++                if (!warned) { warned = true; std::cerr << "barra: FA_TUNE UNGUELTIG (Constraints/Shmem), Default bleibt" << std::endl; }
++            }
++        }
++    }
++
+     return result;
+ }
+ 
+@@ -4317,6 +4370,26 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+         m_align =  64;
+         s_align =  32;
+ 
++        // barra tile override (Mali-Tuning): Warptiles per Env ueberschreiben — Sweep ohne Rebuild.
++        // Format: GGML_VK_TILE_{L,M,S}=bs,BM,BN,BK,WM,WN,WMITER,TM,TN,TK,sg
++        {
++            auto barra_tile_env = [](const char * name, std::vector<uint32_t> & wt) {
++                const char * v = getenv(name);
++                if (v == nullptr) return false;
++                std::vector<uint32_t> t; uint32_t x = 0; bool have = false;
++                for (const char * p = v;; ++p) {
++                    if (*p >= '0' && *p <= '9') { x = x * 10u + uint32_t(*p - '0'); have = true; }
++                    else { if (have) { t.push_back(x); x = 0; have = false; } if (*p == 0) break; }
++                }
++                if (t.size() != 11) return false;
++                wt = t;
++                return true;
++            };
++            if (barra_tile_env("GGML_VK_TILE_L", l_warptile)) { l_wg_denoms = { l_warptile[1], l_warptile[2], 1 }; l_align = l_warptile[1]; std::cerr << "barra: TILE_L override" << std::endl; }
++            if (barra_tile_env("GGML_VK_TILE_M", m_warptile)) { m_wg_denoms = { m_warptile[1], m_warptile[2], 1 }; m_align = m_warptile[1]; std::cerr << "barra: TILE_M override" << std::endl; }
++            if (barra_tile_env("GGML_VK_TILE_S", s_warptile)) { s_wg_denoms = { s_warptile[1], s_warptile[2], 1 }; s_align = s_warptile[1]; std::cerr << "barra: TILE_S override" << std::endl; }
++        }
++
+         for (uint32_t i = 0; i < GGML_TYPE_COUNT; ++i) {
+             ggml_type t = (ggml_type)i;
+             // Disable medium and large matrix multiplication if not enough shared memory is available
+@@ -4520,6 +4593,56 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+                                 !fa_ds, !fa_ds ? fa_sgs : 0);
+     }
+ 
++    // barra: Mali-FlashAttention (hd=40), Env GGML_VK_MALI_FA=<variante>|off (Default r4c4psmx), GGML_VK_MALI_FA80=<variante>|off (Default h80r2psmx)
++    {
++        const char * fa_env = getenv("GGML_VK_MALI_FA");
++        if (fa_env == nullptr || strcmp(fa_env, "off") != 0) {
++            ggml_vk_create_pipeline(device, device->pipeline_fa_mali_var[0], "fa_mali_r4c4ps", fa_mali_r4c4ps_len, fa_mali_r4c4ps_data, "main", 7, sizeof(vk_flash_attn_push_constants), {64, 1, 1}, std::vector<uint32_t>{}, 1, true, true, 16);
++            ggml_vk_create_pipeline(device, device->pipeline_fa_mali_var[1], "fa_mali_r4c4ps32", fa_mali_r4c4ps32_len, fa_mali_r4c4ps32_data, "main", 7, sizeof(vk_flash_attn_push_constants), {64, 1, 1}, std::vector<uint32_t>{}, 1, true, true, 16);
++            ggml_vk_create_pipeline(device, device->pipeline_fa_mali_var[2], "fa_mali_r4c4psmx", fa_mali_r4c4psmx_len, fa_mali_r4c4psmx_data, "main", 7, sizeof(vk_flash_attn_push_constants), {64, 1, 1}, std::vector<uint32_t>{}, 1, true, true, 16);
++            ggml_vk_create_pipeline(device, device->pipeline_fa_mali_var[3], "fa_mali_r2c4psmx", fa_mali_r2c4psmx_len, fa_mali_r2c4psmx_data, "main", 7, sizeof(vk_flash_attn_push_constants), {32, 1, 1}, std::vector<uint32_t>{}, 1, true, true, 16);
++            ggml_vk_create_pipeline(device, device->pipeline_fa_mali_var[4], "fa_mali_h80r2psmx", fa_mali_h80r2psmx_len, fa_mali_h80r2psmx_data, "main", 7, sizeof(vk_flash_attn_push_constants), {32, 1, 1}, std::vector<uint32_t>{}, 1, true, true, 16);
++            ggml_vk_create_pipeline(device, device->pipeline_fa_mali_var[5], "fa_mali_h80r4psmx", fa_mali_h80r4psmx_len, fa_mali_h80r4psmx_data, "main", 7, sizeof(vk_flash_attn_push_constants), {64, 1, 1}, std::vector<uint32_t>{}, 1, true, true, 16);
++            ggml_vk_create_pipeline(device, device->pipeline_fa_mali_var[6], "fa_mali_h80r1psmx", fa_mali_h80r1psmx_len, fa_mali_h80r1psmx_data, "main", 7, sizeof(vk_flash_attn_push_constants), {16, 1, 1}, std::vector<uint32_t>{}, 1, true, true, 16);
++        }
++    }
++    // barra: Mali-GEMM (gemm_best-Port) — ersetzt die l-Pipelines der f16-Matmuls (nur per Env).
++    if (getenv("GGML_VK_MALI_GEMM") != nullptr) {
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_f16,     "mul_mm_mali_f16",     mul_mm_mali_f16_len,     mul_mm_mali_f16_data,     "main", 3, sizeof(vk_mat_mat_push_constants), {128, 128, 1}, std::vector<uint32_t>{}, 1);
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_f16_f32, "mul_mm_mali_f16_f32", mul_mm_mali_f16_f32_len, mul_mm_mali_f16_f32_data, "main", 3, sizeof(vk_mat_mat_push_constants), {128, 128, 1}, std::vector<uint32_t>{}, 1);
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_n64_f16,     "mul_mm_mali_n64_f16",     mul_mm_mali_n64_f16_len,     mul_mm_mali_n64_f16_data,     "main", 3, sizeof(vk_mat_mat_push_constants), {128, 64, 1}, std::vector<uint32_t>{}, 1);
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_n64_f16_f32, "mul_mm_mali_n64_f16_f32", mul_mm_mali_n64_f16_f32_len, mul_mm_mali_n64_f16_f32_data, "main", 3, sizeof(vk_mat_mat_push_constants), {128, 64, 1}, std::vector<uint32_t>{}, 1);
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_bm64_f16,     "mul_mm_mali_bm64_f16",     mul_mm_mali_bm64_f16_len,     mul_mm_mali_bm64_f16_data,     "main", 3, sizeof(vk_mat_mat_push_constants), {64, 128, 1}, std::vector<uint32_t>{}, 1);
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_bm64_f16_f32, "mul_mm_mali_bm64_f16_f32", mul_mm_mali_bm64_f16_f32_len, mul_mm_mali_bm64_f16_f32_data, "main", 3, sizeof(vk_mat_mat_push_constants), {64, 128, 1}, std::vector<uint32_t>{}, 1);
++        if (device->pipeline_matmul_f16.f16acc)     { auto &pp = device->pipeline_matmul_f16.f16acc;     pp->l = pp->a_l = device->pipeline_mul_mm_mali_f16;     pp->m = pp->a_m = device->pipeline_mul_mm_mali_n64_f16;     pp->s = pp->a_s = device->pipeline_mul_mm_mali_bm64_f16; }
++        if (device->pipeline_matmul_f16_f32.f16acc) { auto &pp = device->pipeline_matmul_f16_f32.f16acc; pp->l = pp->a_l = device->pipeline_mul_mm_mali_f16_f32; pp->m = pp->a_m = device->pipeline_mul_mm_mali_n64_f16_f32; pp->s = pp->a_s = device->pipeline_mul_mm_mali_bm64_f16_f32; }
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_f32acc_f16,     "mul_mm_mali_f32acc_f16",     mul_mm_mali_f32acc_f16_len,     mul_mm_mali_f32acc_f16_data,     "main", 3, sizeof(vk_mat_mat_push_constants), {128, 128, 1}, std::vector<uint32_t>{}, 1);
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_f32acc_f16_f32, "mul_mm_mali_f32acc_f16_f32", mul_mm_mali_f32acc_f16_f32_len, mul_mm_mali_f32acc_f16_f32_data, "main", 3, sizeof(vk_mat_mat_push_constants), {128, 128, 1}, std::vector<uint32_t>{}, 1);
++        if (device->pipeline_matmul_f16.f32acc)     { auto &pp = device->pipeline_matmul_f16.f32acc;     pp->l = pp->a_l = device->pipeline_mul_mm_mali_f32acc_f16; }
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_sc_f16_f32, "mul_mm_mali_sc_f16_f32", mul_mm_mali_sc_f16_f32_len, mul_mm_mali_sc_f16_f32_data, "main", 3, sizeof(vk_mat_mat_push_constants), {128, 128, 1}, std::vector<uint32_t>{}, 1);
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_mx_f16_f32, "mul_mm_mali_mx_f16_f32", mul_mm_mali_mx_f16_f32_len, mul_mm_mali_mx_f16_f32_data, "main", 3, sizeof(vk_mat_mat_push_constants), {128, 128, 1}, std::vector<uint32_t>{}, 1);
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_mxbm64_f16_f32, "mul_mm_mali_mxbm64_f16_f32", mul_mm_mali_mxbm64_f16_f32_len, mul_mm_mali_mxbm64_f16_f32_data, "main", 3, sizeof(vk_mat_mat_push_constants), {64, 128, 1}, std::vector<uint32_t>{}, 1);
++        {
++            // Default: mx (f16-Teilsummen je BK-Tile, f32-Gesamtakkumulator) + mxbm64 auf dem s-Slot (Tails/kleine Grids).
++            // GGML_VK_MALI_F32ACC=f32|sc|mx|mxl (mxl = mx ohne bm64-Routing)
++            const char * fa = getenv("GGML_VK_MALI_F32ACC");
++            vk_pipeline f32l = device->pipeline_mul_mm_mali_mx_f16_f32;
++            bool use_bm64 = true;
++            if (fa != nullptr && strcmp(fa, "f32") == 0) { f32l = device->pipeline_mul_mm_mali_f32acc_f16_f32; use_bm64 = false; }
++            if (fa != nullptr && strcmp(fa, "sc") == 0)  { f32l = device->pipeline_mul_mm_mali_sc_f16_f32; use_bm64 = false; }
++            if (fa != nullptr && strcmp(fa, "mxl") == 0) { use_bm64 = false; }
++            if (device->pipeline_matmul_f16_f32.f32acc) {
++                auto &pp = device->pipeline_matmul_f16_f32.f32acc;
++                pp->l = pp->a_l = f32l;
++                if (use_bm64) pp->s = pp->a_s = device->pipeline_mul_mm_mali_mxbm64_f16_f32;
++            }
++        }
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_a32, "mul_mm_mali_a32", mul_mm_mali_a32_len, mul_mm_mali_a32_data, "main", 3, sizeof(vk_mat_mat_push_constants), {128, 128, 1}, std::vector<uint32_t>{}, 1);
++        if (device->pipeline_matmul_f32) { auto &pp = device->pipeline_matmul_f32; pp->l = pp->a_l = device->pipeline_mul_mm_mali_a32; }
++        ggml_vk_create_pipeline(device, device->pipeline_mul_mm_mali_a32b16, "mul_mm_mali_a32b16", mul_mm_mali_a32b16_len, mul_mm_mali_a32b16_data, "main", 3, sizeof(vk_mat_mat_push_constants), {128, 128, 1}, std::vector<uint32_t>{}, 1);
++        if (device->pipeline_matmul_f32_f16) { auto &pp = device->pipeline_matmul_f32_f16; pp->l = pp->a_l = device->pipeline_mul_mm_mali_a32b16; }
++    }
++
+ #if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+     if (device->coopmat1_fa_support) {
+         for (auto &fa : device->pipeline_flash_attn_f32_f16) {
+@@ -7685,7 +7808,9 @@ static vk_matmul_pipeline ggml_vk_get_mul_mat_mat_pipeline(ggml_backend_vk_conte
+     if (src0_type == GGML_TYPE_BF16 && src1_type == GGML_TYPE_BF16) {
+         return ctx->device->pipeline_matmul_bf16;
+     }
+-    if (prec == GGML_PREC_DEFAULT && ctx->device->fp16 && !(ctx->device->coopmat_support && !ctx->device->coopmat_acc_f16_support)) {
++    // barra: GGML_VK_MALI_F16ACC_ALL=1 → PREC_F32-Anforderung ignorieren, f16acc-Mali-Kernel auch fuer ff.net.2 & Co.
++    static const bool barra_f16acc_all = getenv("GGML_VK_MALI_F16ACC_ALL") != nullptr;
++    if ((prec == GGML_PREC_DEFAULT || barra_f16acc_all) && ctx->device->fp16 && !(ctx->device->coopmat_support && !ctx->device->coopmat_acc_f16_support)) {
+         if (src0_type == GGML_TYPE_F16 && src1_type == GGML_TYPE_F32) {
+             return ctx->device->pipeline_matmul_f16_f32.f16acc;
+         }
+@@ -8796,6 +8921,16 @@ static vk_pipeline ggml_vk_guess_matmul_pipeline(ggml_backend_vk_context * ctx,
+     if ((mm_m && (m <= 64 || n <= 64)) || !mm_l) {
+         return aligned ? mmp->a_m : mmp->m;
+     }
++    // barra: kleine Grids / 128er-m-Tails auf die BM64-Variante (s-Slot) routen —
++    // Pointer-Gate: feuert nur, wenn der s-Slot tatsaechlich unsere Mali-Pipeline traegt.
++    const bool is_mx = mmp->s == ctx->device->pipeline_mul_mm_mali_mxbm64_f16_f32;
++    if (mm_s && (mmp->s == ctx->device->pipeline_mul_mm_mali_bm64_f16 || mmp->s == ctx->device->pipeline_mul_mm_mali_bm64_f16_f32 || is_mx)) {
++        const uint32_t tiles128 = CEIL_DIV(m, 128u) * CEIL_DIV(n, 128u);
++        // mx-Familie (prec=F32): nur m-Tails auf BM64 (kleine Grids laufen dort mit 128er-Tile schneller)
++        if ((!is_mx && tiles128 <= 48) || ((m % 128u) != 0u && m <= 640u)) {
++            return aligned ? mmp->a_s : mmp->s;
++        }
++    }
+     return aligned ? mmp->a_l : mmp->l;
+ }
+ 
+@@ -9239,6 +9374,18 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+ 
+     const uint32_t split_k = ggml_vk_guess_split_k(ctx, ne01, ne11, ne10, disable_split_k, pipeline);
+ 
++    // barra: Pfad-Diagnose (env GGML_VK_BARRA_DBG) — einmal je Form/Pfad
++    if (getenv("GGML_VK_BARRA_DBG") != nullptr) {
++        static std::set<std::string> barra_seen;
++        char key[640];
++        snprintf(key, sizeof key, "q_f16 m=%llu n=%llu k=%llu b=%llu src0=%s src1=%s prec=%d xnc=%d ync=%d qy=%d qxdq=%d qydq=%d al=%d pipe=%s splitk=%u wg=%ux%u name=%s",
++            (unsigned long long)ne01, (unsigned long long)ne11, (unsigned long long)ne10, (unsigned long long)(ne12*ne13),
++            ggml_type_name(src0->type), ggml_type_name(src1->type), (int)dst->op_params[0],
++            (int)x_non_contig, (int)y_non_contig, (int)quantize_y, (int)qx_needs_dequant, (int)qy_needs_dequant, (int)aligned,
++            pipeline->name.c_str(), split_k, pipeline->wg_denoms[0], pipeline->wg_denoms[1], src0->name);
++        if (barra_seen.insert(key).second) std::cerr << "barra-dbg: " << key << std::endl;
++    }
++
+     const uint64_t qx_sz = ggml_type_size(src0->type) * x_ne / ggml_blck_size(src0->type);
+     const uint64_t qy_sz = ggml_type_size(src1->type) * y_ne / ggml_blck_size(src1->type);
+     const uint64_t x_sz = !qx_needs_dequant ? qx_sz : sizeof(ggml_fp16_t) * x_ne;
+@@ -10143,6 +10290,7 @@ static void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, c
+     const size_t nbytes = ggml_nbytes(src0);
+     const bool needs_split = dst->ne[2] == 1 && dst->ne[3] == 1 && nbytes > ctx->device->properties.limits.maxStorageBufferRange;
+     if (needs_split) {
++        if (getenv("GGML_VK_BARRA_DBG") != nullptr) { static std::set<std::string> sn; char key[256]; snprintf(key, sizeof key, "%s m=%lld n=%lld k=%lld b=%lld src0=%s src1=%s name=%s", "msplit", (long long)src0->ne[1], (long long)src1->ne[1], (long long)src0->ne[0], (long long)(src1->ne[2]*src1->ne[3]), ggml_type_name(src0->type), ggml_type_name(src1->type), src0->name); if (sn.insert(key).second) std::cerr << "barra-dbg: " << key << std::endl; }
+         // Choose the number of rows that can fit (and divide by two, to allow for any additional offsets)
+         const uint32_t M_split = ctx->device->properties.limits.maxStorageBufferRange / (2 * src0->nb[1]);
+         uint32_t m_offset = 0;
+@@ -10164,6 +10312,7 @@ static void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, c
+             m_offset += cur_M_size;
+         }
+     } else if (ggml_vk_can_use_fwht(ctx, src1, dst)) {
++        if (getenv("GGML_VK_BARRA_DBG") != nullptr) { static std::set<std::string> sn; char key[256]; snprintf(key, sizeof key, "%s m=%lld n=%lld k=%lld b=%lld src0=%s src1=%s name=%s", "fwht", (long long)src0->ne[1], (long long)src1->ne[1], (long long)src0->ne[0], (long long)(src1->ne[2]*src1->ne[3]), ggml_type_name(src0->type), ggml_type_name(src1->type), src0->name); if (sn.insert(key).second) std::cerr << "barra-dbg: " << key << std::endl; }
+         ggml_vk_fwht(ctx, subctx, src1, dst);
+     } else if (src0->type == GGML_TYPE_F16 && ggml_is_permuted(src0) && ggml_is_permuted(src1) && dst->ne[1] == 1 &&
+         // detect 0213 permutation, and batch size of 1
+@@ -10177,17 +10326,20 @@ static void ggml_vk_mul_mat(ggml_backend_vk_context * ctx, vk_context& subctx, c
+         src1->ne[3] == 1 &&
+         src0->ne[1] <= ctx->device->properties.limits.maxComputeWorkGroupCount[1] &&
+         src1->ne[2] <= ctx->device->properties.limits.maxComputeWorkGroupCount[2]) {
++        if (getenv("GGML_VK_BARRA_DBG") != nullptr) { static std::set<std::string> sn; char key[256]; snprintf(key, sizeof key, "%s m=%lld n=%lld k=%lld b=%lld src0=%s src1=%s name=%s", "p021", (long long)src0->ne[1], (long long)src1->ne[1], (long long)src0->ne[0], (long long)(src1->ne[2]*src1->ne[3]), ggml_type_name(src0->type), ggml_type_name(src1->type), src0->name); if (sn.insert(key).second) std::cerr << "barra-dbg: " << key << std::endl; }
+         ggml_vk_mul_mat_vec_p021_f16_f32(ctx, subctx, cgraph, node_idx);
+     } else if (src0->type == GGML_TYPE_F16 && !ggml_is_contiguous(src0) && !ggml_is_transposed(src1) && dst->ne[1] == 1 &&
+                !ggml_is_permuted(src0) && !ggml_is_permuted(src1) &&
+                src0->ne[3] <= ctx->device->properties.limits.maxComputeWorkGroupCount[0] &&
+                src0->ne[1] <= ctx->device->properties.limits.maxComputeWorkGroupCount[1] &&
+                src1->ne[2] <= ctx->device->properties.limits.maxComputeWorkGroupCount[2]) {
++        if (getenv("GGML_VK_BARRA_DBG") != nullptr) { static std::set<std::string> sn; char key[256]; snprintf(key, sizeof key, "%s m=%lld n=%lld k=%lld b=%lld src0=%s src1=%s name=%s", "nc", (long long)src0->ne[1], (long long)src1->ne[1], (long long)src0->ne[0], (long long)(src1->ne[2]*src1->ne[3]), ggml_type_name(src0->type), ggml_type_name(src1->type), src0->name); if (sn.insert(key).second) std::cerr << "barra-dbg: " << key << std::endl; }
+         ggml_vk_mul_mat_vec_nc_f16_f32(ctx, subctx, cgraph, node_idx);
+     // mul_mat_vec supports batching ne12*ne13 when ne11==1, or treating ne11 as the batch size (up to four)
+     // when ne12 and ne13 are one.
+     } else if ((dst->ne[1] == 1 || (dst->ne[1] <= mul_mat_vec_max_cols && src1->ne[2] * src1->ne[3] == 1)) &&
+                (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16 || src0->type == GGML_TYPE_BF16 || ggml_is_quantized(src0->type))) {
++        if (getenv("GGML_VK_BARRA_DBG") != nullptr) { static std::set<std::string> sn; char key[256]; snprintf(key, sizeof key, "%s m=%lld n=%lld k=%lld b=%lld src0=%s src1=%s name=%s", "mmv", (long long)src0->ne[1], (long long)src1->ne[1], (long long)src0->ne[0], (long long)(src1->ne[2]*src1->ne[3]), ggml_type_name(src0->type), ggml_type_name(src1->type), src0->name); if (sn.insert(key).second) std::cerr << "barra-dbg: " << key << std::endl; }
+         ggml_vk_mul_mat_vec_q_f16(ctx, subctx, cgraph, node_idx);
+     } else {
+         ggml_vk_mul_mat_q_f16(ctx, subctx, src0, src1, dst, false);
+@@ -10952,7 +11104,8 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
+     uint32_t workgroups_y = (uint32_t)neq2;
+     uint32_t workgroups_z = (uint32_t)neq3;
+ 
+-    const bool f32acc = !ctx->device->fp16 || dst->op_params[3] == GGML_PREC_F32 || k->type == GGML_TYPE_BF16;
++    static const bool barra_fa_f16acc = getenv("GGML_VK_FA_F16ACC") != nullptr;
++    const bool f32acc = !ctx->device->fp16 || (dst->op_params[3] == GGML_PREC_F32 && !barra_fa_f16acc) || k->type == GGML_TYPE_BF16;
+ 
+     // For scalar/coopmat1 FA, we can use the "large" size to accommodate qga.
+     // For coopmat2 FA, we always use the small size (which is still pretty large for gqa).
+@@ -11148,6 +11301,39 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
+                                               mask_n_head_log2, m0, m1,
+                                               gqa_ratio, split_kv, split_k };
+ 
++    {
++        // barra: Mali-FlashAttention-Hook (hd 40/80, K/V f16, ohne Maske/Sinks/GQA)
++        static const char * names[] = {"r4c4ps", "r4c4ps32", "r4c4psmx", "r2c4psmx", "h80r2psmx", "h80r4psmx", "h80r1psmx"};
++        static const uint32_t hds[] = {40, 40, 40, 40, 80, 80, 80};
++        static const int nvar = 7;
++        static int sel40 = -1, sel80 = -1;
++        if (sel40 == -1) {
++            const char * e40 = getenv("GGML_VK_MALI_FA");
++            const char * e80 = getenv("GGML_VK_MALI_FA80");
++            sel40 = (e40 != nullptr && strcmp(e40, "off") == 0) ? -2 : -3;
++            sel80 = (e80 != nullptr && strcmp(e80, "off") == 0) ? -2 : -3;
++            if (e40 != nullptr && strcmp(e40, "off") == 0) { sel80 = -2; }
++            for (int vi = 0; vi < nvar; vi++) {
++                if (sel40 == -3 && hds[vi] == 40 && ((e40 == nullptr && strcmp(names[vi], "r4c4psmx") == 0) || (e40 != nullptr && strcmp(e40, names[vi]) == 0))) sel40 = vi;
++                if (sel80 == -3 && hds[vi] == 80 && ((e80 == nullptr && strcmp(names[vi], "h80r2psmx") == 0) || (e80 != nullptr && strcmp(e80, names[vi]) == 0))) sel80 = vi;
++            }
++            if (sel40 >= 0) std::cerr << "barra: Mali-FA hd40 = " << names[sel40] << std::endl;
++            if (sel80 >= 0) std::cerr << "barra: Mali-FA hd80 = " << names[sel80] << std::endl;
++        }
++        vk_pipeline mfa = nullptr;
++        if (HSK == 40 && sel40 >= 0) mfa = ctx->device->pipeline_fa_mali_var[sel40];
++        if (HSK == 80 && sel80 >= 0) mfa = ctx->device->pipeline_fa_mali_var[sel80];
++        if (mfa && HSK == HSV && mask == nullptr && sinks == nullptr &&
++            k->type == GGML_TYPE_F16 && v->type == GGML_TYPE_F16 && q->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
++            gqa_ratio == 1 && neq2 == nek2 && neq2 == nev2 && neq3 == nek3 && neq3 == nev3 &&
++            logit_softcap == 0.0f && max_bias == 0.0f && (q_stride % 4) == 0 && (k_stride % 4) == 0 && (v_stride % 4) == 0) {
++            vk_flash_attn_push_constants pcm = pc;
++            pcm.split_kv = KV; pcm.k_num = 1;
++            ggml_pipeline_request_descriptor_sets(ctx, mfa, 1);
++            ggml_vk_dispatch_pipeline(ctx, subctx, mfa, {q_buf, k_buf, v_buf, mask_buf, sinks_buf, dst_buf, mask_opt_buf}, pcm, { N, (uint32_t)neq2, (uint32_t)neq3 });
++            return;
++        }
++    }
+     if (split_k > 1) {
+         ggml_pipeline_request_descriptor_sets(ctx, ctx->device->pipeline_flash_attn_split_k_reduce, 1);
+ 
+@@ -17099,6 +17285,9 @@ static int32_t find_first_set(uint32_t x) {
+ 
+ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
++    static const bool barra_time = getenv("BARRA_TIME") != nullptr;
++    const auto barra_t0 = std::chrono::steady_clock::now();
++    auto barra_t1 = barra_t0;
+     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+ 
+     ctx->device->diag_cgraph = nullptr;
+@@ -17226,6 +17415,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         submit_count++;
+     };
+ 
++    barra_t1 = std::chrono::steady_clock::now();
+     for (int i = 0; i < cgraph->n_nodes; i++) {
+         if (first_node_in_batch) {
+             submit_node_idx = i;
+@@ -17509,6 +17699,15 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+ 
+     ctx->last_total_flops = total_flops;
+ 
++    if (barra_time) {
++        const auto t2 = std::chrono::steady_clock::now();
++        ggml_vk_synchronize(ctx);
++        const auto t3 = std::chrono::steady_clock::now();
++        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
++        fprintf(stderr, "barra-vk: nodes=%d submits=%u pre=%.1f ms record=%.1f ms wait=%.1f ms total=%.1f ms\n",
++                cgraph->n_nodes, submit_count, ms(barra_t0, barra_t1), ms(barra_t1, t2), ms(t2, t3), ms(barra_t0, t3));
++    }
++
+     if (vk_perf_logger_enabled) {
+         // End the command buffer and submit/wait
+         GGML_ASSERT(!ctx->compute_ctx.expired());
+diff --git a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index a0ae1c44..11926155 100644
+--- a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -630,6 +630,27 @@ void matmul_shaders(bool fp16, MatMulIdType matmul_id_type, bool coopmat, bool c
+ }
+ 
+ void process_shaders() {
++    // barra: Mali-GEMM (gemm_best-Port)
++    string_to_spv("mul_mm_mali_f16",     "mul_mm_mali.comp", {{"B_F16", "1"}});
++    string_to_spv("mul_mm_mali_f16_f32", "mul_mm_mali.comp", {{"B_F32", "1"}});
++    string_to_spv("mul_mm_mali_n64_f16",     "mul_mm_mali.comp", {{"B_F16", "1"}, {"BN", "64"}, {"MNV", "1"}});
++    string_to_spv("mul_mm_mali_n64_f16_f32", "mul_mm_mali.comp", {{"B_F32", "1"}, {"BN", "64"}, {"MNV", "1"}});
++    string_to_spv("mul_mm_mali_bm64_f16",     "mul_mm_mali.comp", {{"B_F16", "1"}, {"BM", "64"}});
++    string_to_spv("mul_mm_mali_bm64_f16_f32", "mul_mm_mali.comp", {{"B_F32", "1"}, {"BM", "64"}});
++    string_to_spv("mul_mm_mali_f32acc_f16",     "mul_mm_mali.comp", {{"B_F16", "1"}, {"ACC_F32", "1"}});
++    string_to_spv("mul_mm_mali_f32acc_f16_f32", "mul_mm_mali.comp", {{"B_F32", "1"}, {"ACC_F32", "1"}});
++    string_to_spv("mul_mm_mali_a32",            "mul_mm_mali.comp", {{"A_F32", "1"}, {"B_F32", "1"}, {"ACC_F32", "1"}});
++    string_to_spv("mul_mm_mali_sc_f16_f32",  "mul_mm_mali.comp", {{"B_F32", "1"}, {"B_SCALE", "1"}});
++    string_to_spv("mul_mm_mali_mx_f16_f32",  "mul_mm_mali.comp", {{"B_F32", "1"}, {"ACC_MIXED", "1"}});
++    string_to_spv("mul_mm_mali_mxbm64_f16_f32",  "mul_mm_mali.comp", {{"B_F32", "1"}, {"ACC_MIXED", "1"}, {"BM", "64"}});
++    string_to_spv("fa_mali_r4c4ps", "fa_mali.comp", {{"HD", "40"}, {"RT", "4"}, {"CT", "4"}, {"PV_PS", "1"}});
++    string_to_spv("fa_mali_r4c4ps32", "fa_mali.comp", {{"HD", "40"}, {"RT", "4"}, {"CT", "4"}, {"PV_PS", "1"}, {"ACC32", "1"}});
++    string_to_spv("fa_mali_r4c4psmx", "fa_mali.comp", {{"HD", "40"}, {"RT", "4"}, {"CT", "4"}, {"PV_PS", "1"}, {"ACC_MIXED", "1"}});
++    string_to_spv("fa_mali_r2c4psmx", "fa_mali.comp", {{"HD", "40"}, {"RT", "2"}, {"CT", "4"}, {"PV_PS", "1"}, {"ACC_MIXED", "1"}});
++    string_to_spv("fa_mali_h80r2psmx", "fa_mali.comp", {{"HD", "80"}, {"RT", "2"}, {"CT", "4"}, {"PV_PS", "1"}, {"ACC_MIXED", "1"}});
++    string_to_spv("fa_mali_h80r4psmx", "fa_mali.comp", {{"HD", "80"}, {"RT", "4"}, {"CT", "4"}, {"PV_PS", "1"}, {"ACC_MIXED", "1"}});
++    string_to_spv("fa_mali_h80r1psmx", "fa_mali.comp", {{"HD", "80"}, {"RT", "1"}, {"CT", "4"}, {"PV_PS", "1"}, {"ACC_MIXED", "1"}});
++    string_to_spv("mul_mm_mali_a32b16",         "mul_mm_mali.comp", {{"A_F32", "1"}, {"B_F16", "1"}, {"ACC_F32", "1"}});
+     // matmul
+     for (const MatMulIdType& matmul_id_type : {MatMulIdType::NONE, MatMulIdType::DEFAULT, MatMulIdType::SUBGROUP}) {
+         // No coopmats

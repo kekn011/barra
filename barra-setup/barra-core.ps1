@@ -782,6 +782,26 @@ function Run-KitsInner(){
         # KEIN Auto-Start (Kevin): Start manuell via 'wakeserver.sh start' (su -M, enter-systemd)
         Ok (T 'core.kit.ok' $name)
       }
+      elseif ($k -eq 'img') {
+        # Bildgenerator (Android-seitig wie llm/stt): Kit -> /data/local/barra-img/{bin,models}, imgserver.sh -> baseos/bin,
+        # Container-CLI barra-img -> /usr/local/bin. Manueller Start (imgserver.sh start, Port 8096), KEIN Boot-Autostart.
+        $name = T 'core.kit.img_name'
+        $mdl = if ($km['img']) { $km['img'] } else { 'dreamshaper-lcm' }
+        $mf = @{ 'dreamshaper-lcm'='DreamShaper8_LCM.safetensors' }[$mdl]
+        if (-not $mf) { throw (T 'core.kit.fail' "$name (model id $mdl)") }
+        Pkg (T 'core.kit.push' $name)
+        KitPush (Join-Path $script:Kit 'img-kit\img-kit.tar.gz') '/data/local/tmp/img-kit.tar.gz' $name
+        Pkg (T 'core.kit.extract' $name)
+        $r = AdbSuBg ($KitDiag + 'D=/data/local/barra-img; i=0; while [ $i -lt 60 ]; do mkdir -p $D && touch $D/.wt && rm -f $D/.wt && break; [ $i = 0 ] && kdiag erst; [ $((i%12)) = 11 ] && kdiag lauf; sleep 5; i=$((i+1)); done; mkdir -p $D && touch $D/.wt && rm -f $D/.wt || kdiag final; cd $D && rm -rf bin base && tar -xzf /data/local/tmp/img-kit.tar.gz && mkdir -p models && chmod -R 755 $D/bin && cp base/imgserver.sh /data/adb/baseos/bin/imgserver.sh && chmod 755 /data/adb/baseos/bin/imgserver.sh && U=/data/local/ubuntu && cp base/barra-img $U/usr/local/bin/barra-img && chmod 755 $U/usr/local/bin/barra-img && rm -rf base /data/local/tmp/img-kit.tar.gz') 900 (T 'core.kit.extract' $name)
+        if (-not $r.ok) { throw (T 'core.kit.fail' "$name (tar rc=$($r.rc)): $($r.log)") }
+        Pkg (T 'core.kit.push_model' $name)
+        KitPush (Join-Path $script:Kit "img-kit\$mf") '/data/local/tmp/img-model.bin' $name
+        KitPush (Join-Path $script:Kit 'img-kit\taesd.safetensors') '/data/local/tmp/img-taesd.bin' $name
+        $o = AdbSuM ('D=/data/local/barra-img/models; mkdir -p $D && mv /data/local/tmp/img-model.bin $D/' + $mf + ' && mv /data/local/tmp/img-taesd.bin $D/taesd.safetensors && chmod 644 $D/* && echo MDL_OK') 180
+        if ($o -notmatch 'MDL_OK') { throw (T 'core.kit.fail' "$name (model)") }
+        # KEIN Auto-Start (Kevin): Start manuell via 'imgserver.sh start'
+        Ok (T 'core.kit.ok' $name)
+      }
     }
     if ($bothKits) { Pkg (T 'core.kit.both_note') 'ok' } else { Pkg (T 'core.kit.all_ok') 'ok' }
 }

@@ -1,0 +1,45 @@
+#!/bin/bash
+# barra-img — Bild aus Text erzeugen (Container-CLI fuer den barra Bild-Dienst, Port 8096).
+#   barra-img "ein roter Fuchs im Schnee" [-o bild.png] [-s SEED] [-W BREITE] [-H HOEHE] [-n SCHRITTE] [-N NEGATIV]
+# Der Dienst muss laufen: (Android) su -c 'sh /data/adb/baseos/bin/imgserver.sh start'
+# Ohne -o: Datei img-<seed>.png im aktuellen Verzeichnis. Standard 512x512, LCM 4 Schritte, Seed zufaellig.
+set -e
+HOST=${BARRA_IMG_HOST:-127.0.0.1}
+PORT=${BARRA_IMG_PORT:-8096}
+OUT=""; SEED=-1; W=512; H=512; STEPS=""; NEG=""
+PROMPT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) OUT="$2"; shift 2;;
+    -s) SEED="$2"; shift 2;;
+    -W) W="$2"; shift 2;;
+    -H) H="$2"; shift 2;;
+    -n) STEPS="$2"; shift 2;;
+    -N) NEG="$2"; shift 2;;
+    -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    *) if [ -z "$PROMPT" ]; then PROMPT="$1"; else PROMPT="$PROMPT $1"; fi; shift;;
+  esac
+done
+[ -n "$PROMPT" ] || { echo "usage: barra-img \"prompt\" [-o out.png] [-s seed] [-W w] [-H h] [-n steps] [-N negative]" >&2; exit 2; }
+if ! curl -s -m 3 -o /dev/null "http://$HOST:$PORT/sdapi/v1/options"; then
+  echo "barra-img: Bild-Dienst nicht erreichbar (http://$HOST:$PORT) — starten mit: su -c 'sh /data/adb/baseos/bin/imgserver.sh start' (Android-Seite)" >&2
+  exit 1
+fi
+esc(){ printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+BODY="{\"prompt\":\"$(esc "$PROMPT")\",\"negative_prompt\":\"$(esc "$NEG")\",\"seed\":$SEED,\"width\":$W,\"height\":$H"
+[ -n "$STEPS" ] && BODY="$BODY,\"steps\":$STEPS"
+BODY="$BODY}"
+TMP=$(mktemp /tmp/barra-img.XXXXXX)
+trap 'rm -f "$TMP"' EXIT
+T0=$(date +%s)
+if ! curl -s -m 600 "http://$HOST:$PORT/sdapi/v1/txt2img" -H 'Content-Type: application/json' -d "$BODY" -o "$TMP"; then
+  echo "barra-img: Anfrage fehlgeschlagen" >&2; exit 1
+fi
+B64=$(sed -n 's/.*"images":\["\([^"]*\)".*/\1/p' "$TMP")
+if [ -z "$B64" ]; then echo "barra-img: keine Bilddaten in der Antwort: $(head -c 300 "$TMP")" >&2; exit 1; fi
+# Seed aus den PNG-Parametern (info-Feld) fuer den Dateinamen
+USED=$(sed -n 's/.*Seed: \([0-9-]*\).*/\1/p' "$TMP" | head -1)
+[ -n "$USED" ] || USED=$SEED
+[ -n "$OUT" ] || OUT="img-$USED.png"
+printf '%s' "$B64" | base64 -d > "$OUT"
+echo "$OUT  (${W}x${H}, seed $USED, $(( $(date +%s) - T0 )) s)"

@@ -1,0 +1,310 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_subgroup_extended_types_float16 : require
+
+// barra Mali-FlashAttention (hd=HD, K/V f16, Q/O f32, ohne Maske/Sinks/GQA/split_k).
+// 256 Threads = 16 Zeilengruppen (ty) x 16 Lanes (tx). Thread-Tile: RT Query-Zeilen x CT KV-Spalten.
+// Br = 16*RT Query-Zeilen je Workgroup, Bc = 16*CT KV-Spalten je Block.
+// S = Q K^T als f16vec4-Aussenprodukt (K transponiert im Shared), Online-Softmax je Zeile mit
+// subgroupMax ueber die 16 Lanes (= eine Mali-Subgroup), O-Teilsummen je Lane in Registern
+// (Split-K ueber die CT Spalten der Lane), Reduktion ueber die Subgroup erst am Ende.
+// V im Shared als [k][d4][lane] abgelegt, damit die 16 Lanes kontiguierlich lesen.
+#ifndef HD
+#define HD 40
+#endif
+#ifndef RT
+#define RT 4
+#endif
+#ifndef CT
+#define CT 4
+#endif
+#define HD4 (HD/4)
+#define BR (16*RT)
+#define BC (16*CT)
+#define CV (CT/4)
+#if defined(ACC32) || defined(ACC_MIXED)
+#define ACCT vec4
+#define ACCS float
+#else
+#define ACCT f16vec4
+#define ACCS float16_t
+#endif
+#define NSLOT ((HD4 + 15) / 16)
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer Q {float data_q[];};
+layout (binding = 0) readonly buffer QV4 {vec4 data_qv4[];};
+layout (binding = 1) readonly buffer K {float16_t data_k[];};
+layout (binding = 1) readonly buffer KV4 {f16vec4 data_kv4[];};
+layout (binding = 2) readonly buffer V {float16_t data_v[];};
+layout (binding = 2) readonly buffer VV4 {f16vec4 data_vv4[];};
+layout (binding = 3) readonly buffer M {float16_t data_m[];};
+layout (binding = 4) readonly buffer S {float data_s[];};
+layout (binding = 5) writeonly buffer O {float data_o[];};
+layout (binding = 5) writeonly buffer OV4 {vec4 data_ov4[];};
+layout (binding = 6) readonly buffer MO {uint data_mask_opt[];};
+
+layout (push_constant) uniform parameter {
+    uint N; uint KV;
+    uint ne1; uint ne2; uint ne3;
+    uint neq2; uint neq3; uint nek2; uint nek3; uint nev2; uint nev3; uint nem1; uint nem2; uint nem3;
+    uint nb01; uint nb02; uint nb03; uint nb11; uint nb12; uint nb13; uint nb21; uint nb22; uint nb23;
+    float scale; float max_bias; float logit_softcap;
+    uint mask_n_head_log2; float m0; float m1;
+    uint gqa_ratio; uint split_kv; uint k_num;
+} p;
+
+shared f16vec4 Qs[BR][HD4];
+shared f16vec4 KsT[HD][BC/4];
+#ifdef PV_PS
+shared f16vec4 Vs2[BC][HD4];
+shared f16vec4 Ps[BR][BC/4];
+#else
+shared f16vec4 Vs[CT][HD4][16];
+#endif
+#ifdef KNAT
+shared f16vec4 KsN[BC][HD4];
+#endif
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint tx = tid & 15u;
+    const uint ty = tid >> 4u;
+    const uint i = gl_WorkGroupID.x;
+    const uint iq2 = gl_WorkGroupID.y;
+    const uint iq3 = gl_WorkGroupID.z;
+    const uint N = p.N;
+    const uint KV = p.KV;
+    const uint q_off = (iq2 * p.nb02 + iq3 * p.nb03) / 4u;
+    const uint k_off = (iq2 * p.nb12 + iq3 * p.nb13) / 2u;
+    const uint v_off = (iq2 * p.nb22 + iq3 * p.nb23) / 2u;
+    const float qscale = p.scale * 1.44269504f;
+    const uint row0 = i * uint(BR);
+
+    for (uint idx = tid; idx < uint(BR * HD4); idx += 256u) {
+        const uint r = idx / uint(HD4), d4 = idx % uint(HD4);
+        vec4 q = vec4(0.0);
+#ifdef NO_Q
+        q = vec4(float(r) * 0.001, 0.0, 0.0, 0.0);
+#else
+        if (row0 + r < N) q = data_qv4[(q_off + (row0 + r) * p.nb01) / 4u + d4] * qscale;
+#endif
+        Qs[r][d4] = f16vec4(q);
+    }
+
+    float m[RT];
+    float l[RT];
+#ifdef PV_PS
+    ACCT acc[RT][NSLOT];
+    [[unroll]] for (int r = 0; r < RT; r++) { m[r] = -1e30; l[r] = 0.0; [[unroll]] for (int k = 0; k < NSLOT; k++) acc[r][k] = ACCT(0.0); }
+#define NACC NSLOT
+#else
+    ACCT acc[RT][HD4];
+    [[unroll]] for (int r = 0; r < RT; r++) {
+        m[r] = -1e30; l[r] = 0.0;
+        [[unroll]] for (int d4 = 0; d4 < HD4; d4++) acc[r][d4] = ACCT(0.0);
+    }
+#define NACC HD4
+#endif
+
+#ifdef NO_LOOP
+    const uint nblk = 0u;
+#else
+    const uint nblk = (KV + uint(BC) - 1u) / uint(BC);
+#endif
+    for (uint j = 0u; j < nblk; j++) {
+        const uint col0 = j * uint(BC);
+#ifndef NO_BAR
+        barrier();
+#endif
+#ifdef NO_STG
+        if (j == 0u)
+#endif
+        for (uint idx = tid; idx < uint(BC * HD4); idx += 256u) {
+#ifdef STG1
+            const uint d4 = idx / uint(BC), c = idx % uint(BC);
+#else
+            const uint c = idx / uint(HD4), d4 = idx % uint(HD4);
+#endif
+            f16vec4 kv = f16vec4(0.0), vv = f16vec4(0.0);
+            if (col0 + c < KV) {
+                kv = data_kv4[(k_off + (col0 + c) * p.nb11) / 4u + d4];
+                vv = data_vv4[(v_off + (col0 + c) * p.nb21) / 4u + d4];
+            }
+            // Spalte c = lane*CT + k  (Lane tx bearbeitet die Spalten tx*CT .. tx*CT+CT-1)
+#ifdef PV_PS
+            Vs2[c][d4] = vv;
+#else
+            Vs[c % uint(CT)][d4][c / uint(CT)] = vv;
+#endif
+            // K transponiert: KsT[d][cv] = f16vec4 ueber 4 Spalten
+#ifdef KNAT
+            KsN[c][d4] = kv;
+#else
+            const uint cv = c >> 2u, cj = c & 3u, d = d4 * 4u;
+            KsT[d][cv][cj] = kv.x; KsT[d + 1u][cv][cj] = kv.y; KsT[d + 2u][cv][cj] = kv.z; KsT[d + 3u][cv][cj] = kv.w;
+#endif
+        }
+#ifndef NO_BAR
+        barrier();
+#endif
+
+        f16vec4 s[RT][CV];
+        [[unroll]] for (int r = 0; r < RT; r++) [[unroll]] for (int h = 0; h < CV; h++) s[r][h] = f16vec4(0.0);
+#ifdef NO_S
+        [[unroll]] for (int r = 0; r < RT; r++) [[unroll]] for (int h = 0; h < CV; h++) s[r][h] = KsT[r][tx * uint(CV) + uint(h)] + Qs[ty * uint(RT) + uint(r)][h];
+#else
+        [[unroll]] for (uint d4 = 0u; d4 < uint(HD4); d4++) {
+            f16vec4 k0[CV], k1[CV], k2[CV], k3[CV];
+            [[unroll]] for (int h = 0; h < CV; h++) {
+                const uint cvx = tx * uint(CV) + uint(h);
+                k0[h] = KsT[d4 * 4u][cvx]; k1[h] = KsT[d4 * 4u + 1u][cvx]; k2[h] = KsT[d4 * 4u + 2u][cvx]; k3[h] = KsT[d4 * 4u + 3u][cvx];
+            }
+            [[unroll]] for (int r = 0; r < RT; r++) {
+                const f16vec4 q = Qs[ty * uint(RT) + uint(r)][d4];
+                [[unroll]] for (int h = 0; h < CV; h++) {
+                    s[r][h] = fma(f16vec4(q.x), k0[h], s[r][h]);
+                    s[r][h] = fma(f16vec4(q.y), k1[h], s[r][h]);
+                    s[r][h] = fma(f16vec4(q.z), k2[h], s[r][h]);
+                    s[r][h] = fma(f16vec4(q.w), k3[h], s[r][h]);
+                }
+            }
+        }
+#endif
+
+        vec4 sf[RT][CV];
+        [[unroll]] for (int r = 0; r < RT; r++) [[unroll]] for (int h = 0; h < CV; h++) sf[r][h] = vec4(s[r][h]);
+        if (col0 + uint(BC) > KV) {
+            [[unroll]] for (int h = 0; h < CV; h++) {
+                const uint cb = col0 + (tx * uint(CV) + uint(h)) * 4u;
+                [[unroll]] for (int r = 0; r < RT; r++) {
+                    if (cb      >= KV) sf[r][h].x = -1e30;
+                    if (cb + 1u >= KV) sf[r][h].y = -1e30;
+                    if (cb + 2u >= KV) sf[r][h].z = -1e30;
+                    if (cb + 3u >= KV) sf[r][h].w = -1e30;
+                }
+            }
+        }
+
+        f16vec4 p16[RT][CV];
+#ifdef NO_SM
+        [[unroll]] for (int r = 0; r < RT; r++) { [[unroll]] for (int h = 0; h < CV; h++) p16[r][h] = f16vec4(sf[r][h]); l[r] += 1.0; }
+#else
+        [[unroll]] for (int r = 0; r < RT; r++) {
+            float mb = -1e30;
+            [[unroll]] for (int h = 0; h < CV; h++) mb = max(mb, max(max(sf[r][h].x, sf[r][h].y), max(sf[r][h].z, sf[r][h].w)));
+            mb = subgroupMax(mb);
+            const float mn = max(m[r], mb);
+            const float alpha = exp2(m[r] - mn);
+            float ps = 0.0;
+            [[unroll]] for (int h = 0; h < CV; h++) {
+                const vec4 pr = exp2(sf[r][h] - mn);
+                ps += pr.x + pr.y + pr.z + pr.w;
+                p16[r][h] = f16vec4(pr);
+            }
+            l[r] = l[r] * alpha + ps;
+            m[r] = mn;
+            const ACCS a16 = ACCS(alpha);
+            [[unroll]] for (int d4 = 0; d4 < NACC; d4++) acc[r][d4] *= a16;
+        }
+#endif
+
+#ifdef PV_PS
+        [[unroll]] for (int r = 0; r < RT; r++) [[unroll]] for (int h = 0; h < CV; h++) Ps[ty * uint(RT) + uint(r)][tx * uint(CV) + uint(h)] = p16[r][h];
+        barrier();
+        [[unroll]] for (int k = 0; k < NSLOT; k++) {
+            const uint d4 = tx + 16u * uint(k);
+            if (d4 < uint(HD4)) {
+#ifdef ACC_MIXED
+                f16vec4 pa[RT];
+                [[unroll]] for (int r = 0; r < RT; r++) pa[r] = f16vec4(0.0);
+#define PT f16vec4
+#define PACC pa[r]
+#else
+#define PT ACCT
+#define PACC acc[r][k]
+#endif
+                [[unroll]] for (uint c4 = 0u; c4 < uint(BC / 4); c4++) {
+                    const PT v0 = PT(Vs2[c4 * 4u][d4]), v1 = PT(Vs2[c4 * 4u + 1u][d4]), v2 = PT(Vs2[c4 * 4u + 2u][d4]), v3 = PT(Vs2[c4 * 4u + 3u][d4]);
+                    [[unroll]] for (int r = 0; r < RT; r++) {
+                        const f16vec4 pv = Ps[ty * uint(RT) + uint(r)][c4];
+                        PACC = fma(PT(pv.x), v0, PACC);
+                        PACC = fma(PT(pv.y), v1, PACC);
+                        PACC = fma(PT(pv.z), v2, PACC);
+                        PACC = fma(PT(pv.w), v3, PACC);
+                    }
+                }
+#ifdef ACC_MIXED
+                [[unroll]] for (int r = 0; r < RT; r++) acc[r][k] += vec4(pa[r]);
+#endif
+            }
+        }
+#elif defined(NO_PV)
+        [[unroll]] for (int r = 0; r < RT; r++) acc[r][0] += p16[r][0] * Vs[0][r][tx];
+#elif defined(PV_SPLAT)
+        ACCT px[RT][CT];
+        [[unroll]] for (int r = 0; r < RT; r++) [[unroll]] for (int h = 0; h < CV; h++) {
+            px[r][h*4+0] = ACCT(p16[r][h].x); px[r][h*4+1] = ACCT(p16[r][h].y); px[r][h*4+2] = ACCT(p16[r][h].z); px[r][h*4+3] = ACCT(p16[r][h].w);
+        }
+        [[unroll]] for (uint d4 = 0u; d4 < uint(HD4); d4++) {
+            [[unroll]] for (int k = 0; k < CT; k++) {
+                const ACCT v = ACCT(Vs[k][d4][tx]);
+                [[unroll]] for (int r = 0; r < RT; r++) acc[r][d4] = fma(px[r][k], v, acc[r][d4]);
+            }
+        }
+#elif defined(PV_RD)
+        [[unroll]] for (int r = 0; r < RT; r++) {
+            [[unroll]] for (uint d4 = 0u; d4 < uint(HD4); d4++) {
+                [[unroll]] for (int h = 0; h < CV; h++) {
+                    acc[r][d4] = fma(ACCT(p16[r][h].x), ACCT(Vs[h * 4 + 0][d4][tx]), acc[r][d4]);
+                    acc[r][d4] = fma(ACCT(p16[r][h].y), ACCT(Vs[h * 4 + 1][d4][tx]), acc[r][d4]);
+                    acc[r][d4] = fma(ACCT(p16[r][h].z), ACCT(Vs[h * 4 + 2][d4][tx]), acc[r][d4]);
+                    acc[r][d4] = fma(ACCT(p16[r][h].w), ACCT(Vs[h * 4 + 3][d4][tx]), acc[r][d4]);
+                }
+            }
+        }
+#else
+        [[unroll]] for (uint d4 = 0u; d4 < uint(HD4); d4++) {
+            [[unroll]] for (int h = 0; h < CV; h++) {
+                const ACCT v0 = ACCT(Vs[h * 4 + 0][d4][tx]), v1 = ACCT(Vs[h * 4 + 1][d4][tx]), v2 = ACCT(Vs[h * 4 + 2][d4][tx]), v3 = ACCT(Vs[h * 4 + 3][d4][tx]);
+                [[unroll]] for (int r = 0; r < RT; r++) {
+                    acc[r][d4] = fma(ACCT(p16[r][h].x), v0, acc[r][d4]);
+                    acc[r][d4] = fma(ACCT(p16[r][h].y), v1, acc[r][d4]);
+                    acc[r][d4] = fma(ACCT(p16[r][h].z), v2, acc[r][d4]);
+                    acc[r][d4] = fma(ACCT(p16[r][h].w), v3, acc[r][d4]);
+                }
+            }
+        }
+#endif
+    }
+
+    const uint obase = (iq3 * p.ne2 * p.ne1 * uint(HD) + iq2 * uint(HD)) / 4u;
+    [[unroll]] for (int r = 0; r < RT; r++) {
+        const float lsum = subgroupAdd(l[r]);
+        const float inv = (lsum == 0.0) ? 0.0 : (1.0 / lsum);
+        const uint row = row0 + ty * uint(RT) + uint(r);
+#if defined(PV_PS)
+        [[unroll]] for (int k = 0; k < NSLOT; k++) {
+            const uint d4 = tx + 16u * uint(k);
+            if (d4 < uint(HD4) && row < N) data_ov4[obase + (row * p.ne1 * uint(HD)) / 4u + d4] = vec4(acc[r][k]) * inv;
+        }
+#else
+        vec4 outv = vec4(0.0);
+#if defined(NO_RED)
+        [[unroll]] for (int d4 = 0; d4 < HD4; d4++) outv += vec4(acc[r][d4]);
+#else
+        [[unroll]] for (int d4 = 0; d4 < HD4; d4++) {
+            const vec4 t = subgroupAdd(vec4(acc[r][d4]));
+            if (tx == uint(d4)) outv = t;
+        }
+#endif
+        if (tx < uint(HD4) && row < N) {
+            data_ov4[obase + (row * p.ne1 * uint(HD)) / 4u + tx] = outv * inv;
+        }
+#endif
+    }
+}

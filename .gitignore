@@ -37,6 +37,8 @@ barra-setup/tts-kit/*
 !barra-setup/tts-kit/install-tts.ps1
 barra-setup/wake-kit/*
 !barra-setup/wake-kit/install-wake.ps1
+barra-setup/img-kit/*
+!barra-setup/img-kit/install-img.ps1
 
 # Fetched at setup time from their original sources (never redistribute).
 # Exceptions: lpmake.exe is OUR OWN mingw build from AOSP sources (Apache-2.0);

@@ -1,0 +1,200 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// barra Mali-GEMM (gemm_best-Port, src/gpu-kernels/gemm_best.comp -> ggml-Interface).
+// C[M,N] = A[M,K] * B[N,K]^T — beide Operanden k-major (ggml mul_mat).
+// 256 Threads, Block 128x128, BK=32, 8x8 Outputs/Thread als f16vec4-FMA-Aussenprodukt,
+// f16-Akkumulation. Alle Raender gebounded (zero-pad Loads, maskierte Stores).
+// B wird beim Laden ins Shared transponiert ([k][n/4]-vec4) — Gather amortisiert
+// ueber 128-fache Wiederverwendung je Tile-Element.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#ifdef A_F32
+layout (binding = 0) readonly buffer A {float data_a[];};
+layout (binding = 0) readonly buffer A4 {vec4 data_a4[];};
+#define A_F16(x) float16_t(x)
+#else
+layout (binding = 0) readonly buffer A {float16_t data_a[];};
+layout (binding = 0) readonly buffer A4 {f16vec4 data_a4[];};
+#define A_F16(x) (x)
+#endif
+#ifdef B_F32
+layout (binding = 1) readonly buffer B {float data_b[];};
+layout (binding = 1) readonly buffer B4 {vec4 data_b4[];};
+#else
+layout (binding = 1) readonly buffer B {float16_t data_b[];};
+layout (binding = 1) readonly buffer B4 {f16vec4 data_b4[];};
+#endif
+layout (binding = 2) writeonly buffer D {float data_d[];};
+
+layout (push_constant) uniform parameter
+{
+    uint M; uint N; uint K;
+    uint stride_a; uint stride_b; uint stride_d;
+    uint batch_stride_a; uint batch_stride_b; uint batch_stride_d;
+    uint base_work_group_z; uint num_batches; uint k_split;
+    uint ne02; uint ne12; uint broadcast2; uint broadcast3;
+    uint padded_N;
+} p;
+
+#ifndef BM
+#define BM 128
+#endif
+#ifndef BN
+#define BN 128
+#endif
+#define BK 32
+#define MM (BM/16)
+#ifndef MNV
+#define MNV 2
+#endif
+#ifdef ACC_F32
+#define ACCV vec4
+#else
+#define ACCV f16vec4
+#endif
+#ifdef B_SCALE
+#define BSC float16_t(0.0078125)
+#define DSC 128.0
+#else
+#define BSC float16_t(1.0)
+#define DSC 1.0
+#endif
+#define LA ((BM * (BK/4)) / 256)   // A-Ladeschritte je Thread
+#define LB ((BN * (BK/4)) / 256)   // B-Ladeschritte je Thread
+
+shared f16vec4 As[BM][BK/4];
+shared f16vec4 Bs[BK][BN/4];
+
+void main() {
+    const uint ic = gl_WorkGroupID.y;
+    const uint batch_idx = gl_WorkGroupID.z + p.base_work_group_z;
+    const uint i13 = batch_idx / p.ne12;
+    const uint i12 = batch_idx % p.ne12;
+    const uint i03 = i13 / p.broadcast3;
+    const uint i02 = i12 / p.broadcast2;
+    const uint batch_idx_a = i03 * p.ne02 + i02;
+
+    const uint blocks_m = (p.M + BM - 1u) / BM;
+    const uint ir = gl_WorkGroupID.x % blocks_m;
+    const uint ik = gl_WorkGroupID.x / blocks_m;
+    const uint start_k = ik * p.k_split;
+    const uint end_k = min(p.K, (ik + 1u) * p.k_split);
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint tx = tid % 16u;
+    const uint ty = tid / 16u;
+
+    const uint base_a = batch_idx_a * p.batch_stride_a;
+    const uint base_b = batch_idx * p.batch_stride_b;
+    // vec4-Schnellpfad nur bei 4er-Alignment von Stride und Batch-Basis
+    const bool a_v4 = ((p.stride_a & 3u) == 0u) && ((base_a & 3u) == 0u);
+    const bool b_v4 = ((p.stride_b & 3u) == 0u) && ((base_b & 3u) == 0u);
+
+    const uint brow = ir * BM;
+    const uint bcol = ic * BN;
+
+#ifdef ACC_MIXED
+    vec4 acc32[MM][MNV];
+    [[unroll]] for (int i = 0; i < MM; i++) [[unroll]] for (int v = 0; v < MNV; v++) acc32[i][v] = vec4(0.0);
+    ACCV acc[MM][MNV];
+#else
+    ACCV acc[MM][MNV];
+    [[unroll]] for (int i = 0; i < MM; i++) [[unroll]] for (int v = 0; v < MNV; v++) acc[i][v] = ACCV(0.0);
+#endif
+
+    for (uint k0 = start_k; k0 < end_k; k0 += BK) {
+        [[unroll]] for (uint l = 0u; l < LA; l++) {
+            const uint idx = tid + l * 256u;
+            const uint r = idx / (BK/4u), cc = idx % (BK/4u);
+            const uint row = brow + r;
+            const uint kk = k0 + cc*4u;
+            f16vec4 va = f16vec4(0.0);
+            if (row < p.M) {
+                const uint base = base_a + row * p.stride_a + kk;
+                if (kk + 4u <= end_k) {
+                    va = a_v4 ? f16vec4(data_a4[base >> 2u])
+                              : f16vec4(A_F16(data_a[base]), A_F16(data_a[base+1u]), A_F16(data_a[base+2u]), A_F16(data_a[base+3u]));
+                } else {
+                    if (kk      < end_k) va.x = A_F16(data_a[base]);
+                    if (kk + 1u < end_k) va.y = A_F16(data_a[base+1u]);
+                    if (kk + 2u < end_k) va.z = A_F16(data_a[base+2u]);
+                }
+            }
+            As[r][cc] = va;
+        }
+        // B koalesziert laden (vec4 entlang K) und beim Shared-Store transponieren
+        [[unroll]] for (uint l = 0u; l < LB; l++) {
+            const uint idx = tid + l * 256u;
+            const uint r = idx / (BK/4u);          // Spalten-Offset im Tile (0..BN-1)
+            const uint cc = idx % (BK/4u);         // k-vec4-Index
+            const uint col = bcol + r;
+            const uint kk = k0 + cc*4u;
+            f16vec4 vb = f16vec4(0.0);
+            if (col < p.N) {
+                const uint base = base_b + col * p.stride_b + kk;
+                if (kk + 4u <= end_k) {
+                    vb = b_v4 ? f16vec4(data_b4[base >> 2u])
+                              : f16vec4(data_b[base], data_b[base+1u], data_b[base+2u], data_b[base+3u]);
+                } else {
+                    if (kk      < end_k) vb.x = float16_t(data_b[base]);
+                    if (kk + 1u < end_k) vb.y = float16_t(data_b[base+1u]);
+                    if (kk + 2u < end_k) vb.z = float16_t(data_b[base+2u]);
+                }
+#ifdef B_SCALE
+                vb *= BSC;
+#endif
+            }
+            const uint nv = r / 4u, nj = r % 4u;
+            const uint kb = cc * 4u;
+            Bs[kb+0u][nv][nj] = vb.x;
+            Bs[kb+1u][nv][nj] = vb.y;
+            Bs[kb+2u][nv][nj] = vb.z;
+            Bs[kb+3u][nv][nj] = vb.w;
+        }
+        barrier();
+#ifdef ACC_MIXED
+        [[unroll]] for (int i = 0; i < MM; i++) [[unroll]] for (int v = 0; v < MNV; v++) acc[i][v] = ACCV(0.0);
+#endif
+        [[unroll]] for (uint k4 = 0u; k4 < BK/4u; k4++) {
+            f16vec4 av[MM];
+            [[unroll]] for (int i = 0; i < MM; i++) av[i] = As[ty*uint(MM) + uint(i)][k4];
+            const uint kb = k4*4u, cb = tx*uint(MNV);
+            f16vec4 b0[MNV], b1[MNV], b2[MNV], b3[MNV];
+            [[unroll]] for (int v = 0; v < MNV; v++) {
+                b0[v] = Bs[kb][cb+uint(v)]; b1[v] = Bs[kb+1u][cb+uint(v)];
+                b2[v] = Bs[kb+2u][cb+uint(v)]; b3[v] = Bs[kb+3u][cb+uint(v)];
+            }
+            [[unroll]] for (int i = 0; i < MM; i++) [[unroll]] for (int v = 0; v < MNV; v++) {
+                acc[i][v] = fma(ACCV(f16vec4(av[i].x)), ACCV(b0[v]), acc[i][v]);
+                acc[i][v] = fma(ACCV(f16vec4(av[i].y)), ACCV(b1[v]), acc[i][v]);
+                acc[i][v] = fma(ACCV(f16vec4(av[i].z)), ACCV(b2[v]), acc[i][v]);
+                acc[i][v] = fma(ACCV(f16vec4(av[i].w)), ACCV(b3[v]), acc[i][v]);
+            }
+        }
+#ifdef ACC_MIXED
+        [[unroll]] for (int i = 0; i < MM; i++) [[unroll]] for (int v = 0; v < MNV; v++) acc32[i][v] += vec4(acc[i][v]);
+#endif
+        barrier();
+    }
+
+    const uint dbase = batch_idx * p.batch_stride_d + ik * p.batch_stride_d * p.num_batches;
+    [[unroll]] for (int i = 0; i < MM; i++) {
+        const uint row = brow + ty*uint(MM) + uint(i);
+        if (row >= p.M) continue;
+        [[unroll]] for (int v = 0; v < MNV; v++) {
+            const uint col = bcol + (tx*uint(MNV) + uint(v))*4u;
+            [[unroll]] for (uint j = 0u; j < 4u; j++) {
+                if (col + j < p.N) data_d[dbase + (col + j) * p.stride_d + row] =
+#ifdef ACC_MIXED
+                    acc32[i][v][j];
+#else
+                    float(acc[i][v][j]) * DSC;
+#endif
+            }
+        }
+    }
+}
