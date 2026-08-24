@@ -33,6 +33,10 @@ barra-setup/whisper-kit/*
 !barra-setup/whisper-kit/install-stt.ps1
 barra-setup/pyannote-kit/*
 !barra-setup/pyannote-kit/install-pya.ps1
+barra-setup/tts-kit/*
+!barra-setup/tts-kit/install-tts.ps1
+barra-setup/wake-kit/*
+!barra-setup/wake-kit/install-wake.ps1
 
 # Fetched at setup time from their original sources (never redistribute).
 # Exceptions: lpmake.exe is OUR OWN mingw build from AOSP sources (Apache-2.0);

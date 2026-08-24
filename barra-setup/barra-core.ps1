@@ -80,7 +80,49 @@ function Run($exe,$argstr,[scriptblock]$onLine,$timeoutSec=600,$live='err'){
 function AdbOut($a,$to=20){ (Run $script:ADB $a $null $to).lines -join "`n" }
 function FbOut($a,$to=20){ (Run $script:FB  $a $null $to).lines -join "`n" }
 function AdbSh($cmd,$to=30){ (AdbOut "shell $cmd" $to).Trim() }
-function AdbSu($cmd,$to=60){ (AdbOut "shell su -c `"$cmd`"" $to).Trim() }
+# su-Aufrufe: das Kommando muss als EIN Argument ueber die Windows→adb-Grenze (24.8., Kit-Install-
+# Bug): CommandLineToArgvW konsumiert "..."-Quotes und adb joint argv OHNE Re-Quoting — die
+# Geraete-Shell splittet Ketten dann an ;/&& und fuehrt NUR das 1. Kommando unter su aus, der
+# Rest lief als shell (uid 2000) → mkdir unter /data/local = EACCES. Deshalb: shell "su -c '<cmd>'"
+# — die Geraete-Shell parst die Single-Quotes, su bekommt die ganze Kette; $-Expansion erst in der
+# root-Shell. BEDINGUNG: keine Anfuehrungszeichen im Kommando (Guard wirft sofort, statt still
+# als shell zu laufen).
+function SuQ($cmd){ if ($cmd -match '["'']') { throw "su-Kommando enthaelt Anfuehrungszeichen (nicht erlaubt): $cmd" }; "'" + $cmd + "'" }
+function AdbSu($cmd,$to=60){ (AdbOut ("shell `"su -c " + (SuQ $cmd) + "`"") $to).Trim() }
+# su -M (Mount-Namespace erhalten) — noetig fuer enter-systemd.sh (nsenter in den Container-systemd)
+function AdbSuM($cmd,$to=60){ (AdbOut ("shell `"su -M -c " + (SuQ $cmd) + "`"") $to).Trim() }
+# Langlaeufer ROBUST: schreibt $cmd als Skript aufs Geraet, startet es DETACHED (setsid -> ueberlebt
+# adb-Abbruch, kein SIGHUP-Tod) und pollt eine Marker-Datei mit kurzen Reads (reconnected bei Bedarf).
+# Volles set-x-Trace-Log fuer Diagnose. Rueckgabe: @{ ok; rc; log }. Loest das "Entpacken bricht ab,
+# wenn USB waehrend des stillen Extract-Waits zuckt"-Problem (Kit-Install).
+function AdbSuBg($cmd,$timeoutSec=900,$label=$null){
+  $sh='/data/local/tmp/kitrun.sh'; $mk='/data/local/tmp/kitrun.done'; $lg='/data/local/tmp/kitrun.log'
+  # Marker+Log world-readable: der Extract laeuft als root, der Poll liest als shell (adb shell cat).
+  $wrap = "exec > $lg 2>&1`nset -x`n$cmd`nrc=`$?`nset +x`nchmod 666 $lg 2>/dev/null`necho R:`$rc > $mk`nchmod 666 $mk 2>/dev/null`n"
+  $tmp = [IO.Path]::GetTempFileName()
+  [IO.File]::WriteAllText($tmp, ($wrap -replace "`r`n","`n"))   # LF fuers Geraet
+  $pr = Run $script:ADB "push `"$tmp`" $sh" $null 60 'out'
+  Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  if ($pr.code -ne 0) { return @{ ok=$false; rc=-1; log='run-script push failed' } }
+  # su -M (Mount-Master/globaler Namespace) NOETIG: direkt nach dem Boot sieht der Default-su-Namespace
+  # eine stale FBE-Sicht -> /data/local wirkt unbeschreibbar, mkdir/tar scheitern minutenlang. -M sieht
+  # den korrekten Mount-Zustand. (Memory-Falle: "adb-su nach Boot minutenlang krank, su -mm/-M".)
+  [void](AdbSuM "rm -f $mk; setsid sh $sh </dev/null >/dev/null 2>&1 &" 30)
+  $t0=Get-Date
+  while (((Get-Date)-$t0).TotalSeconds -lt $timeoutSec) {
+    Chk
+    if ((AdbState) -ne 'device') { [void](WaitFor 'device' 180 (T 'core.wait_for' 'device')) }
+    $m = AdbSh "cat $mk 2>/dev/null" 15
+    if ($m -match 'R:(-?\d+)') {
+      $rc=[int]$matches[1]; $log = if ($rc -eq 0) { AdbSh "tail -25 $lg 2>/dev/null" 20 } else { AdbSh "tail -60 $lg 2>/dev/null" 20 }
+      return @{ ok=($rc -eq 0); rc=$rc; log=$log }
+    }
+    if ($label) { $el=[int]((Get-Date)-$t0).TotalSeconds; Pkg ("$label · " + (MMSS $el)) }
+    Start-Sleep 3
+  }
+  $log = AdbSh "tail -60 $lg 2>/dev/null" 20
+  return @{ ok=$false; rc=-2; log=("timeout; " + $log) }
+}
 
 # ---- Zustandserkennung ---------------------------------------------------------
 function AdbState(){ $s=(AdbOut 'get-state' 8).Trim(); if ($s -eq 'device') {'device'} elseif ($s -match '^unauthorized') {'unauthorized'} else {''} }
@@ -573,12 +615,28 @@ function Pkg($text,$state='run'){
   Emit 'progress' @{ pct=-1; text=$text }   # zeigt den Text auch in der Statuskachel (In-Flow)
 }
 function KitPush($src,$dst,$label){
-  $r = Run $script:ADB "push `"$src`" $dst" { param($l)
-        if ($l -match '\[\s*(\d+)%\]') {
-          Emit 'pkg' @{ text=("$label " + $matches[1] + '%'); state='run' }
-          Emit 'progress' @{ pct=[int]$matches[1]; text=("$label " + $matches[1] + '%') }
-        } } 1800 'out'
-  if ($r.code -ne 0) { throw "push failed: $src" }
+  $localSize = (Get-Item $src).Length
+  for ($try=1; $try -le 3; $try++) {
+    Chk
+    if ((AdbState) -ne 'device') { [void](WaitFor 'device' 180 (T 'core.wait_for' 'device')) }
+    $r = Run $script:ADB "push `"$src`" $dst" { param($l)
+          if ($l -match '\[\s*(\d+)%\]') {
+            Emit 'pkg' @{ text=("$label " + $matches[1] + '%'); state='run' }
+            Emit 'progress' @{ pct=[int]$matches[1]; text=("$label " + $matches[1] + '%') }
+          } } 1800 'out'
+    # Groesse verifizieren: ein bei USB-Zucken abgerissener Push zeigt oft 100%, ist aber abgeschnitten
+    # -> tar scheitert spaeter beim Entpacken. Deshalb Bytes auf dem Geraet gegen die lokale Groesse.
+    if ($r.code -eq 0) {
+      $rem = (AdbSh "wc -c < $dst 2>/dev/null" 30).Trim()
+      if ($rem -eq "$localSize") { return }
+      Log "KitPush: Groesse $rem != $localSize (Versuch $try) -> erneut"
+    } else {
+      Log "KitPush: adb push code=$($r.code) (Versuch $try) -> erneut"
+    }
+    Emit 'pkg' @{ text=("$label — Übertragung unvollständig, erneut ($try/3)"); state='run' }
+    Start-Sleep 2
+  }
+  throw "push failed/truncated: $src"
 }
 function Kit-FailText($err){
   # Innere throws nutzen teils schon core.kit.fail — nicht doppelt wickeln (23.8.: "fehlgeschlagen: fehlgeschlagen:")
@@ -594,6 +652,12 @@ function Run-Kits(){
   }
 }
 function Run-KitsInner(){
+    # kdiag: Diagnose-Praeambel fuer die Extract-Skripte (Frisch-Flash-Bug 23.8.: mkdir unter
+    # /data/local scheitert nur beim echten Flash-Lauf; errno war durch 2>/dev/null unsichtbar).
+    # Loggt in das kitrun-Trace-Log: wer sind wir (id inkl. SELinux-Kontext), Mount-NS des
+    # detached Kinds vs. global (proc/1), Mount-Sicht auf /data, Pfad-Zustand, AVC/fscrypt-Meldungen.
+    # $D setzt jeder Aufrufer auf sein Zielverzeichnis.
+    $KitDiag = 'kdiag(){ echo ==KDIAG $1 i=$i D=$D; id; getenforce; ls -ldZ /data /data/local /data/local/tmp $D; ls -l /proc/1/ns/mnt /proc/self/ns/mnt; grep -E " /data | /data/local/ubuntu " /proc/self/mounts; dmesg | grep -iE "avc|fscrypt|f2fs" | tail -5; echo ==KDIAG-END; }; '
     $kits = @(); if ($script:PreCfg -and $script:PreCfg.KITS) { $kits = @($script:PreCfg.KITS) }
     if (-not $kits.Count) { Pkg (T 'core.kit.all_ok') 'ok'; return }
     # Koexistenz-Verbot (22.8., am Geraet bewiesen): llm gleichzeitig mit stt/pya = OOM-Panic +
@@ -620,17 +684,14 @@ function Run-KitsInner(){
           Pkg (T 'core.kit.push' $name)
           KitPush (Join-Path $script:Kit "llm-kit\$attnTar") '/data/local/tmp/llm-kit.tar' $name
           Pkg (T 'core.kit.extract' $name)
-          $o = AdbSu 'i=0; while [ $i -lt 24 ]; do mkdir -p /data/local/barra-attn 2>/dev/null && touch /data/local/barra-attn/.wt 2>/dev/null && rm -f /data/local/barra-attn/.wt && break; sleep 5; i=$((i+1)); done; cd /data/local/barra-attn && tar -xf /data/local/tmp/llm-kit.tar && chmod -R 755 /data/local/barra-attn && rm /data/local/tmp/llm-kit.tar && echo KIT_OK' 600
-          if ($o -notmatch 'KIT_OK') { throw (T 'core.kit.fail' "$name (tar)") }
+          $r = AdbSuBg ($KitDiag + 'D=/data/local/barra-attn; i=0; while [ $i -lt 60 ]; do mkdir -p $D && touch $D/.wt && rm -f $D/.wt && break; [ $i = 0 ] && kdiag erst; [ $((i%12)) = 11 ] && kdiag lauf; sleep 5; i=$((i+1)); done; mkdir -p $D && touch $D/.wt && rm -f $D/.wt || kdiag final; cd $D && tar -xf /data/local/tmp/llm-kit.tar && chmod -R 755 $D && rm /data/local/tmp/llm-kit.tar') 900 (T 'core.kit.extract' $name)
+          if (-not $r.ok) { throw (T 'core.kit.fail' "$name (tar rc=$($r.rc)): $($r.log)") }
         }
         Pkg (T 'core.kit.push_model' $name)
         KitPush (Join-Path $script:Kit "llm-kit\$mf") '/data/local/tmp/llm-model.gguf' $name
-        $o = AdbSu ('H=$(ls -d /data/local/ubuntu/home/* | head -1); mkdir -p $H/models && mv /data/local/tmp/llm-model.gguf $H/models/' + $mf + ' && chown -R 1001:1001 $H/models && echo MDL_OK') 180
+        $o = AdbSuM ('H=$(ls -d /data/local/ubuntu/home/* | head -1); mkdir -p $H/models && mv /data/local/tmp/llm-model.gguf $H/models/' + $mf + ' && chown -R 1001:1001 $H/models && echo MDL_OK') 180
         if ($o -notmatch 'MDL_OK') { throw (T 'core.kit.fail' "$name (model)") }
-        if (-not $bothKits) {
-          Pkg (T 'core.kit.start' $name)
-          [void](AdbSu ('H=$(ls -d /data/local/ubuntu/home/* | head -1); sh /data/adb/baseos/bin/llmserver.sh start $H/models/' + $mf) 300)
-        }
+        # KEIN Auto-Start (Kevin): nur installieren; Start manuell via llmserver.sh start
         Ok (T 'core.kit.ok' $name)
       }
       elseif ($k -eq 'stt') {
@@ -645,17 +706,14 @@ function Run-KitsInner(){
           Pkg (T 'core.kit.push' $name)
           KitPush (Join-Path $script:Kit "whisper-kit\$ptar") '/data/local/tmp/whisper-kit.tar' $name
           Pkg (T 'core.kit.extract' $name)
-          $o = AdbSu 'i=0; while [ $i -lt 24 ]; do mkdir -p /data/local/barra-stt 2>/dev/null && touch /data/local/barra-stt/.wt 2>/dev/null && rm -f /data/local/barra-stt/.wt && break; sleep 5; i=$((i+1)); done; cd /data/local/barra-stt && tar -xf /data/local/tmp/whisper-kit.tar && mkdir -p models && chmod -R 755 /data/local/barra-stt && rm /data/local/tmp/whisper-kit.tar && echo KIT_OK' 600
-          if ($o -notmatch 'KIT_OK') { throw (T 'core.kit.fail' "$name (tar)") }
+          $r = AdbSuBg ($KitDiag + 'D=/data/local/barra-stt; i=0; while [ $i -lt 60 ]; do mkdir -p $D && touch $D/.wt && rm -f $D/.wt && break; [ $i = 0 ] && kdiag erst; [ $((i%12)) = 11 ] && kdiag lauf; sleep 5; i=$((i+1)); done; mkdir -p $D && touch $D/.wt && rm -f $D/.wt || kdiag final; cd $D && tar -xf /data/local/tmp/whisper-kit.tar && mkdir -p models && chmod -R 755 $D && rm /data/local/tmp/whisper-kit.tar') 900 (T 'core.kit.extract' $name)
+          if (-not $r.ok) { throw (T 'core.kit.fail' "$name (tar rc=$($r.rc)): $($r.log)") }
         }
         Pkg (T 'core.kit.push_model' $name)
         KitPush (Join-Path $script:Kit "whisper-kit\$mf") '/data/local/tmp/stt-model.bin' $name
-        $o = AdbSu ('mkdir -p /data/local/barra-stt/models && mv /data/local/tmp/stt-model.bin /data/local/barra-stt/models/' + $mf + ' && echo MDL_OK') 120
+        $o = AdbSuM ('mkdir -p /data/local/barra-stt/models && mv /data/local/tmp/stt-model.bin /data/local/barra-stt/models/' + $mf + ' && echo MDL_OK') 120
         if ($o -notmatch 'MDL_OK') { throw (T 'core.kit.fail' "$name (model)") }
-        if (-not $bothKits) {
-          Pkg (T 'core.kit.start' $name)
-          [void](AdbSu ('sh /data/adb/baseos/bin/sttserver.sh start /data/local/barra-stt/models/' + $mf) 400)
-        }
+        # KEIN Auto-Start (Kevin): nur installieren; Start manuell via sttserver.sh start
         Ok (T 'core.kit.ok' $name)
       }
       elseif ($k -eq 'pya') {
@@ -664,20 +722,17 @@ function Run-KitsInner(){
         Pkg (T 'core.kit.push' $name)
         KitPush (Join-Path $script:Kit 'pyannote-kit\pyannote-kit.tar') '/data/local/tmp/pya-kit.tar' $name
         Pkg (T 'core.kit.extract' $name)
-        $o = AdbSu 'i=0; while [ $i -lt 24 ]; do touch /data/local/ubuntu/opt/.wt 2>/dev/null && rm -f /data/local/ubuntu/opt/.wt && break; sleep 5; i=$((i+1)); done; cd /data/local/tmp && rm -rf pya-kit && mkdir pya-kit && cd pya-kit && tar -xf ../pya-kit.tar && U=/data/local/ubuntu && mkdir -p $U/opt/barra-pya $U/opt/barra/pya && cp kit/* $U/opt/barra-pya/ && chmod 644 $U/opt/barra-pya/* && cp base/sherpa-onnx-offline-speaker-diarization $U/opt/barra/pya/ && chmod 755 $U/opt/barra/pya/sherpa-onnx-offline-speaker-diarization && cp base/barra-diarize $U/usr/local/bin/barra-diarize && chmod 755 $U/usr/local/bin/barra-diarize && cp base/pyaserver.sh /data/adb/baseos/bin/pyaserver.sh && chmod 755 /data/adb/baseos/bin/pyaserver.sh && cd /data/local/tmp && rm -rf pya-kit pya-kit.tar && echo KIT_OK' 600
-        if ($o -notmatch 'KIT_OK') { throw (T 'core.kit.fail' "$name (tar)") }
+        $r = AdbSuBg ($KitDiag + 'D=/data/local/ubuntu/opt; i=0; while [ $i -lt 60 ]; do touch $D/.wt && rm -f $D/.wt && break; [ $i = 0 ] && kdiag erst; [ $((i%12)) = 11 ] && kdiag lauf; sleep 5; i=$((i+1)); done; touch $D/.wt && rm -f $D/.wt || kdiag final; cd /data/local/tmp && rm -rf pya-kit && mkdir pya-kit && cd pya-kit && tar -xf ../pya-kit.tar && U=/data/local/ubuntu && mkdir -p $U/opt/barra-pya $U/opt/barra/pya && cp kit/* $U/opt/barra-pya/ && chmod 644 $U/opt/barra-pya/* && cp base/sherpa-onnx-offline-speaker-diarization $U/opt/barra/pya/ && chmod 755 $U/opt/barra/pya/sherpa-onnx-offline-speaker-diarization && cp base/barra-diarize $U/usr/local/bin/barra-diarize && chmod 755 $U/usr/local/bin/barra-diarize && cp base/pyaserver.sh /data/adb/baseos/bin/pyaserver.sh && chmod 755 /data/adb/baseos/bin/pyaserver.sh && cd /data/local/tmp && rm -rf pya-kit pya-kit.tar') 900 (T 'core.kit.extract' $name)
+        if (-not $r.ok) { throw (T 'core.kit.fail' "$name (tar rc=$($r.rc)): $($r.log)") }
         if ($mdl -eq 'resnet34-zh') {
           # zh-Variante (TPU): gleiche Architektur — Trunk-Package/Kopf/ONNX im Kit ersetzen
           Pkg (T 'core.kit.push_model' $name)
           KitPush (Join-Path $script:Kit 'pyannote-kit\r34zh_trunk.package') '/data/local/tmp/pya-zh.pkg' $name
           KitPush (Join-Path $script:Kit 'pyannote-kit\head_zh.bin') '/data/local/tmp/pya-zh.head' $name
           KitPush (Join-Path $script:Kit 'pyannote-kit\resnet34_zh.onnx') '/data/local/tmp/pya-zh.onnx' $name
-          $o = AdbSu 'K=/data/local/ubuntu/opt/barra-pya; mv /data/local/tmp/pya-zh.pkg $K/r34_trunk.package && mv /data/local/tmp/pya-zh.head $K/head.bin && mv /data/local/tmp/pya-zh.onnx $K/resnet34.onnx && chmod 644 $K/* && echo EMB_OK' 120
+          $o = AdbSuM 'K=/data/local/ubuntu/opt/barra-pya; mv /data/local/tmp/pya-zh.pkg $K/r34_trunk.package && mv /data/local/tmp/pya-zh.head $K/head.bin && mv /data/local/tmp/pya-zh.onnx $K/resnet34.onnx && chmod 644 $K/* && echo EMB_OK' 120
           if ($o -notmatch 'EMB_OK') { throw (T 'core.kit.fail' "$name (model)") }
-          if (-not $bothKits) {
-            Pkg (T 'core.kit.start' $name)
-            [void](AdbSu 'sh /data/adb/baseos/bin/pyaserver.sh start' 180)
-          }
+          # KEIN Auto-Start (Kevin)
         } elseif ($mdl -eq 'eres2net-zh') {
           # eres2net auf TPU: Multi-Output-Rumpf + Float-Tail; ersetzt die r34-Kit-Dateien
           Pkg (T 'core.kit.push_model' $name)
@@ -685,28 +740,46 @@ function Run-KitsInner(){
           KitPush (Join-Path $script:Kit 'pyannote-kit\eres_tail.onnx') '/data/local/tmp/pya-e2' $name
           KitPush (Join-Path $script:Kit 'pyannote-kit\head_eres.bin') '/data/local/tmp/pya-e3' $name
           KitPush (Join-Path $script:Kit 'pyannote-kit\eres_params.txt') '/data/local/tmp/pya-e4' $name
-          $o = AdbSu 'K=/data/local/ubuntu/opt/barra-pya; rm -f $K/r34_trunk.package $K/emb_cpu.onnx; mv /data/local/tmp/pya-e1 $K/eres_body.package && mv /data/local/tmp/pya-e2 $K/eres_tail.onnx && mv /data/local/tmp/pya-e3 $K/head.bin && mv /data/local/tmp/pya-e4 $K/eres_params.txt && chmod 644 $K/* && echo EMB_OK' 120
+          $o = AdbSuM 'K=/data/local/ubuntu/opt/barra-pya; rm -f $K/r34_trunk.package $K/emb_cpu.onnx; mv /data/local/tmp/pya-e1 $K/eres_body.package && mv /data/local/tmp/pya-e2 $K/eres_tail.onnx && mv /data/local/tmp/pya-e3 $K/head.bin && mv /data/local/tmp/pya-e4 $K/eres_params.txt && chmod 644 $K/* && echo EMB_OK' 120
           if ($o -notmatch 'EMB_OK') { throw (T 'core.kit.fail' "$name (model)") }
-          if (-not $bothKits) {
-            Pkg (T 'core.kit.start' $name)
-            [void](AdbSu 'sh /data/adb/baseos/bin/pyaserver.sh start' 180)
-          }
+          # KEIN Auto-Start (Kevin)
         } elseif ($mdl -eq 'titanet-en') {
           # TitaNet auf TPU: 5-Segment-Kette + Float-Tail; ersetzt die r34-Kit-Dateien
           Pkg (T 'core.kit.push_model' $name)
           foreach ($tf in @('tita_seg0.package','tita_seg1.package','tita_seg2.package','tita_seg3.package','tita_seg4.package','tita_tail.onnx','tita_glue.bin','tita_params.txt')) {
             KitPush (Join-Path $script:Kit "pyannote-kit\$tf") "/data/local/tmp/$tf" $name
           }
-          $o = AdbSu 'K=/data/local/ubuntu/opt/barra-pya; rm -f $K/r34_trunk.package $K/eres_body.package $K/eres_tail.onnx $K/eres_params.txt $K/emb_cpu.onnx $K/head.bin; mv /data/local/tmp/tita_seg0.package /data/local/tmp/tita_seg1.package /data/local/tmp/tita_seg2.package /data/local/tmp/tita_seg3.package /data/local/tmp/tita_seg4.package /data/local/tmp/tita_tail.onnx /data/local/tmp/tita_glue.bin /data/local/tmp/tita_params.txt $K/ && chmod 644 $K/* && echo EMB_OK' 180
+          $o = AdbSuM 'K=/data/local/ubuntu/opt/barra-pya; rm -f $K/r34_trunk.package $K/eres_body.package $K/eres_tail.onnx $K/eres_params.txt $K/emb_cpu.onnx $K/head.bin; mv /data/local/tmp/tita_seg0.package /data/local/tmp/tita_seg1.package /data/local/tmp/tita_seg2.package /data/local/tmp/tita_seg3.package /data/local/tmp/tita_seg4.package /data/local/tmp/tita_tail.onnx /data/local/tmp/tita_glue.bin /data/local/tmp/tita_params.txt $K/ && chmod 644 $K/* && echo EMB_OK' 180
           if ($o -notmatch 'EMB_OK') { throw (T 'core.kit.fail' "$name (model)") }
-          if (-not $bothKits) {
-            Pkg (T 'core.kit.start' $name)
-            [void](AdbSu 'sh /data/adb/baseos/bin/pyaserver.sh start' 180)
-          }
-        } elseif (-not $bothKits) {
-          Pkg (T 'core.kit.start' $name)
-          [void](AdbSu 'sh /data/adb/baseos/bin/pyaserver.sh start' 180)
+          # KEIN Auto-Start (Kevin)
         }
+        # KEIN Auto-Start (Kevin): Start manuell via pyaserver.sh start
+        Ok (T 'core.kit.ok' $name)
+      }
+      elseif ($k -eq 'tts') {
+        # TTS (Container-seitig, wie pya): Kit -> /opt/barra-tts, Container-systemd-Dienst barra-tts
+        # (NICHT enabled -> kein Boot-Autostart) + ttsserver.sh Steuerung. Manueller Start wie llm/stt/pya.
+        $name = T 'core.kit.tts_name'
+        Pkg (T 'core.kit.push' $name)
+        KitPush (Join-Path $script:Kit 'tts-kit\tts-kit.tar.gz') '/data/local/tmp/tts-kit.tar.gz' $name
+        KitPush (Join-Path $script:Kit 'tts-kit\barra-tts.service') '/data/local/tmp/barra-tts.service' $name
+        KitPush (Join-Path $script:Kit 'tts-kit\ttsserver.sh') '/data/local/tmp/ttsserver.sh' $name
+        Pkg (T 'core.kit.extract' $name)
+        $r = AdbSuBg ($KitDiag + 'D=/data/local/ubuntu/opt; i=0; while [ $i -lt 60 ]; do touch $D/.wt && rm -f $D/.wt && break; [ $i = 0 ] && kdiag erst; [ $((i%12)) = 11 ] && kdiag lauf; sleep 5; i=$((i+1)); done; touch $D/.wt && rm -f $D/.wt || kdiag final; U=/data/local/ubuntu; cd $U/opt && rm -rf barra-tts && tar -xzf /data/local/tmp/tts-kit.tar.gz && chown -R 1001:1001 barra-tts && cp /data/local/tmp/barra-tts.service $U/etc/systemd/system/barra-tts.service && cp /data/local/tmp/ttsserver.sh /data/adb/baseos/bin/ttsserver.sh && chmod 755 /data/adb/baseos/bin/ttsserver.sh && rm -f /data/local/tmp/tts-kit.tar.gz /data/local/tmp/barra-tts.service /data/local/tmp/ttsserver.sh') 900 (T 'core.kit.extract' $name)
+        if (-not $r.ok) { throw (T 'core.kit.fail' "$name (tar rc=$($r.rc)): $($r.log)") }
+        # KEIN Auto-Start (Kevin): Start manuell via 'ttsserver.sh start' (su -M, enter-systemd)
+        Ok (T 'core.kit.ok' $name)
+      }
+      elseif ($k -eq 'wake') {
+        # Weckwort (Container-Erkennung + Android-Mic-Bridge): kit -> /opt/barra-wake, base -> hwbridge/
+        # baseos; Dienst barra-wake NICHT enabled, Steuerung wakeserver.sh. Manueller Start.
+        $name = T 'core.kit.wake_name'
+        Pkg (T 'core.kit.push' $name)
+        KitPush (Join-Path $script:Kit 'wake-kit\wake-kit.tar.gz') '/data/local/tmp/wake-kit.tar.gz' $name
+        Pkg (T 'core.kit.extract' $name)
+        $r = AdbSuBg ($KitDiag + 'D=/data/local/ubuntu/opt; i=0; while [ $i -lt 60 ]; do touch $D/.wt && rm -f $D/.wt && break; [ $i = 0 ] && kdiag erst; [ $((i%12)) = 11 ] && kdiag lauf; sleep 5; i=$((i+1)); done; touch $D/.wt && rm -f $D/.wt || kdiag final; cd /data/local/tmp && rm -rf wake-kit && mkdir wake-kit && cd wake-kit && tar -xzf ../wake-kit.tar.gz && U=/data/local/ubuntu && mkdir -p $U/opt/barra-wake && cp -a kit/. $U/opt/barra-wake/ && chown -R 1001:1001 $U/opt/barra-wake && cp base/audiod-record /data/adb/hwbridge/audiod-record && chmod 755 /data/adb/hwbridge/audiod-record && cp base/wakeserver.sh /data/adb/baseos/bin/wakeserver.sh && chmod 755 /data/adb/baseos/bin/wakeserver.sh && cp base/barra-wake.service $U/etc/systemd/system/barra-wake.service && cd /data/local/tmp && rm -rf wake-kit wake-kit.tar.gz') 900 (T 'core.kit.extract' $name)
+        if (-not $r.ok) { throw (T 'core.kit.fail' "$name (tar rc=$($r.rc)): $($r.log)") }
+        # KEIN Auto-Start (Kevin): Start manuell via 'wakeserver.sh start' (su -M, enter-systemd)
         Ok (T 'core.kit.ok' $name)
       }
     }
