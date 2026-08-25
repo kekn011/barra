@@ -117,7 +117,9 @@ static void serve(int c){
   if(recvmsg(c,&msg,MSG_WAITALL)!=(ssize_t)sizeof hdr){ return; }
   if(hdr[0]!=MAGIC){ return; }
   struct cmsghdr* cm=CMSG_FIRSTHDR(&msg);
-  if(cm && cm->cmsg_type==SCM_RIGHTS){ nfd=(int)((cm->cmsg_len-CMSG_LEN(0))/sizeof(int)); memcpy(fds,CMSG_DATA(cm),nfd*sizeof(int)); }
+  if(cm && cm->cmsg_type==SCM_RIGHTS){ nfd=(int)((cm->cmsg_len-CMSG_LEN(0))/sizeof(int));
+    if(nfd>MAXBUF){ for(int i=0;i<nfd;i++) close(((int*)CMSG_DATA(cm))[i]); return; }   /* sonst Stack-Overflow von fds[MAXBUF] */
+    memcpy(fds,CMSG_DATA(cm),nfd*sizeof(int)); }
   uint32_t spirv_len=hdr[1],gx=hdr[2],gy=hdr[3],gz=hdr[4],nbuf=hdr[5];
   if(nbuf==0||nbuf>MAXBUF||(int)nbuf!=nfd||spirv_len==0||spirv_len>MAXSPIRV||(spirv_len&3)){ write(c,&status,4); goto done_close; }
   uint32_t bsize[MAXBUF];

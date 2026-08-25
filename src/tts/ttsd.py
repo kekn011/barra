@@ -112,7 +112,9 @@ class H(BaseHTTPRequestHandler):
             try:
                 with _lock:
                     t0 = time.time(); wav, sr = VOICES[voice].synth(text); t_s = time.time() - t0
-                    dur = len(wav) / sr
+                    dur = len(wav) / sr if sr else 0
+                    if dur <= 0:
+                        return self._send(500, {"error": "Synthese ergab kein Audio (leere Ausgabe?)"})
                     if play: play_audiod(wav, sr)
                 return self._send(200, {"ok": True, "voice": voice, "audio_s": round(dur, 2),
                                         "synth_s": round(t_s, 2), "rtf": round(t_s / dur, 3)})

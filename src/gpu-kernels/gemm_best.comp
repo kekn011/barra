@@ -47,7 +47,11 @@ void main(){
     uint row=brow+ty*MM+i;
     [[unroll]] for(int v=0;v<MNV;v++){
       uint col=bcol+ (tx*MNV+v)*4u;
-      if(row<p.M){ c[row*p.N+col]=acc[i][v].x; c[row*p.N+col+1u]=acc[i][v].y; c[row*p.N+col+2u]=acc[i][v].z; c[row*p.N+col+3u]=acc[i][v].w; }
+      if(row<p.M){   // 4-breiten Store an der N-Kante klemmen (kein OOB bei N nicht-Vielfachem von 4)
+        if(col   <p.N) c[row*p.N+col   ]=acc[i][v].x;
+        if(col+1u<p.N) c[row*p.N+col+1u]=acc[i][v].y;
+        if(col+2u<p.N) c[row*p.N+col+2u]=acc[i][v].z;
+        if(col+3u<p.N) c[row*p.N+col+3u]=acc[i][v].w; }
     }
   }
 }

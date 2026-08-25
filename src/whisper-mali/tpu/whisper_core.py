@@ -129,15 +129,16 @@ def core2(x):
 
 rng = np.random.default_rng(5)
 def repdata():
+    nbq = S // BQ   # Anzahl BQ-grosser Query-Bloecke (nb = S//BLK zaehlt BLK-Bloecke)
     if QBLOCK >= 0:
         yield [X]
-        for i in range(nb):
+        for i in range(nbq):
             yield [np.concatenate([qh[:, :, i*BQ:(i+1)*BQ, :], kh, vh], axis=2)]
         for sf in (0.9, 1.1):
             yield [X*sf]
     else:
         yield [qb0, kh, vh]
-        for i in range(1, nb):
+        for i in range(1, nbq):
             yield [qh[:, :, i*BQ:(i+1)*BQ, :], kh, vh]
         for sf in (0.9, 1.1):
             yield [qb0*sf, kh*sf, vh*sf]

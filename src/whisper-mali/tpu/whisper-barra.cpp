@@ -269,7 +269,7 @@ static int wsp_init(void){
   g.PROJW=(int)wsp_gp(par,"projw",0,0);
   if(g.HTOT%g.HG){ fprintf(stderr,"[wsp-barra] HTOT%%HG\n"); return -1; }
   g.NG=g.HTOT/g.HG;
-  if((long)n!=(long)g.NL*4*g.D*4) fprintf(stderr,"[wsp-barra] WARN enc_ln.f32 %ld B (erwartet %ld)\n",n,(long)g.NL*4*g.D*4);
+  if((long)n!=(long)g.NL*4*g.D*4){ fprintf(stderr,"[wsp-barra] enc_ln.f32 %ld B (erwartet %ld) - Abbruch (sonst OOB-Lesen)\n",n,(long)g.NL*4*g.D*4); return -1; }
   for(int L=0;L<g.NL;L++){
     g.pin[L]=wsp_gpl(par,L,"pin"); g.pout[L]=wsp_gpl(par,L,"pout");
     g.wisc[L]=wsp_gpl(par,L,"wisc"); g.wizp[L]=(int)wsp_gpl(par,L,"wizp");

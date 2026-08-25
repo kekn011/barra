@@ -83,11 +83,15 @@ chmod 770 "$VDIR/sockets" 2>/dev/null
   echo "mac_addr=0"
   echo "preassoc_mac_addr=0"
   echo ""
+  # Backslash und Anfuehrungszeichen escapen, sonst kann ein Wert die quoted-string-Syntax
+  # von wpa_supplicant.conf verlassen (Config-Injection ueber SSID/PSK).
+  SSID_E=$(printf '%s' "$SSID" | sed 's/[\\"]/\\&/g')
+  PSK_E=$(printf '%s' "$PSK" | sed 's/[\\"]/\\&/g')
   echo "network={"
-  echo "    ssid=\"$SSID\""
+  echo "    ssid=\"$SSID_E\""
   echo "    mac_addr=0"
   if [ -n "$PSK" ]; then
-    echo "    psk=\"$PSK\""
+    echo "    psk=\"$PSK_E\""
     echo "    key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE"
     echo "    ieee80211w=1"
   else

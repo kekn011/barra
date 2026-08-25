@@ -32,7 +32,9 @@ static double gpl(const char* txt, int L, const char* suf){
 static void* rdfile(const char* fn, long* n){
   FILE* f=fopen(fn,"rb"); if(!f){ perror(fn); exit(1); }
   fseek(f,0,SEEK_END); *n=ftell(f); fseek(f,0,SEEK_SET);
-  void* b=malloc(*n+1); fread(b,1,*n,f); fclose(f); ((char*)b)[*n]=0; return b;
+  void* b=malloc(*n+1); if(!b){ fprintf(stderr,"malloc %ld fehlgeschlagen\n",*n+1); exit(1); }
+  if(fread(b,1,*n,f)!=(size_t)*n){ fprintf(stderr,"%s: Lesen unvollstaendig\n",fn); exit(1); }
+  fclose(f); ((char*)b)[*n]=0; return b;
 }
 
 static void ln_row(const float* x, const float* g, const float* b, float* o){
@@ -45,12 +47,13 @@ static void ln_row(const float* x, const float* g, const float* b, float* o){
 int main(int argc,char**argv){
   if(argc<5){ fprintf(stderr,"usage: wsp_enc <x0.f32> <out_ref.f32> <enc_params.txt> <enc_ln.f32> [iters]\n"); return 1; }
   int iters=argc>5?atoi(argv[5]):1;
-  long n; float* x0f=rdfile(argv[1],&n);  if(n!=S*D*4){ fprintf(stderr,"x0 size %ld\n",n); return 1; }
+  long n, nln; float* x0f=rdfile(argv[1],&n);  if(n!=S*D*4){ fprintf(stderr,"x0 size %ld\n",n); return 1; }
   float* oref=rdfile(argv[2],&n);         if(n!=S*D*4){ fprintf(stderr,"ref size %ld\n",n); return 1; }
   char* par=rdfile(argv[3],&n);
-  float* LNW=rdfile(argv[4],&n);         /* [NL][4][D]: g1 b1 g2 b2 */
+  float* LNW=rdfile(argv[4],&nln);       /* [NL][4][D]: g1 b1 g2 b2 */
   double cin=gp(par,"core_in"), cout=gp(par,"core_out");
   int NL=(int)gp(par,"nlayers"); if(NL<1||NL>MAXL) return 1;
+  if(nln!=(long)NL*4*D*4){ fprintf(stderr,"enc_ln.f32 %ld B (erwartet %ld) - Abbruch\n",nln,(long)NL*4*D*4); return 1; }
   double pin[MAXL],pout[MAXL],wisc[MAXL],wosc[MAXL],fisc[MAXL],fosc[MAXL];
   int wizp[MAXL],wozp[MAXL],fizp[MAXL],fozp[MAXL];
   for(int L=0;L<NL;L++){

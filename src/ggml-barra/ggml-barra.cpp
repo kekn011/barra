@@ -88,6 +88,9 @@ static void barra_load_outliers(ggml_backend_barra_context * ctx) {
         if (kd > fkd) kd = fkd; if (kf > fkf) kf = fkf; if (kd < 0) kd = 0; if (kf < 0) kf = 0;
     }
     if (kd <= 0 && kf <= 0) { fclose(f); GGML_LOG_WARN("barra: Ausreisser-Praefix leer - Auslagerung aus\n"); return; }
+    // F59: der Compute-Pfad gated die Auslagerung an kd>0. kd==0 mit kf>0 wuerde geladen, aber
+    // still ignoriert -> klar melden und deaktivieren statt Daten wirkungslos zu laden.
+    if (kd <= 0 && kf > 0)  { fclose(f); GGML_LOG_WARN("barra: kd=0 aber kf=%d - Down-Ausreisser werden nicht ausgelagert (Gate benoetigt kd>0); Auslagerung aus\n", kf); return; }
     const long hdr_bytes = 4 + 6 * (long) sizeof(int32_t);
     const long per_layer = (long) (fkd + fkf) * (long) sizeof(int32_t)      // od + of
                          + (2 * (long) fkd * fFF + (long) fkf * fD) * (long) sizeof(uint16_t);   // wg + wu + wd
@@ -167,14 +170,17 @@ static bool barra_load_meta(ggml_backend_barra_context * ctx) {
     if (getenv("BARRA_FFN_LOG")) ctx->log = 1;
     if (barra_tpu_open(&ctx->tpu)) { GGML_LOG_WARN("barra: tpud nicht erreichbar (BARRA_SOCK_DIR?)\n"); return false; }
     uint32_t nm = 0, isz = 0, osz = 0;
-    if (barra_tpu_info(&ctx->tpu, 0, &isz, &osz, &nm) == 0 && (int) nm < ctx->NL) { GGML_LOG_WARN("barra: tpud hat %u Modelle, meta erwartet %d\n", nm, ctx->NL); return false; }
+    // barra_tpu_info-Fehler ist fatal (frueher via '== 0 &&' stillschweigend ignoriert -> Init
+    // lief mit nm=0 weiter); alle Post-Open-Fehlerpfade schliessen den tpud-Socket.
+    if (barra_tpu_info(&ctx->tpu, 0, &isz, &osz, &nm) != 0) { GGML_LOG_WARN("barra: tpud info fehlgeschlagen\n"); barra_tpu_close(&ctx->tpu); return false; }
+    if ((int) nm < ctx->NL) { GGML_LOG_WARN("barra: tpud hat %u Modelle, meta erwartet %d\n", nm, ctx->NL); barra_tpu_close(&ctx->tpu); return false; }
     size_t bpe = ctx->bits == 16 ? 2 : 1;
     if (ctx->split == 1) {
-        if (barra_zc_alloc(&ctx->zi, (uint32_t) (ctx->B * ctx->D * bpe)) || barra_zc_alloc(&ctx->zo, (uint32_t) (ctx->B * ctx->D * bpe))) { GGML_LOG_WARN("barra: dmabuf alloc fehlgeschlagen\n"); return false; }
+        if (barra_zc_alloc(&ctx->zi, (uint32_t) (ctx->B * ctx->D * bpe)) || barra_zc_alloc(&ctx->zo, (uint32_t) (ctx->B * ctx->D * bpe))) { GGML_LOG_WARN("barra: dmabuf alloc fehlgeschlagen\n"); barra_tpu_close(&ctx->tpu); return false; }
     } else {
-        if (ctx->bits != 8) { GGML_LOG_WARN("barra: split-Modus erwartet int8\n"); return false; }
+        if (ctx->bits != 8) { GGML_LOG_WARN("barra: split-Modus erwartet int8\n"); barra_tpu_close(&ctx->tpu); return false; }
         if (barra_zc_alloc(&ctx->zi_d, (uint32_t) (ctx->B * ctx->D)) || barra_zc_alloc(&ctx->zo_g, (uint32_t) (ctx->B * ctx->FF)) || barra_zc_alloc(&ctx->zo_u, (uint32_t) (ctx->B * ctx->FF))
-            || barra_zc_alloc(&ctx->zi_ff, (uint32_t) (ctx->Bd * ctx->FF)) || barra_zc_alloc(&ctx->zo_d, (uint32_t) (ctx->Bd * ctx->D))) { GGML_LOG_WARN("barra: dmabuf alloc (split) fehlgeschlagen\n"); return false; }
+            || barra_zc_alloc(&ctx->zi_ff, (uint32_t) (ctx->Bd * ctx->FF)) || barra_zc_alloc(&ctx->zo_d, (uint32_t) (ctx->Bd * ctx->D))) { GGML_LOG_WARN("barra: dmabuf alloc (split) fehlgeschlagen\n"); barra_tpu_close(&ctx->tpu); return false; }
     }
     // CPU-Fallback direkt aus ggml-cpu (kein Umweg ueber die Registry in libggml -> keine Link-Zyklen im Shared-Build)
     ctx->cpu = ggml_backend_cpu_init();

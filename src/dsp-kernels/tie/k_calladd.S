@@ -4,6 +4,11 @@
 # (full of xt-clang FLIX/TIE bundles) in the same loaded image. Load-base
 # independent: read runtime PC via call0, add compile-time delta.
 # Fixed 3-byte encodings => obj_off(label 1)=0x0f; delta=0x228-0x14c-0x0f=0xcd.
+# ACHTUNG: der Code unten nutzt 0xd0 (=> obj_off(label 1)=0x0c), NICHT das oben
+# hergeleitete 0xcd. Diskrepanz von 3 Byte. Bei Verdacht auf Fehlsprung (callx8
+# landet mitten in einer Instruktion) obj_off(label 1) aus ker_calladd.elf neu
+# disassemblieren und beide Seiten (Kommentar + movi) angleichen bzw. das Delta
+# aus dem Build-Tooling emittieren, damit es nicht driften kann.
 kfn:
 	entry	a1, 48
 	or	a6, a0, a0	# save return PC

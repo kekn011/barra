@@ -7,22 +7,25 @@ $ErrorActionPreference = "Stop"
 $kit = Split-Path -Parent $MyInvocation.MyCommand.Path
 $adb = Join-Path (Split-Path -Parent $kit) "tools\adb.exe"
 if (-not (Test-Path $adb)) { $adb = "adb" }
+# Native adb-Exit-Codes werfen unter -ErrorAction Stop NICHT -> explizit pruefen, sonst
+# endet ein fehlgeschlagener Push/Install trotzdem mit "Fertig".
+function Adb { & $adb @args; if ($LASTEXITCODE -ne 0) { Write-Error "adb $($args -join ' ') fehlgeschlagen (exit $LASTEXITCODE)"; exit 1 } }
 
 Write-Host "== barra LLM-Kit: qwen3-4b =="
-& $adb wait-for-device | Out-Null
+Adb wait-for-device | Out-Null
 
 Write-Host "1/4 Attention-Packages pushen (911 MB) ..."
-& $adb push (Join-Path $kit "llm-attn-qwen3-4b.tar") /data/local/tmp/llm-kit.tar
-& $adb shell "su -c 'mkdir -p /data/local/barra-attn && cd /data/local/barra-attn && tar -xf /data/local/tmp/llm-kit.tar && chmod -R 755 /data/local/barra-attn && rm /data/local/tmp/llm-kit.tar'"
+Adb push (Join-Path $kit "llm-attn-qwen3-4b.tar") /data/local/tmp/llm-kit.tar
+Adb shell "su -c 'mkdir -p /data/local/barra-attn && cd /data/local/barra-attn && tar -xf /data/local/tmp/llm-kit.tar && chmod -R 755 /data/local/barra-attn && rm /data/local/tmp/llm-kit.tar'"
 
 Write-Host "2/4 Modell pushen (2,4 GB) ..."
-& $adb push (Join-Path $kit "qwen3-4b.gguf") /data/local/tmp/qwen3-4b.gguf
+Adb push (Join-Path $kit "qwen3-4b.gguf") /data/local/tmp/qwen3-4b.gguf
 
 Write-Host "3/4 Modell ins Container-Home legen ..."
-& $adb shell "su -c 'H=`$(ls -d /data/local/ubuntu/home/* | head -1); mkdir -p `$H/models; mv /data/local/tmp/qwen3-4b.gguf `$H/models/qwen3-4b.gguf; chown -R 1001:1001 `$H/models; ls -la `$H/models'"
+Adb shell "su -c 'H=`$(ls -d /data/local/ubuntu/home/* | head -1); mkdir -p `$H/models; mv /data/local/tmp/qwen3-4b.gguf `$H/models/qwen3-4b.gguf; chown -R 1001:1001 `$H/models; ls -la `$H/models'"
 
 Write-Host "4/4 LLM-Server starten ..."
-& $adb shell "su -c 'sh /data/adb/baseos/bin/llmserver.sh start'"
+Adb shell "su -c 'sh /data/adb/baseos/bin/llmserver.sh start'"
 
 Write-Host ""
 Write-Host "Fertig. Chat: http://<node-ip>:8080  (oder im Container: chat)"

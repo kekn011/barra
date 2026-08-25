@@ -169,7 +169,7 @@ while :; do
     LINE=$(head -1 "$REQ" 2>/dev/null); rm -f "$REQ"
     case "$LINE" in "wlan setup"*) log "req: wlan setup <ssid> ****";; *) log "req: $LINE";; esac
     # shellcheck disable=SC2086
-    set -- $LINE; CMD=$1
+    set -f; set -- $LINE; set +f; CMD=$1   # set -f: kein Datei-Globbing beim Wort-Splitting (deterministisch)
     case "$CMD" in
       charge) R=$(apply_charge "$2" "$3");;
       button) R=$(apply_button "$2" "$3");;
