@@ -33,7 +33,19 @@
 static int DFD; static uint8_t* FB; static uint32_t W,H,PITCH; static struct drm_mode_crtc CRT; static uint32_t CONN;
 static const char* BLP="/sys/class/backlight/panel0-backlight";
 static void blw(const char* f,const char* v){ char p[256]; FILE* h; snprintf(p,sizeof p,"%s/%s",BLP,f); if((h=fopen(p,"w"))){fputs(v,h);fclose(h);} }
-static void die_blank(int s){ (void)s; blw("brightness","0"); blw("bl_power","4"); _exit(0); }
+/* async-signal-safe: nur open/write/close, kein snprintf/stdio (Signal kann mitten in
+ * einem fopen/fscanf des Main-Loops einschlagen und dessen stdio-Locks halten). */
+static void blw_raw(const char* f,const char* v){
+  char p[256]; size_t pl=0; const char* bp=BLP;
+  while(*bp&&pl<sizeof p-1) p[pl++]=*bp++;
+  if(pl<sizeof p-1) p[pl++]='/';
+  while(*f&&pl<sizeof p-1) p[pl++]=*f++;
+  p[pl]=0;
+  int fd=open(p,O_WRONLY|O_CLOEXEC); if(fd<0) return;
+  size_t vl=0; while(v[vl]) vl++;
+  ssize_t _u=write(fd,v,vl); (void)_u; close(fd);
+}
+static void die_blank(int s){ (void)s; blw_raw("brightness","0"); blw_raw("bl_power","4"); _exit(0); }
 static void relatch(void){ ioctl(DFD,DRM_IOCTL_MODE_SETCRTC,&CRT); }
 
 /* Panel-Pixelformat (empirisch per Balkentest): Speicher [X,R,G,B] low->high, LE=(B<<24)|(G<<16)|(R<<8) */

@@ -21,7 +21,10 @@ int main(int argc,char**argv){
   if(argc<3){ fprintf(stderr,"usage: tpucli <sock> <in_size> [N=1] [model_id=0]\n"); return 2; }
   const char* sock=argv[1]; long isz=atol(argv[2]);
   int N=argc>3?atoi(argv[3]):1; uint32_t mid=argc>4?(uint32_t)atoi(argv[4]):0;
-  unsigned char* in=malloc(isz); unsigned char* out=malloc(16*1024*1024);
+  if(isz<=0){ fprintf(stderr,"in_size ungueltig\n"); return 2; }
+  #define OUTCAP (16*1024*1024)
+  unsigned char* in=malloc(isz); unsigned char* out=malloc(OUTCAP);
+  if(!in||!out){ fprintf(stderr,"malloc fehlgeschlagen\n"); return 1; }
   for(long i=0;i<isz;i++) in[i]=(i+1)&0xff;
 
   int c=socket(AF_UNIX,SOCK_STREAM,0);
@@ -33,6 +36,7 @@ int main(int argc,char**argv){
     if(wf(c,hdr,sizeof hdr)||wf(c,in,isz)){printf("send fail\n");return 1;}
     uint32_t st=999; if(rf(c,&st,4)||rf(c,&out_size,4)){printf("recv hdr fail\n");return 1;}
     if(st!=0){ printf("status=%u (Modell %u, in_size %ld abgelehnt?)\n",st,mid,isz); return 1; }
+    if(out_size>OUTCAP){ printf("out_size=%u > Puffer %d — abgebrochen\n",out_size,OUTCAP); return 1; }
     if(rf(c,out,out_size)){printf("recv out fail\n");return 1;}
     if((long)out_size==isz){ long d=0; for(long i=0;i<isz;i++) if(out[i]!=in[i]) d++; if(d) badreq++; }
   }
