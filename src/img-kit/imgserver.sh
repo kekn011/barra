@@ -42,6 +42,12 @@ case "${1:-status}" in
     i=0; while [ $i -lt 90 ]; do grep -aq "listening on" $R/imgserver.log 2>/dev/null && break; kill -0 $P 2>/dev/null || break; sleep 1; i=$((i+1)); done
     if grep -aq "listening on" $R/imgserver.log 2>/dev/null; then
       echo "img: started (PID $P): $(basename "$M") -> http://<node>:$PORT/sdapi/v1/txt2img"
+      # Hebel 5 (Lazy-Compile-Warmup): der erste txt2img zahlt ~5s Mali-Shader-Compile. Jetzt beim
+      # Start abfangen statt beim Nutzer. Minimaler 1-Step-Gen (kompiliert dieselben Shader), via
+      # toybox nc (Android-seitig kein curl), best-effort mit Timeout.
+      WB='{"prompt":"warmup","seed":1,"width":512,"height":512,"steps":1}'
+      printf 'POST /sdapi/v1/txt2img HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "${#WB}" "$WB" | timeout 60 toybox nc localhost $PORT >/dev/null 2>&1
+      echo "img: vorgewaermt"
     else
       echo "img: start failed, see imgserver.sh log"; tail -5 $R/imgserver.log; pins_off; exit 1
     fi;;
