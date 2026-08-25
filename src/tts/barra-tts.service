@@ -1,0 +1,14 @@
+[Unit]
+Description=barra TTS-Server (Piper de/en + David GPU-Vokoder) - Text-to-Speech ueber audiod
+After=network.target
+ConditionPathExists=/opt/barra-tts/bin/launch.sh
+
+[Service]
+Type=simple
+ExecStart=/opt/barra-tts/bin/launch.sh
+Restart=always
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

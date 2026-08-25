@@ -1,0 +1,156 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index c662366..ce242c8 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -107,6 +107,8 @@ add_library(whisper
+             ../include/whisper.h
+             whisper-arch.h
+             whisper.cpp
++            barra.c
++            whisper-barra.cpp
+             )
+ 
+ add_library(parakeet
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index 89146e2..2156ab2 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -1961,6 +1961,14 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
+     return true;
+ }
+ 
++extern "C" int wsp_barra_encode(const float*, float*, int, int);
++extern "C" void wsp_barra_addpe(const float*, const float*, float*, int, int);
++extern "C" void wsp_barra_lnpost(float*, const float*, const float*, int, int);
++extern "C" int wsp_barra_cross_layers(void);
++extern "C" int wsp_barra_cross(int, const float*, void*, void*);
++extern "C" int wsp_barra_conv_ready(void);
++extern "C" int wsp_barra_conv(const float*, const float*, float*);
++
+ static bool whisper_encode_external(const whisper_state & wstate) {
+     GGML_UNUSED(wstate);
+ 
+@@ -2070,6 +2078,18 @@ static struct ggml_cgraph * whisper_build_graph_encoder(
+ 
+     ggml_cgraph * gf = ggml_new_graph_custom(ctx0, WHISPER_MAX_NODES, false);
+ 
++    if (getenv("WHISPER_BARRA")) {
++        // barra-TPU-Encoder: embd_enc als Input-Tensor, Inhalt kommt aus wsp_barra_encode()
++        struct ggml_tensor * cur_b = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_state, n_ctx);
++        ggml_set_input(cur_b);
++        ggml_set_name(cur_b, "embd_enc");
++        wstate.embd_enc = cur_b;
++        ggml_set_output(cur_b);
++        ggml_build_forward_expand(gf, cur_b);
++        ggml_free(ctx0);
++        return gf;
++    }
++
+     struct ggml_tensor * cur = ggml_view_tensor(ctx0, wstate.embd_conv);
+ 
+     const float KQscale = 1.0f/sqrtf(float(n_state_head));
+@@ -2370,6 +2390,9 @@ static bool whisper_encode_internal(
+                    void * abort_callback_data) {
+     const int64_t t_start_us = ggml_time_us();
+ 
++    bool barra_cross = false;   // Cross-K/V kam von der TPU -> cross-Graph ueberspringen
++    bool barra_conv  = false;   // Conv-Frontend auf der TPU -> conv-Graph ueberspringen
++
+     // conv
+     {
+         auto & sched = wstate.sched_conv.sched;
+@@ -2408,9 +2431,20 @@ static bool whisper_encode_internal(
+             ggml_backend_tensor_set(mel, wstate.inp_mel.data(), 0, ggml_nelements(mel)*sizeof(float));
+         }
+ 
++        barra_conv = getenv("WHISPER_BARRA") && wsp_barra_conv_ready();
+         if (!whisper_encode_external(wstate)) {
+-            if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+-                return false;
++            if (!barra_conv) {
++                int64_t tcv0 = ggml_time_us();
++                if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
++                    return false;
++                }
++                if (getenv("WHISPER_BARRA")) {
++                    fprintf(stderr, "[wsp-barra] conv-graph: %.0f ms\n", (ggml_time_us()-tcv0)/1e3);
++                }
++            } else {
++                // alloc oben ist bereits passiert; ohne Compute muss der Sched selbst
++                // zurueckgesetzt werden, sonst assert !is_alloc beim naechsten Request (Server!)
++                ggml_backend_sched_reset(sched);
+             }
+         } else {
+             ggml_backend_sched_reset(sched);
+@@ -2434,13 +2468,56 @@ static bool whisper_encode_internal(
+             return false;
+         }
+ 
++        if (getenv("WHISPER_BARRA")) {
++            const auto & model_b = wctx.model;
++            const int T  = (int) wstate.embd_conv->ne[0];
++            const int NS = (int) wstate.embd_conv->ne[1];
++            int64_t tb0 = ggml_time_us();
++            std::vector<float> conv_b((size_t)T*NS), x0_b((size_t)T*NS), enc_b((size_t)T*NS), pe_b((size_t)T*NS), lw_b(NS), lb_b(NS);
++            ggml_backend_tensor_get(model_b.e_pe, pe_b.data(), 0, (size_t)T*NS*sizeof(float));
++            int64_t tb1 = ggml_time_us();
++            if (barra_conv) {
++                if (wsp_barra_conv(wstate.inp_mel.data(), pe_b.data(), x0_b.data()) != 0) return false;
++                fprintf(stderr, "[wsp-barra] conv-tpu: %.0f ms\n", (ggml_time_us()-tb1)/1e3);
++            } else {
++                ggml_backend_tensor_get(wstate.embd_conv, conv_b.data(), 0, (size_t)T*NS*sizeof(float));
++                wsp_barra_addpe(conv_b.data(), pe_b.data(), x0_b.data(), T, NS);
++            }
++            int64_t tb2 = ggml_time_us();
++            if (wsp_barra_encode(x0_b.data(), enc_b.data(), T, NS) != 0) return false;
++            int64_t tb3 = ggml_time_us();
++            ggml_backend_tensor_get(model_b.e_ln_w, lw_b.data(), 0, NS*sizeof(float));
++            ggml_backend_tensor_get(model_b.e_ln_b, lb_b.data(), 0, NS*sizeof(float));
++            wsp_barra_lnpost(enc_b.data(), lw_b.data(), lb_b.data(), T, NS);
++            int64_t tb4 = ggml_time_us();
++            ggml_backend_tensor_set(wstate.embd_enc, enc_b.data(), 0, (size_t)T*NS*sizeof(float));
++            ggml_backend_sched_reset(sched);   // wie ggml_graph_compute_helper: sonst assert !is_alloc beim 2. Fenster
++            int64_t tb5 = ggml_time_us();
++            fprintf(stderr, "[wsp-barra] rest: get %.0f addpe %.0f lnpost %.0f set %.0f ms\n",
++                    (tb1-tb0)/1e3, (tb2-tb1)/1e3, (tb4-tb3)/1e3, (tb5-tb4)/1e3);
++            if (wctx.params.flash_attn && wsp_barra_cross_layers() == model_b.hparams.n_text_layer) {
++                int64_t tx0 = ggml_time_us();
++                const int n_ctx_pad = GGML_PAD(T, 256);
++                std::vector<uint16_t> kh((size_t)T*NS), vh((size_t)T*NS);
++                bool okx = true;
++                for (int il = 0; il < model_b.hparams.n_text_layer && okx; ++il) {
++                    okx = wsp_barra_cross(il, enc_b.data(), kh.data(), vh.data()) == 0;
++                    if (okx) {
++                        ggml_backend_tensor_set(wstate.kv_cross.k, kh.data(), (size_t)2*NS*il*n_ctx_pad, (size_t)T*NS*2);
++                        ggml_backend_tensor_set(wstate.kv_cross.v, vh.data(), (size_t)2*NS*il*n_ctx_pad, (size_t)T*NS*2);
++                    }
++                }
++                barra_cross = okx;
++                fprintf(stderr, "[wsp-barra] cross-tpu: %.0f ms (%s)\n", (ggml_time_us()-tx0)/1e3, okx ? "ok" : "FALLBACK auf GPU");
++            }
++        } else
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+             return false;
+         }
+     }
+ 
+     // cross
+-    {
++    if (!barra_cross) {
+         auto & sched = wstate.sched_cross.sched;
+ 
+         ggml_cgraph * gf = whisper_build_graph_cross(wctx, wstate);
+@@ -2450,9 +2527,13 @@ static bool whisper_encode_internal(
+             return false;
+         }
+ 
++        int64_t tcr0 = ggml_time_us();
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+             return false;
+         }
++        if (getenv("WHISPER_BARRA")) {
++            fprintf(stderr, "[wsp-barra] cross-graph: %.0f ms\n", (ggml_time_us()-tcr0)/1e3);
++        }
+     }
+ 
+     wstate.t_encode_us += ggml_time_us() - t_start_us;

@@ -7,12 +7,18 @@ U=/data/local/ubuntu; B=/data/local/bake; OUT=/data/local/tmp/barra-base.tar.gz
 UBUNTU_HASH='$6$barrabase$z78uePiq/N.XjnuCPe9/bkY0.00Ov6X9lS0wj4nOyCG/ERJm.3gXY8OcM0/osZ1D94s4X1BzHjartIfrN4uQP0'   # Passwort "ubuntu" (firstboot erzwingt Wechsel; Setup setzt eigenes)
 echo "== barra-bake: Staging-Kopie =="
 rm -rf $B; mkdir -p $B/ubuntu $B/adb
-# 1) Rootfs kopieren — ohne Mountpoints/Laufzeit, Logs, Modelle, apt-Cache, Sockets
-cd $U && tar -cf -   --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run --exclude=./tmp --exclude=./oldroot --exclude=./core   --exclude=./var/log --exclude=./var/cache/apt --exclude=./var/lib/apt/lists --exclude=./var/lib/snapd   --exclude='./home/*/*.gguf' --exclude='./home/*/models' --exclude='./opt/hwbridge/*.sock' --exclude='./opt/hwbridge/*.log'   . | (cd $B/ubuntu && tar -xpf -)
+# 1) Rootfs kopieren — ohne Mountpoints/Laufzeit, Logs, Modelle, apt-Cache, Sockets.
+# KIT-Artefakte (pya/tts/wake) IMMER auslassen: ALLE 5 Pakete sind SDK-Kits (24.8., v13) —
+# der Bake darf sie nie einbacken, auch wenn sie auf dem Quell-Node installiert sind
+# (llm/stt-Kits liegen unter /data/local/barra-* und damit eh ausserhalb von $U/$A).
+cd $U && tar -cf -   --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./run --exclude=./tmp --exclude=./oldroot --exclude=./core   --exclude=./var/log --exclude=./var/cache/apt --exclude=./var/lib/apt/lists --exclude=./var/lib/snapd   --exclude='./home/*/*.gguf' --exclude='./home/*/models' --exclude='./opt/hwbridge/*.sock' --exclude='./opt/hwbridge/*.log'   --exclude=./opt/barra-pya --exclude=./opt/barra/pya --exclude=./opt/barra-tts --exclude=./opt/barra-wake   . | (cd $B/ubuntu && tar -xpf -)
 R=$B/ubuntu
 # Nachputzen, falls ein Exclude nicht griff
 rm -rf $R/proc/* $R/sys/* $R/dev/* $R/run/* $R/tmp/* $R/oldroot/* $R/core $R/var/log $R/var/cache/apt $R/var/lib/apt/lists $R/var/lib/snapd 2>/dev/null || true
 find $R/home -name '*.gguf' -delete 2>/dev/null || true; rm -rf $R/home/*/models $R/opt/hwbridge/*.sock $R/opt/hwbridge/*.log 2>/dev/null || true
+# Kit-Reste sicher entfernen (Container-Seite): Verzeichnisse, Werkzeuge, systemd-Units
+rm -rf $R/opt/barra-pya $R/opt/barra/pya $R/opt/barra-tts $R/opt/barra-wake 2>/dev/null || true
+rm -f $R/usr/local/bin/barra-diarize $R/etc/systemd/system/barra-tts.service $R/etc/systemd/system/barra-wake.service 2>/dev/null || true
 mkdir -p $R/proc $R/sys $R/dev $R/run $R/tmp $R/oldroot $R/var/log/journal $R/var/cache/apt $R/var/lib/apt/lists; chmod 1777 $R/tmp
 : > $R/var/log/wtmp; : > $R/var/log/btmp; : > $R/var/log/lastlog
 echo "Rootfs-Kopie: $(du -sm $R | cut -f1) MB"
@@ -46,6 +52,8 @@ S=$A/baseos/config; [ -f $S ] && { grep -v '^WIFI_SSID=' $S | grep -v '^WIFI_PSK
 rm -rf $A/baseos/run; mkdir -p $A/baseos/run; chmod 700 $A/baseos/run
 rm -f $A/baseos/state $A/baseos/disable $A/baseos/boot.log $A/baseos/bin/*.bak* 2>/dev/null; rm -rf $A/baseos/boot.lock 2>/dev/null
 rm -f $A/hwbridge/*.log $A/hwbridge/*.pid $A/hwbridge/dash-run.sh 2>/dev/null
+# Kit-Reste sicher entfernen (Android-Seite): Server-Skripte + Mic-Bridge kommen aus den Kits
+rm -f $A/baseos/bin/pyaserver.sh $A/baseos/bin/ttsserver.sh $A/baseos/bin/wakeserver.sh $A/hwbridge/audiod-record 2>/dev/null
 echo "adb-Teile: $(du -sm $A | cut -f1) MB (llm $(du -sm $A/baseos/llm 2>/dev/null | cut -f1) MB, tpu $(du -sm $A/baseos/tpu 2>/dev/null | cut -f1) MB)"
 echo "== Kontrolle =="
 grep -rl 'WIFI_PSK\|psk=' $A 2>/dev/null | head -3 || true

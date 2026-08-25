@@ -1,0 +1,46 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+// A*V v8 (Gemma-4): V als f16 aus dem persistenten Typ-Puffer VKEEP [S,HD] (bereits RMS-
+// normiert, kein Dequant/srow), ctx -> AO [S,QW]. HD-generisch: Dispatch (HD/128, S/128, H).
+#define TM 128
+#define TN 128
+#define TK 32
+#define MM 8
+#define MNV 2
+#define S 512u
+layout(local_size_x=16,local_size_y=16) in;
+layout(constant_id=0) const uint QW = 2048u;  // H*HD (ctx-Zeilenstride)
+layout(constant_id=1) const uint HD = 256u;
+layout(std430,binding=0) readonly  buffer SC { float16_t sc[]; };   // P [H,S,S]
+layout(std430,binding=1) readonly  buffer VK { float16_t vv[]; };   // v f16 [S,HD]
+layout(std430,binding=2) writeonly buffer AO { float16_t ao[]; };   // ctx f16 [S,QW]
+shared f16vec4 As[TM][TK/4];
+shared f16vec4 Bs[TK][TN/4];
+void main(){
+  uint h=gl_WorkGroupID.z;
+  uint tx=gl_LocalInvocationID.x, ty=gl_LocalInvocationID.y;
+  uint brow=gl_WorkGroupID.y*TM, bcol=gl_WorkGroupID.x*TN; uint tid=ty*16u+tx; const uint NT=256u;
+  f16vec4 acc[MM][MNV]; [[unroll]] for(int i=0;i<MM;i++)[[unroll]] for(int v=0;v<MNV;v++) acc[i][v]=f16vec4(0.0);
+  for(uint k0=0u;k0<512u;k0+=TK){
+    for(uint idx=tid; idx<TM*(TK/4); idx+=NT){ uint r=idx/(TK/4), cc=idx%(TK/4);
+      uint base=h*S*S + (brow+r)*S + k0 + cc*4u;
+      As[r][cc]=f16vec4(sc[base],sc[base+1u],sc[base+2u],sc[base+3u]); }
+    for(uint idx=tid; idx<TK*(TN/4); idx+=NT){ uint r=idx/(TN/4), cc=idx%(TN/4);
+      uint u=k0+r; uint col=bcol+cc*4u;
+      Bs[r][cc]=f16vec4(vv[u*HD+col],vv[u*HD+col+1u],vv[u*HD+col+2u],vv[u*HD+col+3u]); }
+    barrier();
+    [[unroll]] for(uint k4=0u;k4<TK/4u;k4++){
+      f16vec4 av[MM]; [[unroll]] for(int i=0;i<MM;i++) av[i]=As[ty*MM+i][k4];
+      uint kk=k4*4u, cb=tx*MNV; f16vec4 b0[MNV],b1[MNV],b2[MNV],b3[MNV];
+      [[unroll]] for(int v=0;v<MNV;v++){ b0[v]=Bs[kk][cb+v]; b1[v]=Bs[kk+1u][cb+v]; b2[v]=Bs[kk+2u][cb+v]; b3[v]=Bs[kk+3u][cb+v]; }
+      [[unroll]] for(int i=0;i<MM;i++)[[unroll]] for(int v=0;v<MNV;v++){
+        acc[i][v]=fma(f16vec4(av[i].x),b0[v],acc[i][v]); acc[i][v]=fma(f16vec4(av[i].y),b1[v],acc[i][v]);
+        acc[i][v]=fma(f16vec4(av[i].z),b2[v],acc[i][v]); acc[i][v]=fma(f16vec4(av[i].w),b3[v],acc[i][v]); }
+    }
+    barrier();
+  }
+  [[unroll]] for(int i=0;i<MM;i++){ uint row=brow+ty*MM+uint(i);
+    [[unroll]] for(int v=0;v<MNV;v++){ uint col=bcol+(tx*MNV+uint(v))*4u; uint o=row*QW + h*HD + col;
+      ao[o]=acc[i][v].x; ao[o+1u]=acc[i][v].y; ao[o+2u]=acc[i][v].z; ao[o+3u]=acc[i][v].w; } }
+}

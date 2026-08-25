@@ -78,6 +78,15 @@ echo baseos >> /sys/power/wake_lock 2>/dev/null       # CPU wach trotz dunklem S
 echo "0 2147483647" > /proc/sys/net/ipv4/ping_group_range 2>/dev/null
 echo 180 > /proc/sys/vm/swappiness 2>/dev/null
 echo 0   > /proc/sys/vm/page-cluster 2>/dev/null
+# zram 3,7GB->1GB: Android-Default kostet ~15MB vmalloc-Metadaten, Swap ist praktisch leer
+# (RAM-Analyse 22.8.); beim Boot ist nichts geswappt -> Umbau gefahrlos, live verifiziert.
+if [ -b /dev/block/zram0 ]; then
+  swapoff /dev/block/zram0 2>/dev/null
+  echo 1 > /sys/block/zram0/reset 2>/dev/null
+  echo 1073741824 > /sys/block/zram0/disksize 2>/dev/null
+  mkswap /dev/block/zram0 >/dev/null 2>&1
+  swapon /dev/block/zram0 2>/dev/null
+fi
 setprop ctl.stop vendor.camera-provider-2-7-google
 setprop ctl.stop cameraserver
 # Display AN lassen: der Boot zeigt durchgehend barra (Bootanimation -> bootsplash ->

@@ -1,10 +1,14 @@
 #!/system/bin/sh
 # LLM-Server (llama-server, GPU-Vulkan mit Mali-Kerneln) — persistent, Modell/Kontext/Layer waehlbar.
 #   llmserver.sh start [modell.gguf] [ctx] [ngl]   |  stop  |  status  |  log
-# v2.4: TPU-Attention-Offload im Prefill (ggml-barra battn) — automatisch AN, wenn zum Modell ein
-# Attention-Kit unter /data/local/barra-attn/<modellname> liegt (attn.meta + aux_attn.bin + *.package).
-# Ohne Kit: unveraendert reiner GPU-Betrieb. BARRA_ATTN_LAYERS via Env uebersteuerbar (Default 1-35;
-# L0 bleibt auf der GPU — Qwen3-4B ist auf L0-Attention-Stoerungen hypersensibel, gemessen 21.8.26).
+# TPU-Attention-Offload im Prefill (ggml-barra) — automatisch AN, wenn zum Modell ein Attention-
+# Kit unter /data/local/barra-attn/<modellname> liegt (attn.meta + aux_attn.bin + *.package).
+# Kit-Formate: v7/v8-Kits tragen pkglist.txt (exakte tpud-Reihenfolge) + optional layers.txt
+# (Betriebspunkt, z.B. "1-39" bei GLM); Altbestand (v2.4-Qwen, q1/q2/kv/o je Layer) laeuft
+# weiter ueber den Fallback mit Layers-Default 1-35 (L0-Hypersensibilitaet, gemessen 21.8.26).
+# Ohne Kit: unveraendert reiner GPU-Betrieb. Waehrend des Offload-Betriebs sind CPU/TPU/MIF/GPU
+# gepinnt (ohne Pins ist der Offload LANGSAMER als GPU-only, gemessen 23.8.26); LLM_NOPIN=1
+# laesst die Pins aus, stop stellt die Governors zurueck.
 . /data/adb/baseos/llm/env.sh
 . /data/adb/baseos/bin/barra-i18n.sh
 R=/data/adb/baseos/run; mkdir -p $R
@@ -13,25 +17,56 @@ DEF=$(ls /data/local/ubuntu/home/*/models/*.gguf /data/local/ubuntu/home/*/*.ggu
 ATTN_BASE=/data/local/barra-attn
 ASOCK=$R/attn-sock
 BRIDGE=/data/local/ubuntu/opt/hwbridge
+F=/sys/class/devfreq
 
+pins_on(){
+  [ "$LLM_NOPIN" = "1" ] && return
+  for CP in /sys/devices/system/cpu/cpufreq/policy*; do echo performance > $CP/scaling_governor 2>/dev/null; done
+  echo performance > $F/1a000000.rio/governor 2>/dev/null
+  echo 1119000000 > $F/1a000000.rio/min_freq 2>/dev/null
+  echo performance > $F/17000010.devfreq_mif/governor 2>/dev/null
+  G=/sys/class/misc/mali0/device
+  echo 890000 > $G/scaling_min_freq 2>/dev/null; echo 890000 > $G/hint_min_freq 2>/dev/null
+}
+pins_off(){
+  for CP in /sys/devices/system/cpu/cpufreq/policy*; do echo schedutil > $CP/scaling_governor 2>/dev/null; done
+  echo simple_ondemand > $F/1a000000.rio/governor 2>/dev/null
+  echo 0 > $F/1a000000.rio/min_freq 2>/dev/null
+  echo interactive > $F/17000010.devfreq_mif/governor 2>/dev/null
+  G=/sys/class/misc/mali0/device
+  echo 150000 > $G/scaling_min_freq 2>/dev/null; echo 150000 > $G/hint_min_freq 2>/dev/null
+}
 attn_stop() {
   pkill -f "$LLM/tpud-attn" 2>/dev/null
+  pins_off
 }
 attn_start() {   # $1 = Modellpfad; setzt BARRA_* Env, wenn Kit vorhanden + tpud bereit
   MB=$(basename "$1" .gguf)
   A=$ATTN_BASE/$MB
   [ -f "$A/attn.meta" ] && [ -f "$A/aux_attn.bin" ] || return 1
-  NL=$(head -1 "$A/attn.meta" | { read _ _ _ _ _ nl _ _; echo $nl; })
-  [ -n "$NL" ] || return 1
   PKGS=""
-  i=0
-  while [ $i -lt $NL ]; do
-    for ty in q1 q2 kv o; do
-      [ -f "$A/${ty}_L$i.package" ] || { t llm.attn_pkg_missing "${ty}_L$i.package"; return 1; }
-      PKGS="$PKGS $A/${ty}_L$i.package"
+  if [ -f "$A/pkglist.txt" ]; then
+    # v7/v8-Kit: exakte Paketreihenfolge aus der Liste (variable Paketzahl je Layer)
+    while read -r base; do
+      [ -n "$base" ] || continue
+      [ -f "$A/$base.package" ] || { t llm.attn_pkg_missing "$base.package"; return 1; }
+      PKGS="$PKGS $A/$base.package"
+    done < "$A/pkglist.txt"
+  else
+    # Altbestand v2.4 (Qwen3-4B): festes q1/q2/kv/o-Schema
+    NL=$(head -1 "$A/attn.meta" | { read _ _ _ _ _ nl _ _; echo $nl; })
+    [ -n "$NL" ] || return 1
+    i=0
+    while [ $i -lt $NL ]; do
+      for ty in q1 q2 kv o; do
+        [ -f "$A/${ty}_L$i.package" ] || { t llm.attn_pkg_missing "${ty}_L$i.package"; return 1; }
+        PKGS="$PKGS $A/${ty}_L$i.package"
+      done
+      i=$((i+1))
     done
-    i=$((i+1))
-  done
+    export BARRA_ATTN_LAYERS=${BARRA_ATTN_LAYERS:-1-35}
+  fi
+  [ -f "$A/layers.txt" ] && export BARRA_ATTN_LAYERS=${BARRA_ATTN_LAYERS:-$(head -1 "$A/layers.txt")}
   ln -sf $LLM/battn/*.spv "$A/" 2>/dev/null
   mkdir -p $ASOCK; chmod 777 $ASOCK
   for s in gpuzc.sock gxp.sock gpu.sock; do ln -sf $BRIDGE/$s $ASOCK/$s; done
@@ -43,11 +78,12 @@ attn_start() {   # $1 = Modellpfad; setzt BARRA_* Env, wenn Kit vorhanden + tpud
     grep -aq bereit $R/tpud-attn.log 2>/dev/null || { t llm.attn_tpud_fail; attn_stop; return 1; }
     chmod 666 $ASOCK/tpu.sock 2>/dev/null
   fi
+  pins_on
   export BARRA_SOCK_DIR=$ASOCK
   export BARRA_ATTN_META=$A/attn.meta
   export BARRA_ATTN_DIR=$A
-  export BARRA_ATTN_LAYERS=${BARRA_ATTN_LAYERS:-1-35}
-  t llm.attn_active "$(grep -ac Modell $R/tpud-attn.log)" "$BARRA_ATTN_LAYERS"
+  export BARRA_ATTN_THREADS=${BARRA_ATTN_THREADS:-6}
+  t llm.attn_active "$(grep -ac Modell $R/tpud-attn.log)" "${BARRA_ATTN_LAYERS:-alle}"
   return 0
 }
 
@@ -59,6 +95,8 @@ case "${1:-status}" in
   start)
     M="${2:-$DEF}"; CTX="${3:-4096}"; NGL="${4:-99}"
     pgrep -f "$LLM/llama-server" >/dev/null && { t llm.already_running; exit 0; }
+    # Koexistenz-Verbot (22.8.): llm+stt zusammen = OOM-Panic + TPU-Graph-Limit (145+104 > ~157)
+    pgrep -f "baseos/stt/whisper-server" >/dev/null && { t llm.stt_running; exit 1; }
     [ -f "$M" ] || { t llm.model_missing "$M" "$MODELS"; exit 1; }
     attn_start "$M" || t llm.attn_no_kit "$(basename "$M" .gguf)"
     setsid $LLM/llama-server -m "$M" -ngl $NGL --host 0.0.0.0 --port 8080 -c $CTX -t 4 </dev/null >$R/llmserver.log 2>&1 &

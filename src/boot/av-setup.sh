@@ -25,6 +25,6 @@ set_ctl "PCM Playback Volume" 800
 set_ctl "EP1 TX Mixer INTERNAL_MIC_TX" 1
 set_ctl "BUILDIN MIC ID CAPTURE LIST" "0 1 -1 -1"
 set_ctl "MIC DC Blocker" 1
-set_ctl "MIC Record Soft Gain (dB)" 22
+set_ctl "MIC Record Soft Gain (dB)" 30
 
 echo "[av-setup] Audio-Routen gesetzt (Speaker EP2/device1, Mic EP1/device8)"

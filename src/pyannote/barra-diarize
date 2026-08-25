@@ -1,0 +1,44 @@
+#!/bin/bash
+# barra-diarize — Sprecher-Diarization auf dem Node (Segmentierung CPU, Embeddings TPU).
+#   barra-diarize <audio.wav> [sprecherzahl]
+# Ohne Sprecherzahl wird sie per Cluster-Schwelle geschaetzt. Ausgabe: "start -- ende speaker_XX".
+# Braucht den Diarization-Dienst (Android-Seite): pyaserver.sh start
+B=/opt/barra/pya/sherpa-onnx-offline-speaker-diarization
+KIT=/opt/barra-pya
+SOCK=/opt/hwbridge/pya/tpu.sock
+
+usage(){ echo "barra-diarize <audio.wav> [sprecherzahl]  (16 kHz mono WAV)"; exit 1; }
+[ -n "$1" ] && [ -f "$1" ] || usage
+WAV=$1; N=${2:-0}
+
+[ -x "$B" ] || { echo "Diarization-Binary fehlt ($B) - Base unvollstaendig"; exit 1; }
+[ -f "$KIT/seg.onnx" ] || { echo "Diarization-Kit fehlt unter $KIT (install-pya.ps1)"; exit 1; }
+[ -S "$SOCK" ] || { echo "Diarization-Dienst laeuft nicht - auf Android-Seite: pyaserver.sh start"; exit 1; }
+
+if [ "$N" -gt 0 ] 2>/dev/null; then
+  CLUSTER="--clustering.num-clusters=$N"
+else
+  CLUSTER="--clustering.cluster-threshold=0.5"
+fi
+
+# Embedding-Modell: liegt ein Alternativ-Modell im Kit (emb_cpu.onnx, per Setup gewaehlt),
+# rechnet die CPU es direkt; sonst der Standard-Pfad ResNet34 auf der Tensor-Einheit.
+if [ -f "$KIT/emb_cpu.onnx" ]; then
+  exec $B \
+    --segmentation.pyannote-model=$KIT/seg.onnx \
+    --segmentation.num-threads=4 \
+    --embedding.model=$KIT/emb_cpu.onnx \
+    --embedding.num-threads=4 \
+    $CLUSTER \
+    "$WAV"
+else
+  [ -S "$SOCK" ] || { echo "Diarization-Dienst laeuft nicht - auf Android-Seite: pyaserver.sh start"; exit 1; }
+  BARRA_EMB=1 BARRA_SOCK_DIR=/opt/hwbridge/pya BARRA_EMB_HEAD=$KIT/head.bin \
+  exec $B \
+    --segmentation.pyannote-model=$KIT/seg.onnx \
+    --segmentation.num-threads=4 \
+    --embedding.model=$KIT/resnet34.onnx \
+    --embedding.num-threads=4 \
+    $CLUSTER \
+    "$WAV"
+fi

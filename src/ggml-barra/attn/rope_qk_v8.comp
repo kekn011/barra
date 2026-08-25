@@ -1,0 +1,81 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// ggml-barra v8 (Gemma-4): HD-GENERISCH (256/512), NKV=1, NEOX-RoPE, q/k-RMSNorm mit Gamma,
+// V-RMSNorm OHNE Gamma (VNORM), q optional in 2 Kopf-Haelften (QCHUNK, full-Layer 4096-out).
+// Schreibt q -> QKQ [S,QW] f16, k -> KKEEP [S,HD] f16 (geropt+genormt), v -> VKEEP [S,HD] f16
+// (genormt) — KKEEP/VKEEP sind die persistenten Typ-Puffer (KV-Sharing: shared Layer lesen sie).
+// 2-Pass (erst Norm-Summe, dann erneuter Dequant) gegen Registerdruck bei HD=512.
+// Dispatch: (H+2, S) fuer kv-Layer (Row H=k, H+1=v), (H, S) fuer shared. 16 Threads.
+layout(local_size_x=16) in;
+layout(constant_id=0) const uint H     = 8u;
+layout(constant_id=1) const uint QW    = 2048u;  // H*HD
+layout(constant_id=2) const uint HD    = 256u;
+layout(constant_id=3) const uint QCHUNK= 0u;     // 1 = q in 2 Kopf-Haelften (Q1/Q2)
+layout(constant_id=4) const uint HDMAX = 512u;   // Gamma-Zeilenstride in aux
+layout(std430,binding=0) readonly  buffer Q1B { uint q1b[]; };
+layout(std430,binding=1) readonly  buffer Q2B { uint q2b[]; };
+layout(std430,binding=2) readonly  buffer KVB { uint kvb[]; };       // kv int16 [S, 2*HD] = [k|v]
+layout(std430,binding=3) writeonly buffer QKQ { float16_t qq[]; };   // q f16 [S,QW]
+layout(std430,binding=4) writeonly buffer KK  { float16_t kk[]; };   // k f16 [S,HD] (Typ-Puffer)
+layout(std430,binding=5) writeonly buffer VK  { float16_t vv[]; };   // v f16 [S,HD] (Typ-Puffer)
+layout(std430,binding=6) readonly  buffer AUX { float aux[]; };
+layout(std430,binding=7) readonly  buffer SR  { float srow[]; };
+layout(push_constant) uniform P { float q1osc; float q1ozp; float q2osc; float q2ozp; float kosc; float kozp; float eps; uint gqo; uint gko; uint tabo; } pc;
+shared float red[16];
+shared float srms;
+void main(){
+  uint hr=gl_WorkGroupID.x, t=gl_WorkGroupID.y, tid=gl_LocalInvocationID.x;
+  uint TABW = HD/2u;
+  uint E = HD/16u;               // Elemente je Thread
+  bool isq = hr<H;
+  bool isv = hr==H+1u;
+  float osc, ozp; uint rb; uint src; // 0=Q1 1=Q2 2=KV
+  if(isq){
+    if(QCHUNK==1u && hr>=H/2u){ rb=t*(QW/2u)+(hr-H/2u)*HD; osc=pc.q2osc; ozp=pc.q2ozp; src=1u; }
+    else { rb=t*(QCHUNK==1u?QW/2u:QW)+hr*HD; osc=pc.q1osc; ozp=pc.q1ozp; src=0u; }
+  } else { rb=t*2u*HD + (isv?HD:0u); osc=pc.kosc; ozp=pc.kozp; src=2u; }
+  float sf = osc*srow[t];
+  // Pass 1: Norm-Summe ueber die E Elemente dieses Threads
+  float ss=0.0;
+  for(uint u=0u;u<E;u+=2u){
+    uint e=tid*E+u; uint b=(rb+e)>>1;
+    uint w = src==0u?q1b[b]:(src==1u?q2b[b]:kvb[b]);
+    float a0=(float(bitfieldExtract(int(w),0,16))-ozp)*sf;
+    float a1=(float(bitfieldExtract(int(w),16,16))-ozp)*sf;
+    ss+=a0*a0+a1*a1;
+  }
+  red[tid]=ss; barrier();
+  if(tid<8u) red[tid]+=red[tid+8u]; barrier();
+  if(tid<4u) red[tid]+=red[tid+4u]; barrier();
+  if(tid==0u) srms=inversesqrt((red[0]+red[1]+red[2]+red[3])/float(HD)+pc.eps); barrier();
+  float rms=srms;
+  // Pass 2: dequant + Norm(+Gamma) + RoPE (NEOX; v: ohne Gamma, ohne RoPE)
+  uint gb = isq?pc.gqo:pc.gko;
+  if(isv){
+    for(uint u=0u;u<E;u+=2u){
+      uint e=tid*E+u; uint b=(rb+e)>>1; uint w=kvb[b];
+      vv[t*HD+e]    = float16_t((float(bitfieldExtract(int(w),0,16))-ozp)*sf*rms);
+      vv[t*HD+e+1u] = float16_t((float(bitfieldExtract(int(w),16,16))-ozp)*sf*rms);
+    }
+    return;
+  }
+  // q/k: NEOX-Paare (lo=e in [0,HD/2), hi=e+HD/2), Thread bearbeitet E/2 lo-Elemente
+  uint EH = E/2u;
+  for(uint u=0u;u<EH;u+=2u){
+    uint e=tid*EH+u;                       // lo-Index
+    uint b0=(rb+e)>>1, b1=(rb+TABW+e)>>1;
+    uint w0 = src==0u?q1b[b0]:(src==1u?q2b[b0]:kvb[b0]);
+    uint w1 = src==0u?q1b[b1]:(src==1u?q2b[b1]:kvb[b1]);
+    for(uint p=0u;p<2u;p++){
+      float f0=(float(bitfieldExtract(int(w0),int(16u*p),16))-ozp)*sf;
+      float f1=(float(bitfieldExtract(int(w1),int(16u*p),16))-ozp)*sf;
+      uint ei=e+p;
+      f0*=rms*aux[gb+ei]; f1*=rms*aux[gb+TABW+ei];
+      float c =aux[pc.tabo             +t*TABW+ei];
+      float sn=aux[pc.tabo+512u*TABW   +t*TABW+ei];
+      float o0=f0*c-f1*sn, o1=f1*c+f0*sn;
+      if(isq){ qq[t*QW+hr*HD+ei]=float16_t(o0); qq[t*QW+hr*HD+TABW+ei]=float16_t(o1); }
+      else   { kk[t*HD+ei]=float16_t(o0); kk[t*HD+TABW+ei]=float16_t(o1); }
+    }
+  }
+}

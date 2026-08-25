@@ -49,6 +49,13 @@ start_audiod(){ # Audio-Ausgabe-Bruecke (Bionic raw-ALSA); Container schickt PCM
   log "starte audiod-alsa (Socket $SHARED/audio.sock)"
   LD_LIBRARY_PATH=/system/lib64 "$H/audiod-alsa" "$SHARED/audio.sock" >>"$LOG" 2>&1 &
 }
+start_micrec(){ # Audio-EINGABE-Bruecke (Bionic tinyalsa): Builtin-Mic (device8, 48k stereo->mono)
+                # -> Socket; der Container-wake-bridge liest daraus fuers Weckwort ("Hey Barra").
+  pgrep -f "$H/audiod-record" >/dev/null 2>&1 && return 0
+  [ -x "$H/audiod-record" ] || return 1
+  log "starte audiod-record (Mic, Socket $SHARED/micrec.sock)"
+  LD_LIBRARY_PATH=/system/lib64:/vendor/lib64 "$H/audiod-record" "$SHARED/micrec.sock" >>"$LOG" 2>&1 &
+}
 start_cfgd(){   # Android-Config-Agent fuer pixel-config (charge/wlan-Bridge)
   pgrep -f "$H/baseos-cfgd" >/dev/null 2>&1 && return 0
   [ -f "$H/baseos-cfgd.sh" ] || return 1
@@ -90,6 +97,7 @@ while :; do
   start_gxp
   start_cfgd
   start_audiod
+  start_micrec
   start_btnd
   sleep 15
 done

@@ -1,0 +1,21 @@
+[Unit]
+Description=barra Wake Word ("Hey Barra") - sherpa-onnx keyword spotter am Builtin-Mic
+After=network.target
+# Ruht ohne installiertes Weckwort-Kit (kein Boot-Autostart; Start via wakeserver.sh)
+ConditionPathExists=/opt/barra-wake/wake-bridge
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=/opt/barra-wake/lib
+# Wartet bis der Mic-Socket (audiod-record, Android-Supervisor) da ist, dann Spotter.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /opt/hwbridge/micrec.sock ] && exit 0; sleep 2; done; exit 0'
+ExecStart=/opt/barra-wake/wake-bridge /opt/hwbridge/micrec.sock \
+  /opt/barra-wake/encoder.int8.onnx /opt/barra-wake/decoder.int8.onnx /opt/barra-wake/joiner.int8.onnx \
+  /opt/barra-wake/tokens.txt /opt/barra-wake/keywords.txt /run/barra-wake/trigger /opt/barra-wake/on-wake.sh 0.25
+RuntimeDirectory=barra-wake
+Restart=always
+RestartSec=3
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

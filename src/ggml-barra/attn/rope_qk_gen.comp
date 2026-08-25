@@ -1,0 +1,93 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// ggml-barra v7 (GENERISCH via Spezialisierungskonstanten) — EIN Kernel fuer alle Standard-
+// GQA-Transformer (HD=128, S=512): q ungechunkt ODER 2 Kopf-Haelften (QCHUNK, Qwen3-4B:
+// 4096-out kompiliert nicht), kv gemergt [S,KVW]=[k|v], optional q/k-RMSNorm mit Gamma aus
+// aux (QKNORM, Qwen3), RMODE 0=NORM-RoPE (chatglm/llama) / 2=NEOX (Qwen). Bias ist in den
+// TPU-Packages eingebacken. Workgroup=(head-row 0..H+NKV-1, token), 16 Threads a 8 Elemente.
+// Push = 40B (q1/q2/k-Skalen + eps + gqo/gko/tabo); unchunked bindet Q2:=Q1, q2osc:=q1osc.
+layout(local_size_x=16) in;
+layout(constant_id=0) const uint H    = 12u;
+layout(constant_id=1) const uint NKV  = 2u;
+layout(constant_id=2) const uint QW   = 1536u;   // H*HD
+layout(constant_id=3) const uint KVW  = 512u;    // 2*NKV*HD
+layout(constant_id=4) const uint KOFF = 786432u; // S*QW
+layout(constant_id=5) const uint RMODE= 2u;      // 0=NORM, 2=NEOX
+layout(constant_id=6) const uint QKNORM=0u;      // 1 = per-Head-RMSNorm + Gamma
+layout(constant_id=7) const uint QCHUNK=0u;      // 1 = q in 2 Kopf-Haelften (Q1/Q2)
+layout(std430,binding=0) readonly  buffer Q1B { uint q1b[]; };
+layout(std430,binding=1) readonly  buffer Q2B { uint q2b[]; };
+layout(std430,binding=2) readonly  buffer KVB { uint kvb[]; };
+layout(std430,binding=3) writeonly buffer QK  { float16_t qk[]; };   // q f16 [S*QW] + k f16 [S*KVW/2]
+layout(std430,binding=4) readonly  buffer AUX { float aux[]; };
+layout(std430,binding=5) readonly  buffer SR  { float srow[]; };
+layout(push_constant) uniform P { float q1osc; float q1ozp; float q2osc; float q2ozp; float kosc; float kozp; float eps; uint gqo; uint gko; uint tabo; } pc;
+shared float red[16];
+shared float srms;
+void main(){
+  uint hr=gl_WorkGroupID.x, t=gl_WorkGroupID.y, tid=gl_LocalInvocationID.x;
+  bool isq = hr<H;
+  uint KVROW = KVW/2u;
+  // Ladeadresse + Skalen (q1/q2-Chunk oder kv)
+  float osc, ozp; uint rb; uint src; // src: 0=Q1 1=Q2 2=KV
+  if(isq){
+    if(QCHUNK==1u && hr>=H/2u){ rb=t*(QW/2u)+(hr-H/2u)*128u; osc=pc.q2osc; ozp=pc.q2ozp; src=1u; }
+    else { rb=t*(QCHUNK==1u?QW/2u:QW)+hr*128u; osc=pc.q1osc; ozp=pc.q1ozp; src=0u; }
+  } else { rb=t*KVW+(hr-H)*128u; osc=pc.kosc; ozp=pc.kozp; src=2u; }
+  float sf = osc*srow[t];
+  // 8 Elemente je Thread dequantisieren — Layout je RMODE
+  uint j = (RMODE==0u) ? tid*8u : tid*4u;
+  float f0[4], f1[4];
+  if(RMODE==0u){
+    uint b=(rb+j)>>1;
+    uint w[4];
+    for(uint u2=0u;u2<4u;u2++) w[u2] = src==0u?q1b[b+u2]:(src==1u?q2b[b+u2]:kvb[b+u2]);
+    for(uint p=0u;p<4u;p++){
+      f0[p]=(float(bitfieldExtract(int(w[p]),0,16))-ozp)*sf;
+      f1[p]=(float(bitfieldExtract(int(w[p]),16,16))-ozp)*sf;
+    }
+  } else {
+    uint b0=(rb+j)>>1, b1=(rb+64u+j)>>1;
+    uint w0a,w0b,w1a,w1b;
+    if(src==0u){ w0a=q1b[b0]; w0b=q1b[b0+1u]; w1a=q1b[b1]; w1b=q1b[b1+1u]; }
+    else if(src==1u){ w0a=q2b[b0]; w0b=q2b[b0+1u]; w1a=q2b[b1]; w1b=q2b[b1+1u]; }
+    else { w0a=kvb[b0]; w0b=kvb[b0+1u]; w1a=kvb[b1]; w1b=kvb[b1+1u]; }
+    f0[0]=(float(bitfieldExtract(int(w0a),0,16))-ozp)*sf; f0[1]=(float(bitfieldExtract(int(w0a),16,16))-ozp)*sf;
+    f0[2]=(float(bitfieldExtract(int(w0b),0,16))-ozp)*sf; f0[3]=(float(bitfieldExtract(int(w0b),16,16))-ozp)*sf;
+    f1[0]=(float(bitfieldExtract(int(w1a),0,16))-ozp)*sf; f1[1]=(float(bitfieldExtract(int(w1a),16,16))-ozp)*sf;
+    f1[2]=(float(bitfieldExtract(int(w1b),0,16))-ozp)*sf; f1[3]=(float(bitfieldExtract(int(w1b),16,16))-ozp)*sf;
+  }
+  // optionale per-Head-RMSNorm (Reduktion ueber die 16 Threads = 128 Elemente)
+  float rms = 1.0;
+  if(QKNORM==1u){
+    float ss=0.0;
+    for(int u2=0;u2<4;u2++) ss+=f0[u2]*f0[u2]+f1[u2]*f1[u2];
+    red[tid]=ss; barrier();
+    if(tid<8u) red[tid]+=red[tid+8u]; barrier();
+    if(tid<4u) red[tid]+=red[tid+4u]; barrier();
+    if(tid==0u) srms=inversesqrt((red[0]+red[1]+red[2]+red[3])/128.0+pc.eps); barrier();
+    rms=srms;
+  }
+  uint gb = isq?pc.gqo:pc.gko;
+  uint outbase = isq ? (t*QW+hr*128u) : (KOFF + t*KVROW + (hr-H)*128u);
+  if(RMODE==0u){
+    for(uint p=0u;p<4u;p++){
+      float g0=f0[p], g1=f1[p];
+      if(QKNORM==1u){ g0*=rms*aux[gb+j+2u*p]; g1*=rms*aux[gb+j+2u*p+1u]; }
+      uint fi=(j>>1)+p;
+      float c =aux[pc.tabo        +t*64u+fi];
+      float sn=aux[pc.tabo+32768u +t*64u+fi];
+      qk[outbase+j+2u*p]    = float16_t(g0*c-g1*sn);
+      qk[outbase+j+2u*p+1u] = float16_t(g1*c+g0*sn);
+    }
+  } else {
+    for(uint u2=0u;u2<4u;u2++){
+      float g0=f0[u2], g1=f1[u2];
+      if(QKNORM==1u){ g0*=rms*aux[gb+j+u2]; g1*=rms*aux[gb+64u+j+u2]; }
+      float c =aux[pc.tabo        +t*64u+j+u2];
+      float sn=aux[pc.tabo+32768u +t*64u+j+u2];
+      qk[outbase+j+u2]      = float16_t(g0*c-g1*sn);
+      qk[outbase+64u+j+u2]  = float16_t(g1*c+g0*sn);
+    }
+  }
+}

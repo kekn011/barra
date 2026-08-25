@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// ggml-barra GLM-Edge (v2.5): q UNGECHUNKT [S,3072] int16 + kv gemergt [S,1536]=[k(768)|v(768)],
+// KEIN q/k-RMSNorm, RoPE = LLAMA_ROPE_TYPE_NORM (Rotation auf AUFEINANDERFOLGENDEN Paaren
+// (x[2i],x[2i+1]), Frequenz i) — NICHT NEOX-half-split wie Qwen (rope_qk_l5)!
+// Workgroup=(head-row 0..29: 24 q + 6 k, token), 16 Threads a 4 Paare (8 Elemente).
+// Push wie rope_qk_l5-Basislayout (32B): eps/gqo/gko ungenutzt.
+layout(local_size_x=16) in;
+layout(std430,binding=0) readonly  buffer QB  { uint qb[]; };        // q int16 [S,3072]
+layout(std430,binding=1) readonly  buffer KVB { uint kvb[]; };       // kv int16 [S,1536]
+layout(std430,binding=2) writeonly buffer QK  { float16_t qk[]; };   // q f16 [S*3072] + k f16 [S*768]
+layout(std430,binding=3) readonly  buffer AUX { float aux[]; };
+layout(std430,binding=4) readonly  buffer SR  { float srow[]; };
+layout(push_constant) uniform P { float qosc; float qozp; float kosc; float kozp; float eps; uint gqo; uint gko; uint tabo; } pc;
+void main(){
+  uint hr=gl_WorkGroupID.x, t=gl_WorkGroupID.y, tid=gl_LocalInvocationID.x;
+  bool isq = hr<24u;
+  uint j = tid*8u;                       // 8 aufeinanderfolgende Elemente = 4 Paare
+  uint w[4]; float osc, ozp;
+  if(isq){ uint rb=t*3072u+hr*128u; uint b=(rb+j)>>1;
+    w[0]=qb[b]; w[1]=qb[b+1u]; w[2]=qb[b+2u]; w[3]=qb[b+3u]; osc=pc.qosc; ozp=pc.qozp; }
+  else   { uint rb=t*1536u+(hr-24u)*128u; uint b=(rb+j)>>1;
+    w[0]=kvb[b]; w[1]=kvb[b+1u]; w[2]=kvb[b+2u]; w[3]=kvb[b+3u]; osc=pc.kosc; ozp=pc.kozp; }
+  float sf = osc*srow[t];
+  uint outbase = isq ? (t*3072u+hr*128u+j) : (1572864u + t*768u + (hr-24u)*128u + j);
+  for(uint p=0u;p<4u;p++){
+    float f0=(float(bitfieldExtract(int(w[p]),0,16))-ozp)*sf;
+    float f1=(float(bitfieldExtract(int(w[p]),16,16))-ozp)*sf;
+    uint fi=(j>>1)+p;                    // Frequenz-Index = Paarindex
+    float c =aux[pc.tabo        +t*64u+fi];
+    float sn=aux[pc.tabo+32768u +t*64u+fi];
+    qk[outbase+2u*p]    = float16_t(f0*c-f1*sn);
+    qk[outbase+2u*p+1u] = float16_t(f1*c+f0*sn);
+  }
+}

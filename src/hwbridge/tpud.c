@@ -205,6 +205,34 @@ static int tpu_infer(int mid, void* inBuf, void* outBuf, unsigned char* oh, doub
   void* i1[1]={inBuf}; void* o1[1]={outBuf}; return tpu_infer_multi(mid,i1,1,o1,1,oh,us_out);
 }
 
+/* K=2-Fence-Paar: beide Requests sofort submitFenced (2 in-flight wie pipe_bench),
+   dann beide Fences einsammeln. Nur im Fence-Modus rufen (g_use_fence). */
+static int tpu_infer_pair(int mid, void* iA, void* oA, void* iB, void* oB, double* us_out){
+  void* g=g_models[mid].graph; wl_touch();
+  void* req[2]={0,0}; void* fen[2]={0,0};
+  void* ins[2]={iA,iB}; void* outs[2]={oA,oB};
+  struct timespec t0,t1; clock_gettime(CLOCK_MONOTONIC,&t0);
+  for(int j=0;j<2;j++){
+    mapDev(ins[j]); if(flushCache) flushCache(ins[j]); mapDev(outs[j]);
+    createReq(g_vdev,g,&req[j]);
+    if(!req[j]){ for(int k=0;k<j;k++){ if(fen[k]&&fenceFree) fenceFree(fen[k]); if(reqFree) reqFree(req[k]); } return -1; }
+    addIn(req[j],0,ins[j]); addOut(req[j],0,outs[j]);
+    submitFenced(g_vdev,req[j],&fen[j]);
+  }
+  int done=1;
+  for(int j=0;j<2;j++){
+    int dj=fen[j]?0:1; long spins=0;
+    if(fen[j]) for(;;){ if(fenceDone(fen[j])){dj=1;break;} if(++spins>200000){ struct timespec tn; clock_gettime(CLOCK_MONOTONIC,&tn);
+          if((tn.tv_sec-t0.tv_sec)*1e6+(tn.tv_nsec-t0.tv_nsec)/1e3>g_max_wait_us) break; if(g_fence_yield) sched_yield(); } }
+    if(invCache) invCache(outs[j]);
+    if(fen[j]&&fenceFree) fenceFree(fen[j]); if(reqFree) reqFree(req[j]);
+    if(!dj) done=0;
+  }
+  clock_gettime(CLOCK_MONOTONIC,&t1);
+  if(us_out)*us_out=(t1.tv_sec-t0.tv_sec)*1e6+(t1.tv_nsec-t0.tv_nsec)/1e3;
+  return done?0:-2;
+}
+
 /* Warmup: erster Submit nach Registrierung ist kalt (JIT). Serielle Laeufe bis Output stabil. */
 static void warmup(int mid){
   Model* M=&g_models[mid]; long osz=M->out_sizes[0];
@@ -337,6 +365,9 @@ static void serve_inline(int c){
     memcpy(ih,tmp,isz); free(tmp);
     void* outBuf=mkbuf(osz,&oh); if(!outBuf){ if(bufFree) bufFree(inBuf); TPU_UNLOCK(); break; }
     int ok = tpu_infer((int)mid,inBuf,outBuf,(unsigned char*)oh,0)==0;
+    if(getenv("TPU_SERVE_DBG")){ long nz=0; for(long q=0;q<osz;q++) if(((unsigned char*)oh)[q]) nz++;
+      long inz=0; for(long q=0;q<isz;q++) if(((unsigned char*)ih)[q]) inz++;
+      fprintf(stderr,"[tpud] serve M%u: ok=%d in_nonzero=%ld/%ld out_nonzero=%ld/%ld\n",mid,ok,inz,isz,nz,osz); }
     unsigned char* res=0; if(ok){ res=malloc(osz); if(res) memcpy(res,oh,osz); else ok=0; }
     if(bufFree){ bufFree(inBuf); bufFree(outBuf); }
     TPU_UNLOCK();
@@ -388,12 +419,68 @@ static void serve_zc(int c, uint32_t* hdr, int* fds, int nfd){
          && h[ih].size>=g_models[mid].in_size && h[oh].size>=g_models[mid].out_size){
         double us=0;
         TPU_LOCK();
-        if(tpu_infer((int)mid,h[ih].buf,h[oh].buf,(unsigned char*)h[oh].map,&us)==0){ status=0; us32=(uint32_t)us; }
+        const char* bev=getenv("TPU_ZC_BOUNCE");
+        if(bev){
+          /* Befund 21.8.: LUT/Softmax-Packages schreiben in IMPORTIERTE dmabufs Nullen,
+           * in interne Lib-Puffer korrekt -> intern rechnen und umkopieren. Puffer je Modell gecacht.
+           * Modus 2 = Bounce NUR Output (Input direkt aus dem Import; Nullen-Befund war output-seitig). */
+          int bm=atoi(bev);
+          static void* c_ib[256]; static void* c_ob[256]; static void* c_ih[256]; static void* c_oh[256];
+          long is_=g_models[mid].in_size, os_=g_models[mid].out_size;
+          if(bm!=2&&!c_ib[mid]) c_ib[mid]=mkbuf(is_,&c_ih[mid]);
+          if(!c_ob[mid]) c_ob[mid]=mkbuf(os_,&c_oh[mid]);
+          void* ib=(bm==2)?h[ih].buf:c_ib[mid];
+          if(ib&&c_ob[mid]){
+            if(bm!=2) memcpy(c_ih[mid],h[ih].map,is_);
+            if(tpu_infer((int)mid,ib,c_ob[mid],(unsigned char*)c_oh[mid],&us)==0){ memcpy(h[oh].map,c_oh[mid],os_); status=0; us32=(uint32_t)us; }
+            else status=2;
+          } else status=2;
+        } else if(tpu_infer((int)mid,h[ih].buf,h[oh].buf,(unsigned char*)h[oh].map,&us)==0){ status=0; us32=(uint32_t)us; }
         else status=2;
         TPU_UNLOCK();
       }
       ninf++; g_nreq++;
       if(ninf<=3||ninf%1000==0) fprintf(stderr,"[tpud] zc infer #%ld (M%u, in_h=%u out_h=%u) status=%u %.2f ms\n",ninf,mid,ih,oh,status,us32/1000.0);
+      write_full(c,&status,4); write_full(c,&us32,4);
+    } else if(cmd==7){                              /* INFER2 model; dann 4 Handles a_ih a_oh b_ih b_oh (K=2-Paar) */
+      uint32_t mid=hdr[2]; uint32_t hd4[4]; uint32_t us32=0;
+      if(read_full(c,hd4,16)){ write_full(c,&status,4); write_full(c,&us32,4); goto next; }
+      uint32_t ai=hd4[0],ao=hd4[1],bi=hd4[2],bo=hd4[3];
+      int ok = mid<(uint32_t)g_nmodels && ai<ZC_MAXH&&ao<ZC_MAXH&&bi<ZC_MAXH&&bo<ZC_MAXH
+        && h[ai].used&&h[ao].used&&h[bi].used&&h[bo].used && ai!=ao&&bi!=bo
+        && h[ai].size>=g_models[mid].in_size&&h[bi].size>=g_models[mid].in_size
+        && h[ao].size>=g_models[mid].out_size&&h[bo].size>=g_models[mid].out_size;
+      if(ok){
+        double us=0; int rcp=-1;
+        TPU_LOCK();
+        const char* bev=getenv("TPU_ZC_BOUNCE");
+        if(bev){
+          int bm=atoi(bev);                          /* 2 = Bounce nur Output */
+          static void* p_ib[256][2]; static void* p_ob[256][2]; static void* p_ih[256][2]; static void* p_oh[256][2];
+          long is_=g_models[mid].in_size, os_=g_models[mid].out_size;
+          for(int j=0;j<2;j++){
+            if(bm!=2&&!p_ib[mid][j]) p_ib[mid][j]=mkbuf(is_,&p_ih[mid][j]);
+            if(!p_ob[mid][j]) p_ob[mid][j]=mkbuf(os_,&p_oh[mid][j]);
+          }
+          void* iA=(bm==2)?h[ai].buf:p_ib[mid][0];
+          void* iB=(bm==2)?h[bi].buf:p_ib[mid][1];
+          if(iA&&iB&&p_ob[mid][0]&&p_ob[mid][1]){
+            if(bm!=2){ memcpy(p_ih[mid][0],h[ai].map,is_); memcpy(p_ih[mid][1],h[bi].map,is_); }
+            if(g_use_fence) rcp=tpu_infer_pair(mid,iA,p_ob[mid][0],iB,p_ob[mid][1],&us);
+            else { double u1=0,u2=0; int r1=tpu_infer(mid,iA,p_ob[mid][0],(unsigned char*)p_oh[mid][0],&u1);
+                   int r2=tpu_infer(mid,iB,p_ob[mid][1],(unsigned char*)p_oh[mid][1],&u2); us=u1+u2; rcp=(r1||r2)?-1:0; }
+            if(rcp==0){ memcpy(h[ao].map,p_oh[mid][0],os_); memcpy(h[bo].map,p_oh[mid][1],os_); }
+          }
+        } else {
+          if(g_use_fence) rcp=tpu_infer_pair(mid,h[ai].buf,h[ao].buf,h[bi].buf,h[bo].buf,&us);
+          else { double u1=0,u2=0; int r1=tpu_infer(mid,h[ai].buf,h[ao].buf,(unsigned char*)h[ao].map,&u1);
+                 int r2=tpu_infer(mid,h[bi].buf,h[bo].buf,(unsigned char*)h[bo].map,&u2); us=u1+u2; rcp=(r1||r2)?-1:0; }
+        }
+        TPU_UNLOCK();
+        if(rcp==0){ status=0; us32=(uint32_t)us; } else status=2;
+      }
+      ninf+=2; g_nreq+=2;
+      if(ninf<=6||ninf%1000<2) fprintf(stderr,"[tpud] zc infer2 #%ld (M%u) status=%u %.2f ms/Paar\n",ninf,mid,status,us32/1000.0);
       write_full(c,&status,4); write_full(c,&us32,4);
     } else if(cmd==3){                              /* RELEASE */
       uint32_t nbuf=hdr[2]; uint32_t hd[ZC_MAXBUF];
@@ -484,6 +571,11 @@ static void pipe_bench(int mid){
       int d=memcmp(cb,refh,osz);
       fprintf(stderr,"[diag] OUT CopyFrom vs mapHost: %s\n", d?"UNTERSCHIEDLICH -> mapHost stale!":"gleich");
       memcpy(ref,cb,osz); free(cb); }   /* Genauigkeit unten auf kohaerenter Ruecklesung */
+  }
+  { /* TPU_PIPE_SAVE=<datei>: seriellen TPU-Output roh wegschreiben (PC-seitige Auswertung) */
+    const char* sf=getenv("TPU_PIPE_SAVE");
+    if(sf){ FILE* f=fopen(sf,"wb"); if(f){ fwrite(ref,1,osz,f); fclose(f);
+      fprintf(stderr,"[pipe] Output gespeichert: %s (%ld B)\n",sf,osz); } else fprintf(stderr,"[pipe] SAVE fopen FAIL %s\n",sf); }
   }
   if(fref){ /* seriellen TPU-Output gegen numpy vergleichen; int8/int16-Dequant via env */
     int odt=getenv("TPU_PIPE_ODT")?atoi(getenv("TPU_PIPE_ODT")):0;  /* 0=f32 1=int8 2=int16 */
@@ -590,13 +682,38 @@ int main(int argc,char**argv){
 
   if(getenv("TPU_PIPE")){ int pm=getenv("TPU_PIPE_MID")?atoi(getenv("TPU_PIPE_MID")):0; if(pm>=g_nmodels)pm=0; pipe_bench(pm); return 0; }
 
+  if(getenv("TPU_WARMUP")){
+    /* Warmup-Inferenz je Modell auf dem MAIN-Thread vor dem Servieren (Befund 21.8.: das
+     * Whisper-Softmax-Kern-Package liefert ueber Conn-Threads Nullen, bis einmal auf dem
+     * Main-Thread inferiert wurde — Lazy-Init in der Darwinn-Lib). */
+    int wreps=atoi(getenv("TPU_WARMUP")); if(wreps<1) wreps=1;
+    for(int m=0;m<g_nmodels;m++){
+      if(g_models[m].n_in!=1||g_models[m].n_out!=1) continue;
+      for(int w=0;w<wreps;w++){
+        void *ih=0,*oh=0;
+        void* ib=mkbuf(g_models[m].in_size,&ih); void* ob=mkbuf(g_models[m].out_size,&oh);
+        if(ib&&ob){ memset(ih,1+w,g_models[m].in_size);
+          const char* wf=getenv("TPU_WARMUP_IN");
+          if(wf){ FILE* f=fopen(wf,"rb"); if(f){ fread(ih,1,g_models[m].in_size,f); fclose(f); } }
+          double us=0;
+          int rc=tpu_infer(m,ib,ob,(unsigned char*)oh,&us);
+          long nz=0; for(long q=0;q<g_models[m].out_size;q++) if(((unsigned char*)oh)[q]) nz++;
+          fprintf(stderr,"[tpud] warmup M%d #%d: rc=%d %.2f ms nonzero=%ld/%ld\n",m,w,rc,us/1000.0,nz,g_models[m].out_size); }
+        if(bufFree){ if(ib)bufFree(ib); if(ob)bufFree(ob); }
+      }
+    }
+  }
+
   int srv=socket(AF_UNIX,SOCK_STREAM,0);
   struct sockaddr_un a; memset(&a,0,sizeof a); a.sun_family=AF_UNIX; strncpy(a.sun_path,sock,sizeof(a.sun_path)-1);
   unlink(sock);
   if(bind(srv,(struct sockaddr*)&a,sizeof a)<0){ fprintf(stderr,"[tpud] bind %s: %s\n",sock,strerror(errno)); return 1; }
   chmod(sock,0666); listen(srv,8);
   fprintf(stderr,"[tpud] bereit, lauscht auf %s (%d Modell(e), %s, zero-copy %s)\n",sock,g_nmodels,g_wait_us>0?"fixe Wartezeit":"adaptiver Poll",impFd?"ja":"nein");
+  int single=getenv("TPU_SINGLE")?1:0;   /* seriell auf dem MAIN-Thread servieren (Befund 21.8.:
+                                            LUT/Softmax-Packages liefern von Conn-Threads Nullen) */
   for(;;){ int c=accept(srv,0,0); if(c<0) continue;
+    if(single){ handle_conn(c); close(c); continue; }
     pthread_t th; int* pc=malloc(sizeof(int)); *pc=c;
     if(pthread_create(&th,0,conn_thread,pc)==0) pthread_detach(th); else { handle_conn(c); close(c); free(pc); } }
   return 0;
