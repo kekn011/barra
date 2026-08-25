@@ -1,0 +1,6 @@
+# fetch-devtools.ps1-Ausgabe (regenerierbar, u.a. frida-server 53 MB) - nicht committen
+third-party/
+# Pack-Zwischenstand
+stage/
+**/__pycache__/
+barra-dev-kit.tar.gz

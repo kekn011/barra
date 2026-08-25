@@ -854,6 +854,17 @@ function Run-KitsInner(){
         # KEIN Auto-Start (Kevin): Start manuell via 'imgserver.sh start'
         Ok (T 'core.kit.ok' $name)
       }
+      elseif ($k -eq 'dev') {
+        # Dev-Kit (Kernel-Werkbank): dev -> /data/adb/baseos/dev, base -> bin, Hook -> service.d.
+        # KEIN Auto-Start, KEIN Auto-Dev-Mode (opt-in): 'barra-dev-mode.sh on' (ueberdauert dann Reboot).
+        $name = T 'core.kit.dev_name'
+        Pkg (T 'core.kit.push' $name)
+        KitPush (Join-Path $script:Kit 'dev-kit\barra-dev-kit.tar.gz') '/data/local/tmp/barra-dev-kit.tar.gz' $name
+        Pkg (T 'core.kit.extract' $name)
+        $r = AdbSuBg ($KitDiag + 'D=/data/adb/baseos; i=0; while [ $i -lt 60 ]; do mkdir -p $D/dev && touch $D/dev/.wt && rm -f $D/dev/.wt && break; [ $i = 0 ] && kdiag erst; [ $((i%12)) = 11 ] && kdiag lauf; sleep 5; i=$((i+1)); done; mkdir -p $D/dev && touch $D/dev/.wt && rm -f $D/dev/.wt || kdiag final; cd /data/local/tmp && rm -rf barra-dev && mkdir barra-dev && cd barra-dev && tar -xzf ../barra-dev-kit.tar.gz && cp -a dev/. $D/dev/ && chmod -R 755 $D/dev && cp base/barra-dev-mode.sh base/devdeploy.sh $D/bin/ && chmod 755 $D/bin/barra-dev-mode.sh $D/bin/devdeploy.sh && cp service.d/55-barra-dev.sh /data/adb/service.d/55-barra-dev.sh && chmod 755 /data/adb/service.d/55-barra-dev.sh && cd /data/local/tmp && rm -rf barra-dev barra-dev-kit.tar.gz') 900 (T 'core.kit.extract' $name)
+        if (-not $r.ok) { throw (T 'core.kit.fail' "$name (tar rc=$($r.rc)): $($r.log)") }
+        Ok (T 'core.kit.ok' $name)
+      }
     }
     if ($bothKits) { Pkg (T 'core.kit.both_note') 'ok' } else { Pkg (T 'core.kit.all_ok') 'ok' }
 }

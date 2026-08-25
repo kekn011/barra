@@ -140,6 +140,13 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
                 <TextBlock x:Name="FactImg" Style="{StaticResource Hint}" Margin="26,6,0,0"/>
               </StackPanel>
             </Border>
+            <Border x:Name="CardDev" Background="#0E1116" BorderBrush="#262A33" BorderThickness="1" CornerRadius="12" Padding="18,14" Margin="0,0,0,12">
+              <StackPanel>
+                <CheckBox x:Name="ChkDev" Foreground="#F0F2F6" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock x:Name="DescDev" Margin="26,6,0,0" TextWrapping="Wrap" FontSize="13"/>
+                <TextBlock x:Name="FactDev" Style="{StaticResource Hint}" Margin="26,6,0,0"/>
+              </StackPanel>
+            </Border>
             <TextBlock x:Name="PkCoexWarn" Foreground="#FFB020" TextWrapping="Wrap" FontSize="13" Margin="0,2,0,0" Visibility="Collapsed"/>
           </StackPanel>
         </ScrollViewer>
@@ -235,6 +242,7 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
             <CheckBox x:Name="PkgTts" Margin="0,6,0,0" Foreground="#C9CFD8"/>
             <CheckBox x:Name="PkgWake" Margin="0,6,0,0" Foreground="#C9CFD8"/>
             <CheckBox x:Name="PkgImg" Margin="0,6,0,0" Foreground="#C9CFD8"/>
+            <CheckBox x:Name="PkgDev" Margin="0,6,0,0" Foreground="#C9CFD8"/>
             <DockPanel Margin="0,12,0,0" LastChildFill="True">
               <Button x:Name="BtnPkg" Content="" DockPanel.Dock="Left" Padding="14,7"/>
               <TextBlock x:Name="PkgStatus" Text="" VerticalAlignment="Center" Margin="14,0,0,0" TextWrapping="Wrap" Foreground="#8B939F"/>
@@ -248,7 +256,7 @@ Initialize-BarraI18n -Dir (Join-Path $Kit 'i18n') -Lang $script:lang
 </Window>
 "@
 $W = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
-$ui=@{}; foreach ($n in 'Logo','GrpAccess','GrpNet','GrpOp','SsidHint','HostHint','DispHint','Sub','Pager','FLang','Page1','Page2','Page3','P1Title','P1Intro','LUser','LPass','LPass2','LHost','LTz','LSsid','LPsk','LChg','LTo','LChgHint','LDisp','LKey','FUser','FPass','FPass2','FHost','FTz','FSsid','BtnWifi','FPsk','FKey','FKeyHint','FChgS','FChgE','FDisp','FErr','BtnNext1','BtnUnflash','Steps','StepTitle','StateBox','StateDot','StateText','Prog','ProgText','FeedScroll','Feed','ActionBox','ActionText','BtnYes','BtnNo','BtnStart','BtnLog','BtnBack','Status','LogBox','Log','DoneTitle','DoneSub','DoneCmd','BtnCopy','DoneHint','BtnAgain','BtnClose','PkgPanel','PkgTitle','PkgIntro','PkgLlm','PkgStt','PkgPya','PkgTts','PkgWake','PkgImg','BtnPkg','PkgStatus','PagePkg','PkTitle','PkIntro','CardLlm','ChkLlm','DescLlm','FactLlm','CardStt','ChkStt','DescStt','FactStt','CardPya','ChkPya','DescPya','FactPya','CardTts','ChkTts','DescTts','FactTts','CardWake','ChkWake','DescWake','FactWake','CardImg','ChkImg','DescImg','FactImg','PkCoexWarn','BtnPkgBack','BtnPkgNext','PageModel','MTitle','MIntro','MList','BtnMBack','BtnMNext','SvPkg') { $ui[$n]=$W.FindName($n) }
+$ui=@{}; foreach ($n in 'Logo','GrpAccess','GrpNet','GrpOp','SsidHint','HostHint','DispHint','Sub','Pager','FLang','Page1','Page2','Page3','P1Title','P1Intro','LUser','LPass','LPass2','LHost','LTz','LSsid','LPsk','LChg','LTo','LChgHint','LDisp','LKey','FUser','FPass','FPass2','FHost','FTz','FSsid','BtnWifi','FPsk','FKey','FKeyHint','FChgS','FChgE','FDisp','FErr','BtnNext1','BtnUnflash','Steps','StepTitle','StateBox','StateDot','StateText','Prog','ProgText','FeedScroll','Feed','ActionBox','ActionText','BtnYes','BtnNo','BtnStart','BtnLog','BtnBack','Status','LogBox','Log','DoneTitle','DoneSub','DoneCmd','BtnCopy','DoneHint','BtnAgain','BtnClose','PkgPanel','PkgTitle','PkgIntro','PkgLlm','PkgStt','PkgPya','PkgTts','PkgWake','PkgImg','PkgDev','BtnPkg','PkgStatus','PagePkg','PkTitle','PkIntro','CardLlm','ChkLlm','DescLlm','FactLlm','CardStt','ChkStt','DescStt','FactStt','CardPya','ChkPya','DescPya','FactPya','CardTts','ChkTts','DescTts','FactTts','CardWake','ChkWake','DescWake','FactWake','CardImg','ChkImg','DescImg','FactImg','CardDev','ChkDev','DescDev','FactDev','PkCoexWarn','BtnPkgBack','BtnPkgNext','PageModel','MTitle','MIntro','MList','BtnMBack','BtnMNext','SvPkg') { $ui[$n]=$W.FindName($n) }
 
 # Logo (barra-setup\logo.png) in Header + Fenster-Icon — fehlt die Datei, bleibt nur die Wortmarke
 $logoFile = Join-Path $Kit 'logo.png'
@@ -274,7 +282,7 @@ function Apply-UiLang {
   $ui.BtnStart.Content=T 'setup.p2.start'; $ui.BtnLog.Content=T 'setup.p2.details_closed'; $ui.BtnBack.Content=T 'setup.p2.back'
   $ui.DoneTitle.Text=T 'setup.p3.done'; $ui.BtnCopy.Content=T 'setup.p3.copy'; $ui.BtnAgain.Content=T 'setup.p3.again'; $ui.BtnClose.Content=T 'setup.p3.close'
   $ui.PkgTitle.Text=(T 'setup.p3.pkg_title').ToUpper(); $ui.PkgIntro.Text=T 'setup.p3.pkg_intro'
-  $ui.PkgLlm.Content=T 'setup.p3.pkg_llm'; $ui.PkgStt.Content=T 'setup.p3.pkg_stt'; $ui.PkgPya.Content=T 'setup.p3.pkg_pya'; $ui.PkgTts.Content=T 'setup.p3.pkg_tts'; $ui.PkgWake.Content=T 'setup.p3.pkg_wake'; $ui.PkgImg.Content=T 'setup.p3.pkg_img'; $ui.BtnPkg.Content=T 'setup.p3.pkg_btn'
+  $ui.PkgLlm.Content=T 'setup.p3.pkg_llm'; $ui.PkgStt.Content=T 'setup.p3.pkg_stt'; $ui.PkgPya.Content=T 'setup.p3.pkg_pya'; $ui.PkgTts.Content=T 'setup.p3.pkg_tts'; $ui.PkgWake.Content=T 'setup.p3.pkg_wake'; $ui.PkgImg.Content=T 'setup.p3.pkg_img'; $ui.PkgDev.Content=T 'setup.p3.pkg_dev'; $ui.BtnPkg.Content=T 'setup.p3.pkg_btn'
   # Pakete-Bildschirm (Seite 1b) + Modellwahl (Seite 1c)
   $ui.PkTitle.Text=T 'setup.pkg.title'; $ui.PkIntro.Text=T 'setup.pkg.intro'
   $ui.ChkLlm.Content=T 'setup.pkg.llm_name'; $ui.DescLlm.Text=T 'setup.pkg.llm_desc'; $ui.FactLlm.Text=T 'setup.pkg.llm_fact'
@@ -283,6 +291,7 @@ function Apply-UiLang {
   $ui.ChkTts.Content=T 'setup.pkg.tts_name'; $ui.DescTts.Text=T 'setup.pkg.tts_desc'; $ui.FactTts.Text=T 'setup.pkg.tts_fact'
   $ui.ChkWake.Content=T 'setup.pkg.wake_name'; $ui.DescWake.Text=T 'setup.pkg.wake_desc'; $ui.FactWake.Text=T 'setup.pkg.wake_fact'
   $ui.ChkImg.Content=T 'setup.pkg.img_name'; $ui.DescImg.Text=T 'setup.pkg.img_desc'; $ui.FactImg.Text=T 'setup.pkg.img_fact'
+  $ui.ChkDev.Content=T 'setup.pkg.dev_name'; $ui.DescDev.Text=T 'setup.pkg.dev_desc'; $ui.FactDev.Text=T 'setup.pkg.dev_fact'
   $ui.PkCoexWarn.Text=T 'setup.pkg.coex_warn'
   $ui.BtnPkgBack.Content=T 'setup.p2.back'; $ui.BtnPkgNext.Content=T 'setup.p1.next'
   $ui.MIntro.Text=T 'setup.model.intro'; $ui.BtnMBack.Content=T 'setup.p2.back'; $ui.BtnMNext.Content=T 'setup.p1.next'
@@ -482,6 +491,8 @@ $script:KitCatalog = @(
       @{ id='heybarra'; name={T 'setup.model.wake_heybarra'}; desc={T 'setup.model.wake_heybarra_desc'}; files=@('wake-kit\wake-kit.tar.gz') } ) }
   @{ id='img'; name={T 'setup.pkg.img_name'}; models=@(
       @{ id='dreamshaper-lcm'; name={T 'setup.model.img_lcm'}; desc={T 'setup.model.img_lcm_desc'}; files=@('img-kit\img-kit.tar.gz','img-kit\DreamShaper8_LCM.safetensors','img-kit\taesd.safetensors') } ) }
+  @{ id='dev'; name={T 'setup.pkg.dev_name'}; models=@(
+      @{ id='workbench'; name={T 'setup.model.dev_wb'}; desc={T 'setup.model.dev_wb_desc'}; files=@('dev-kit\barra-dev-kit.tar.gz') } ) }
 )
 function Get-KitModels($kitId){
   $k = $script:KitCatalog | Where-Object { $_.id -eq $kitId }
@@ -495,7 +506,7 @@ function Update-CoexWarn {
   $ui.PkCoexWarn.Visibility = if ($llm -and $other) { 'Visible' } else { 'Collapsed' }
 }
 function Init-Pkg-Screen {
-  foreach ($row in @(@('llm',$ui.CardLlm,$ui.ChkLlm),@('stt',$ui.CardStt,$ui.ChkStt),@('pya',$ui.CardPya,$ui.ChkPya),@('tts',$ui.CardTts,$ui.ChkTts),@('wake',$ui.CardWake,$ui.ChkWake),@('img',$ui.CardImg,$ui.ChkImg))) {
+  foreach ($row in @(@('llm',$ui.CardLlm,$ui.ChkLlm),@('stt',$ui.CardStt,$ui.ChkStt),@('pya',$ui.CardPya,$ui.ChkPya),@('tts',$ui.CardTts,$ui.ChkTts),@('wake',$ui.CardWake,$ui.ChkWake),@('img',$ui.CardImg,$ui.ChkImg),@('dev',$ui.CardDev,$ui.ChkDev))) {
     $have = [bool](Get-KitModels $row[0]).Count
     $row[1].Visibility = if ($have) { 'Visible' } else { 'Collapsed' }
     $row[2].IsEnabled = $have; if (-not $have) { $row[2].IsChecked = $false }
@@ -513,6 +524,7 @@ $ui.BtnPkgNext.Add_Click({
   if ($ui.ChkTts.IsEnabled -and $ui.ChkTts.IsChecked) { $sel+='tts' }
   if ($ui.ChkWake.IsEnabled -and $ui.ChkWake.IsChecked) { $sel+='wake' }
   if ($ui.ChkImg.IsEnabled -and $ui.ChkImg.IsChecked) { $sel+='img' }
+  if ($ui.ChkDev.IsEnabled -and $ui.ChkDev.IsChecked) { $sel+='dev' }
   $script:selKits=$sel; $script:kitModels=@{}
   if ($sel.Count) { $script:modelIdx=0; Show-Model-Screen } else { Enter-FlashPage @() }
 })
@@ -578,7 +590,7 @@ $timer.Add_Tick({
                 $ui.DoneTitle.Text=(T 'setup.p3.done_host' $d.host); $ui.DoneSub.Text=$(if($d.ip){ T 'setup.p3.reach' $d.ip }else{ T 'setup.p3.noip' }); $ui.DoneCmd.Text=$(if($d.ip){"ssh $($d.user)@$($d.ip)"}else{"ssh $($d.user)@<ip>"}); $ui.DoneHint.Text=T 'setup.p3.hint'; Show-Pkg-Panel $true; Show-Page 3 }
       'pkg'   { $ui.PkgStatus.Text=$d.text
                 $ui.PkgStatus.Foreground=$(if($d.state -eq 'ok'){'#34C759'}elseif($d.state -eq 'fail'){'#FF453A'}else{'#8B939F'})
-                if ($d.state -in 'ok','fail') { $ui.BtnPkg.IsEnabled=$true; $ui.PkgLlm.IsEnabled=$script:kitLlm; $ui.PkgStt.IsEnabled=$script:kitStt; $ui.PkgPya.IsEnabled=$script:kitPya; $ui.PkgTts.IsEnabled=$script:kitTts; $ui.PkgWake.IsEnabled=$script:kitWake; $ui.PkgImg.IsEnabled=$script:kitImg } }
+                if ($d.state -in 'ok','fail') { $ui.BtnPkg.IsEnabled=$true; $ui.PkgLlm.IsEnabled=$script:kitLlm; $ui.PkgStt.IsEnabled=$script:kitStt; $ui.PkgPya.IsEnabled=$script:kitPya; $ui.PkgTts.IsEnabled=$script:kitTts; $ui.PkgWake.IsEnabled=$script:kitWake; $ui.PkgImg.IsEnabled=$script:kitImg; $ui.PkgDev.IsEnabled=$script:kitDev } }
     }
     } catch { Write-LogFile "GUI-Fehler bei '$k': $_" }
   }
@@ -586,7 +598,7 @@ $timer.Add_Tick({
 })
 $timer.Start()
 # ---------- Pakete: Verfuegbarkeit + Fertig-Seiten-Panel (nachtraegliche Installation) ----------
-$script:kitLlm=$false; $script:kitStt=$false; $script:kitPya=$false; $script:kitTts=$false; $script:kitWake=$false; $script:kitImg=$false; $script:kitAvail=@()
+$script:kitLlm=$false; $script:kitStt=$false; $script:kitPya=$false; $script:kitTts=$false; $script:kitWake=$false; $script:kitImg=$false; $script:kitDev=$false; $script:kitAvail=@()
 function Detect-Kits {
   $script:kitLlm = [bool](Get-KitModels 'llm').Count
   $script:kitStt = [bool](Get-KitModels 'stt').Count
@@ -594,6 +606,7 @@ function Detect-Kits {
   $script:kitTts = [bool](Get-KitModels 'tts').Count
   $script:kitWake = [bool](Get-KitModels 'wake').Count
   $script:kitImg = [bool](Get-KitModels 'img').Count
+  $script:kitDev = [bool](Get-KitModels 'dev').Count
   $script:kitAvail = @(); foreach ($k in $script:KitCatalog) { if ((Get-KitModels $k.id).Count) { $script:kitAvail += $k.id } }
 }
 function Show-Pkg-Panel([bool]$keepStatus=$false) {
@@ -607,12 +620,13 @@ function Show-Pkg-Panel([bool]$keepStatus=$false) {
   $ui.PkgTts.IsEnabled=$script:kitTts; $ui.PkgTts.IsChecked=$script:kitTts
   $ui.PkgWake.IsEnabled=$script:kitWake; $ui.PkgWake.IsChecked=$script:kitWake
   $ui.PkgImg.IsEnabled=$script:kitImg; $ui.PkgImg.IsChecked=$script:kitImg
+  $ui.PkgDev.IsEnabled=$script:kitDev; $ui.PkgDev.IsChecked=$script:kitDev
 }
 $ui.BtnPkg.Add_Click({
   if ($sync.running) { return }
-  $sel=@(); if ($ui.PkgLlm.IsChecked) { $sel+='llm' }; if ($ui.PkgStt.IsChecked) { $sel+='stt' }; if ($ui.PkgPya.IsChecked) { $sel+='pya' }; if ($ui.PkgTts.IsChecked) { $sel+='tts' }; if ($ui.PkgWake.IsChecked) { $sel+='wake' }; if ($ui.PkgImg.IsChecked) { $sel+='img' }
+  $sel=@(); if ($ui.PkgLlm.IsChecked) { $sel+='llm' }; if ($ui.PkgStt.IsChecked) { $sel+='stt' }; if ($ui.PkgPya.IsChecked) { $sel+='pya' }; if ($ui.PkgTts.IsChecked) { $sel+='tts' }; if ($ui.PkgWake.IsChecked) { $sel+='wake' }; if ($ui.PkgImg.IsChecked) { $sel+='img' }; if ($ui.PkgDev.IsChecked) { $sel+='dev' }
   if (-not $sel.Count) { $ui.PkgStatus.Text=T 'setup.p3.pkg_pick'; return }
-  $ui.BtnPkg.IsEnabled=$false; $ui.PkgLlm.IsEnabled=$false; $ui.PkgStt.IsEnabled=$false; $ui.PkgPya.IsEnabled=$false; $ui.PkgTts.IsEnabled=$false; $ui.PkgWake.IsEnabled=$false; $ui.PkgImg.IsEnabled=$false
+  $ui.BtnPkg.IsEnabled=$false; $ui.PkgLlm.IsEnabled=$false; $ui.PkgStt.IsEnabled=$false; $ui.PkgPya.IsEnabled=$false; $ui.PkgTts.IsEnabled=$false; $ui.PkgWake.IsEnabled=$false; $ui.PkgImg.IsEnabled=$false; $ui.PkgDev.IsEnabled=$false
   $ui.PkgStatus.Foreground='#8B939F'; $ui.PkgStatus.Text=T 'setup.p3.pkg_starting'
   $cfg = if ($script:precfg) { $script:precfg } else { [ordered]@{} }
   $cfg.KITS = $sel
