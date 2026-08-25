@@ -63,7 +63,7 @@ echo "adb-Teile: $(du -sm $A | cut -f1) MB (llm $(du -sm $A/baseos/llm 2>/dev/nu
 echo "== Kontrolle =="
 grep -rl 'WIFI_PSK\|psk=' $A 2>/dev/null | head -3 || true
 echo "Kit-Reste (muss ueberall 0 sein): dev=$(ls -d $A/baseos/dev 2>/dev/null | wc -l) frida=$(find $A -name 'frida*' 2>/dev/null | wc -l) kitserver=$(ls $A/baseos/bin/pyaserver.sh $A/baseos/bin/ttsserver.sh $A/baseos/bin/wakeserver.sh $A/baseos/bin/imgserver.sh 2>/dev/null | wc -l) devhook=$(ls $A/service.d/55-barra-dev.sh 2>/dev/null | wc -l) opt=$(ls -d $R/opt/barra-tts $R/opt/barra-wake $R/opt/barra-pya 2>/dev/null | wc -l)"
-echo "host-keys: $(ls $R/etc/ssh/ssh_host_* 2>/dev/null | wc -l)  machine-id: $(wc -c < $R/etc/machine-id)  firstboot: $(ls $R/etc/barra-firstboot.pending)  user: $(awk -F: '$3==1001{print $1\":\"$6}' $R/etc/passwd)  gguf: $(find $R -name '*.gguf' | wc -l)"
+echo "host-keys: $(ls $R/etc/ssh/ssh_host_* 2>/dev/null | wc -l)  machine-id: $(wc -c < $R/etc/machine-id)  firstboot: $(ls $R/etc/barra-firstboot.pending)  user: $(awk -F: '$3==1001{print $1":"$6}' $R/etc/passwd)  gguf: $(find $R -name '*.gguf' | wc -l)"
 echo "== packen =="
 rm -f $OUT; cd $B && tar -czf $OUT ubuntu adb
 sha256sum $OUT | tee $OUT.sha256; ls -la $OUT
