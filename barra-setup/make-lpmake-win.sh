@@ -76,7 +76,7 @@ case "$OSTYPE" in
   ;;
 esac
 
-if [ -z "$OS"];then
+if [ -z "$OS" ];then
   case "$HOSTTYPE" in
     arm)
       src="linux-arm/crypto/chacha/chacha-armv4.S \

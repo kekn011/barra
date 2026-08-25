@@ -26,7 +26,8 @@ int main(int argc,char**argv){
 
   FILE* f=fopen(spv,"rb"); if(!f){ printf("kann SPIR-V nicht oeffnen: %s\n",spv); return 1; }
   fseek(f,0,SEEK_END); long slen=ftell(f); fseek(f,0,SEEK_SET);
-  void* spirv=malloc(slen); if(fread(spirv,1,slen,f)!=(size_t)slen){fclose(f);return 1;} fclose(f);
+  if(slen<=0){ printf("SPIR-V leer/ungueltig\n"); fclose(f); return 1; }
+  void* spirv=malloc(slen); if(!spirv||fread(spirv,1,slen,f)!=(size_t)slen){free(spirv);fclose(f);return 1;} fclose(f);
 
   long bytes=(long)N*4;
   float *A=malloc(bytes),*B=malloc(bytes),*C=malloc(bytes);

@@ -1,3 +1,10 @@
+// WARNUNG (Stand Review 2026-08-25): DIESER .inc IST VERALTET und divergiert vom gebauten
+// ggml-barra.cpp. run_dn hier memset/indiziert eine volle B*FF-Kachel in zi_ff und liest B*D
+// aus zo_d, waehrend das aktuelle ggml-barra.cpp diese dmabufs nur mit Bd*FF / Bd*D allokiert
+// (Meta-Feld 9, Bd<=B). Ein erneutes Einspielen via patch_split*.py OHNE Anpassung an Bd
+// erzeugt Out-of-bounds-Zugriffe, sobald Bd<B. NICHT blind re-applyen — gebautes Artefakt ist
+// ggml-barra.cpp (CMakeLists); diesen .inc + patch_split*.py entweder loeschen oder aus dem
+// aktuellen cpp neu generieren, damit beide nicht auseinanderlaufen.
 // ---- M4 v2 "split": FFN als drei int8-Matmul-Packages @B (64er-Kacheln): gate/up: h -> [B,FF]; CPU: a = silu(g)*u
 // (float); down: a -> [B,D]. Aktivierungszeilen werden per Zeile auf max|x| = QMAX (127) normiert (kein Saturieren, exakt
 // fuer lineare Ops), Ergebnis zeilenweise zurueckskaliert. Ausgangsskala der Packages optional feiner kalibriert

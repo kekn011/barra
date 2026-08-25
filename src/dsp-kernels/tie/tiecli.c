@@ -25,8 +25,11 @@ int main(int argc,char**argv){
   uint32_t st; if(rd(fd,&st,4)){fprintf(stderr,"no resp\n");return 1;}
   printf("status=%u\n",st);
   if(st==0){
-    int64_t rv; uint32_t us,osz; rd(fd,&rv,8); rd(fd,&us,4); rd(fd,&osz,4);
-    uint8_t*out=malloc(osz); rd(fd,out,osz);
+    int64_t rv=0; uint32_t us=0,osz=0;
+    if(rd(fd,&rv,8)||rd(fd,&us,4)||rd(fd,&osz,4)){ fprintf(stderr,"Antwort unvollstaendig\n"); return 1; }
+    if(osz>4096) osz=4096;
+    uint8_t*out=malloc(osz?osz:1); if(!out) return 1;
+    if(rd(fd,out,osz)){ free(out); fprintf(stderr,"out unvollstaendig\n"); return 1; }
     printf("rv=%lld exec_us=%u out_size=%u\n",(long long)rv,us,osz);
     printf("in : "); for(int i=0;i<nv;i++) printf("%d ",in[i]); printf("\n");
     printf("out: "); for(uint32_t i=0;i+4<=osz;i+=4){int32_t v;memcpy(&v,out+i,4);printf("%d ",v);} printf("\n");

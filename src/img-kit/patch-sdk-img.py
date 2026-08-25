@@ -113,9 +113,6 @@ EN = {
  'setup.p3.pkg_img': 'Image generator — Stable Diffusion 1.5 DreamShaper LCM on the GPU (2.2 GB)',
  'core.kit.img_name': 'Image generator',
 }
-ALL_OK = {'de': (', Weckwort wakeserver.sh start.', ', Weckwort wakeserver.sh start, Bildgenerator imgserver.sh start (Port 8096).'),
-          'en': None}
-BOTH = {'de': (' wakeserver.sh start (Weckwort).', ' wakeserver.sh start (Weckwort), imgserver.sh start (Bildgenerator).'), 'en': None}
 for lang, KV in (('de', DE), ('en', EN)):
     for sub in (r'barra-setup\i18n',):
         P = os.path.join(R, sub, lang + '.properties')

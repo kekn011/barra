@@ -6,6 +6,11 @@ f=/etc/barra-rename
 [ -f "$f" ] || exit 0
 read -r old new _ < "$f"
 [ -n "$old" ] && [ -n "$new" ] || { rm -f "$f"; exit 0; }
+# Namen streng validieren (nur POSIX-Benutzernamen) — sie fliessen u.a. unescaped in ein
+# sed-Muster ueber /etc/sudoers.d; Sonderzeichen koennten das sed sonst manipulieren.
+case "$old$new" in *[!a-z0-9_-]*) logger -t barra-userrename "ungueltige Namen: $old/$new"; rm -f "$f"; exit 0;; esac
+case "$old" in [a-z]*) ;; *) rm -f "$f"; exit 0;; esac
+case "$new" in [a-z]*) ;; *) rm -f "$f"; exit 0;; esac
 id "$old" >/dev/null 2>&1 || { rm -f "$f"; exit 0; }
 id "$new" >/dev/null 2>&1 && { rm -f "$f"; exit 0; }
 if pgrep -u "$old" >/dev/null 2>&1; then

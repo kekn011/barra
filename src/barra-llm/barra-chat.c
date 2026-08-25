@@ -79,7 +79,8 @@ int main(int argc,char**argv){
     int bl=snprintf(body,blen,"{\"messages\":[%s],\"stream\":true,\"cache_prompt\":true,\"temperature\":0.7}",g_hist);
     char req[512];
     int rl=snprintf(req,sizeof req,
-      "POST /v1/chat/completions HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",host,bl);
+      /* HTTP/1.0 erzwingt identity-Encoding (kein chunked) - der Parser unten dechunkt nicht. */
+      "POST /v1/chat/completions HTTP/1.0\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",host,bl);
     int fd=dial(host,port);
     if(fd<0){ printf("\033[31m[Server nicht erreichbar]\033[0m\n\n"); free(body); continue; }
     writen(fd,req,rl); writen(fd,body,bl); free(body);

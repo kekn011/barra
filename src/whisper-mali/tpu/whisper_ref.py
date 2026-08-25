@@ -26,10 +26,14 @@ def parse_ggml(path):
         name = f.read(name_len).decode()
         shape = tuple(reversed(dims))          # ne[0] = innerste Achse
         n = int(np.prod(shape))
-        if ttype == 1:
+        if ttype == 0:
+            data = np.frombuffer(f.read(4*n), dtype=np.float32).copy()
+        elif ttype == 1:
             data = np.frombuffer(f.read(2*n), dtype=np.float16).astype(np.float32)
         else:
-            data = np.frombuffer(f.read(4*n), dtype=np.float32).copy()
+            # Quantisierte ggml-Typen (>=2) haben ein anderes Byte-Layout; der else-Zweig
+            # las sie frueher still als f32 (falsche Groesse/Interpretation).
+            raise ValueError("whisper_ref: Tensor '%s' hat nicht unterstuetzten ggml-Typ %d (nur f32/f16)" % (name, ttype))
         a = data.reshape(shape)
         if 1 in shape: a = np.squeeze(a)   # Biases liegen mit 1er-Achse im File
         tensors[name] = a

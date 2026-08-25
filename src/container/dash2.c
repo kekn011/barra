@@ -203,13 +203,14 @@ int main(int argc,char**argv){
    * erst freigeben (dispctl/fw-quiet stoppt sie). Bis zu ~4s darauf warten. */
   { int t; for(t=0;t<20;t++){ if(ioctl(DFD,DRM_IOCTL_SET_MASTER,0)==0) break; usleep(200000); }
     fprintf(stderr,"dash2: SET_MASTER nach %d Versuchen\n",t+1); }
-  struct drm_mode_card_res res; memset(&res,0,sizeof res); ioctl(DFD,DRM_IOCTL_MODE_GETRESOURCES,&res);
+  struct drm_mode_card_res res; memset(&res,0,sizeof res);
+  if(ioctl(DFD,DRM_IOCTL_MODE_GETRESOURCES,&res)<0){ fprintf(stderr,"dash2: DRM GETRESOURCES (Zaehlung) fehlgeschlagen\n"); return 1; }
   uint32_t cn[32],cr[32],en[32],fb_[32];
   res.connector_id_ptr=(uint64_t)(uintptr_t)cn; res.count_connectors=res.count_connectors>32?32:res.count_connectors;
   res.crtc_id_ptr=(uint64_t)(uintptr_t)cr; res.count_crtcs=res.count_crtcs>32?32:res.count_crtcs;
   res.encoder_id_ptr=(uint64_t)(uintptr_t)en; res.count_encoders=res.count_encoders>32?32:res.count_encoders;
   res.fb_id_ptr=(uint64_t)(uintptr_t)fb_; res.count_fbs=res.count_fbs>32?32:res.count_fbs;
-  ioctl(DFD,DRM_IOCTL_MODE_GETRESOURCES,&res);
+  if(ioctl(DFD,DRM_IOCTL_MODE_GETRESOURCES,&res)<0){ fprintf(stderr,"dash2: DRM GETRESOURCES fehlgeschlagen\n"); return 1; }
   struct drm_mode_modeinfo mode; int have=0; uint32_t enc=0;
   for(uint32_t i=0;i<res.count_connectors&&!have;i++){ struct drm_mode_get_connector c; memset(&c,0,sizeof c); c.connector_id=cn[i];
     if(ioctl(DFD,DRM_IOCTL_MODE_GETCONNECTOR,&c)<0)continue; if(!c.count_modes||c.connection!=1)continue;

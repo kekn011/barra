@@ -14,6 +14,17 @@ D = hp["n_audio_state"]; H = hp["n_audio_head"]; HD = D//H
 S = 1500; BQ = 375; nb = S//BQ; sc = HD**-0.25
 CORE_ISC = 0.0002111698704538867
 CORE_OSC = 0.00851402897387743
+# Diese Konstanten gehoeren zu EINEM bestimmten Build des geteilten Kern-Packages. Wird der
+# Kern neu generiert (whisper_core-Kalibrierung ist datenabhaengig), passen sie nicht mehr und
+# die Encoder-Kette degradiert ohne Fehler. Optional die .qparams.json des Kerns uebergeben.
+_qp = sys.argv[5] if len(sys.argv) > 5 else os.environ.get("CORE_QPARAMS")
+if _qp and os.path.exists(_qp):
+    _q = json.load(open(_qp))
+    CORE_ISC = float(_q.get("in_scale", _q.get("isc", CORE_ISC)))
+    CORE_OSC = float(_q.get("out_scale", _q.get("osc", CORE_OSC)))
+    print("CORE_ISC/OSC aus", _qp)
+else:
+    print("WARNUNG: CORE_ISC/OSC fest einkompiliert - bei neu generiertem Kern die .qparams.json via argv[5] oder $CORE_QPARAMS uebergeben", file=sys.stderr)
 ref = np.load(refnpz)
 rng = np.random.default_rng(11)
 

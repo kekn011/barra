@@ -37,6 +37,6 @@ install_(){
 case "${1:-build}" in
   build) build;;
   install) [ -f libbarra.a ] || build; install_;;
-  clean) rm -f *.o libbarra.a libbarra.so* barra_demo barra_zc_demo barra_zc2_test barra_tpu_zc_test barra.pc;;
+  clean) rm -f *.o libbarra.a libbarra.so* barra.pc barra_demo barra_zc_demo barra_zc2_test barra_tpu_zc_test barra_tpu_raw barra_tpu_zcbench barra_dsp_zc_test;;
   *) echo "usage: $0 [build|install|clean]"; exit 1;;
 esac

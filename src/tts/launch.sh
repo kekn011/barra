@@ -14,10 +14,15 @@ export TTS_SHERPA=$K/sherpa/sherpa-onnx-offline-tts
 export TTS_AUDIO_SOCK=/opt/hwbridge/audio.sock
 export TTS_PORT=${TTS_PORT:-8095}
 mkdir -p /run/barra-tts 2>/dev/null || true
-# GPU-Vokoder-Daemon (nur David braucht ihn; startet auch ohne, Piper geht dann trotzdem)
+# GPU-Vokoder-Daemon (nur David braucht ihn; startet auch ohne, Piper geht dann trotzdem).
+# Mini-Supervisor: startet gpudecd bei Absturz neu, sonst faellt die David-Stimme still aus.
 if ! pgrep -f "gpudecd /run/barra-tts/gpudec.sock" >/dev/null; then
-  $K/bin/gpudecd /run/barra-tts/gpudec.sock \
-    $K/voices/david/gpukit2/program2.json $K/voices/david/gpukit2 \
-    >/run/barra-tts/gpudecd.log 2>&1 &
+  ( while :; do
+      $K/bin/gpudecd /run/barra-tts/gpudec.sock \
+        $K/voices/david/gpukit2/program2.json $K/voices/david/gpukit2 \
+        >>/run/barra-tts/gpudecd.log 2>&1
+      echo "[launch] gpudecd beendet (rc=$?), Neustart in 2s" >>/run/barra-tts/gpudecd.log
+      sleep 2
+    done ) &
 fi
 exec python3.12 $K/bin/ttsd.py

@@ -15,7 +15,10 @@ static int wf(int fd,const void*b,long n){const char*p=b;while(n>0){long w=write
 int main(int argc,char**argv){
   if(argc<2){ fprintf(stderr,"usage: atone <sock> [freq=440] [sek=2]\n"); return 2; }
   const char* sock=argv[1]; double freq=argc>2?atof(argv[2]):440.0; double secs=argc>3?atof(argv[3]):2.0;
-  int c=socket(AF_UNIX,SOCK_STREAM,0);
+  if(!(freq>0.0&&freq<=20000.0)) freq=440.0;         /* unplausible Werte auf Default */
+  if(!(secs>0.0&&secs<=3600.0)) secs=2.0;
+  int c=socket(AF_UNIX,SOCK_STREAM,0); if(c<0){ perror("socket"); return 1; }
+  if(strlen(sock)>=sizeof(((struct sockaddr_un*)0)->sun_path)){ fprintf(stderr,"Socket-Pfad zu lang\n"); return 2; }
   struct sockaddr_un a; memset(&a,0,sizeof a); a.sun_family=AF_UNIX; strncpy(a.sun_path,sock,sizeof(a.sun_path)-1);
   if(connect(c,(struct sockaddr*)&a,sizeof a)<0){ printf("connect %s: %s\n",sock,strerror(errno)); return 1; }
   long total=(long)(RATE*secs);

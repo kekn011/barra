@@ -214,6 +214,7 @@ function PbShow($doneBytes,$label){
 }
 
 function FbFlash($part,$file,$label,$chunk=''){  # mit Fortschritts-Parsing (Sending sparse 'x' 3/16)
+  if (-not (Test-Path $file)) { Fail "Flash-Image fehlt: $file" }   # sauberer Fehler statt roher Get-Item-Exception
   # Windows-WinUSB bricht bei grossen Bulk-Transfers (Standard-Chunk ~256 MB) mit Fehler 31
   # ("AdbWriteEndpointSync failed") ab -> grosse Images mit kleineren Sparse-Chunks senden (-S 64M).
   # Bei Fehler 31 automatisch einmal mit noch kleineren Chunks (32M) wiederholen.
@@ -420,9 +421,11 @@ function Flash-Stock(){
 
 function Step2_Stock(){
   Step 2 (T 'setup.steps.stock') 'run'
+  . (Join-Path $script:Kit 'stock-target.ps1')   # $StockBuild als Single Source of Truth (statt hartkodierter Build-ID)
+  $BID = $StockBuild.ToUpper()
   if ((AdbState) -eq 'device') {
     $bid=AdbSh 'getprop ro.build.id'
-    if ($bid -eq 'BP4A.260205.001') { Ok (T 'core.s2.already'); Step 2 (T 'setup.steps.stock') 'ok'; return }
+    if ($bid -eq $BID) { Ok (T 'core.s2.already'); Step 2 (T 'setup.steps.stock') 'ok'; return }
     Info (T 'core.s2.replace' $bid); [void](AdbOut 'reboot bootloader' 10); Start-Sleep 3
     if (-not (WaitFor 'bootloader' 120 (T 'core.fs.wait_bl'))) { Fail (T 'core.s1.bl_unreach') }
   }
@@ -435,7 +438,7 @@ function Step2_Stock(){
   Step 2 (T 'setup.steps.stock') 'wait_dev'
   if (-not (WaitFor 'device' 900 (T 'core.s2.wait_android'))) { Fail (T 'core.s2.no_adb') }
   $bid=AdbSh 'getprop ro.build.id'; $kv=AdbSh 'uname -r'
-  if ($bid -ne 'BP4A.260205.001') { Fail (T 'core.s2.unexpected' $bid) }
+  if ($bid -ne $BID) { Fail (T 'core.s2.unexpected' $bid) }
   Ok (T 'core.s2.ok' $kv); Step 2 (T 'setup.steps.stock') 'ok'
 }
 

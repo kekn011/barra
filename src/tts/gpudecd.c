@@ -38,7 +38,7 @@ static int up128(int x){ return (x+127)/128*128; }
 
 #define MAXSLOT 48
 static char snm[MAXSLOT][20]; static barra_zbuf sbuf[MAXSLOT]; static int sC[MAXSLOT],sT[MAXSLOT]; static long ssz[MAXSLOT]; static int nsl=0;
-static int slot(const char* n){ for(int i=0;i<nsl;i++) if(!strcmp(snm[i],n))return i; strncpy(snm[nsl],n,19); ssz[nsl]=0; sC[nsl]=sT[nsl]=0; return nsl++; }
+static int slot(const char* n){ for(int i=0;i<nsl;i++) if(!strcmp(snm[i],n))return i; if(nsl>=MAXSLOT){ fprintf(stderr,"[gpudecd] zu viele Puffer-Slots (>%d)\n",MAXSLOT); exit(1); } strncpy(snm[nsl],n,19); snm[nsl][19]=0; ssz[nsl]=0; sC[nsl]=sT[nsl]=0; return nsl++; }
 
 #define POOL 30
 #define MAXPEND 30
@@ -90,6 +90,7 @@ static float* process(const float* zf,int T,int* out_n){
       char sn[20],dn[20],rn[20]; js(os,oe,"src",sn,20); js(os,oe,"dst",dn,20); js(os,oe,"res",rn,20);
       int Cin=ji(os,oe,"Cin"),Kk=ji(os,oe,"K"),dil=ji(os,oe,"dil"),pad=ji(os,oe,"pad"),leaky=ji(os,oe,"leaky"),Cout=ji(os,oe,"Cout");
       int Mp=ji(os,oe,"Mp"),Kg=ji(os,oe,"Kg"),woff=ji(os,oe,"woff"),boff=ji(os,oe,"boff"),tanhf_=ji(os,oe,"tanh"),outpad=ji(os,oe,"outpad"),tm=ji(os,oe,"tm");
+      if(tm<=0){ fprintf(stderr,"[gpudecd] conv: 'tm' fehlt/0 (Division) - Programm ungueltig\n"); *out_n=0; return 0; }
       int si=slot(sn); int Tin=sT[si]; int Tout=Tin+outpad; int Np=up128(Tout);
       int di=slot(dn); sC[di]=Cout; sT[di]=Tout;
       int hasres = rn[0]!=0; int ri = hasres?slot(rn):sz;

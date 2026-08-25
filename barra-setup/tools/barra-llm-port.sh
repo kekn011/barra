@@ -15,7 +15,7 @@ GGUF="$1"
 [ -f "$GGUF" ] || { echo "Nutzung: barra-llm-port.sh <modell.gguf>"; exit 1; }
 NAME=$(basename "$GGUF" .gguf)
 SRC="$(cd "$(dirname "$0")" && pwd)"
-WORK=${BARRA_PORT_WORK:-/mnt/c/Users/kevin/projects/pixel-cluster-base/tpu-toolchain/port/$NAME}
+WORK=${BARRA_PORT_WORK:-$HOME/barra-port/$NAME}   # nicht mehr maschinenspezifisch; via $BARRA_PORT_WORK ueberschreibbar
 mkdir -p "$WORK/cal" "$WORK/pkg"
 WINADB="/mnt/c/Users/kevin/AppData/Local/Microsoft/WinGet/Packages/Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe/platform-tools/adb.exe"
 ADB=${ADB:-$(command -v adb.exe >/dev/null 2>&1 && echo adb.exe || { [ -x "$WINADB" ] && echo "$WINADB" || echo adb; })}
@@ -59,6 +59,7 @@ $ADB push "$(apath "$WORK/pkg")/." /data/local/tmp/port-$NAME/
 cat > "$WORK/comp.sh" <<EOF
 #!/system/bin/sh
 setenforce 0 2>/dev/null
+trap 'setenforce 1 2>/dev/null' EXIT   # SELinux auch bei Fehlerabbruch wieder enforcing setzen
 T=/data/local/tmp; A=\$T/port-$NAME
 cp /data/adb/baseos/tpu/tpuc1 \$T/tpuc1 2>/dev/null; cp /data/adb/baseos/tpu/libcomp_std.so \$T/libcomp_std.so 2>/dev/null
 chmod 755 \$T/tpuc1
