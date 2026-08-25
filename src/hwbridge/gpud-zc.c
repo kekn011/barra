@@ -102,20 +102,30 @@ static int wfull(int fd,const void*b,long n){const char*p=b;while(n>0){ssize_t r
 
 /* Pipeline-Cache: Shader-Compile + Pipeline-Erstellung dominieren die Latenz.
  * Cache nach SPIR-V-Inhalt (+nbuf). */
-typedef struct { int used; uint64_t hash; uint32_t slen,nbuf;
+typedef struct { int used; int pin; uint64_t hash; uint32_t slen,nbuf;
   VkShaderModule shader; VkDescriptorSetLayout dsl; VkPipelineLayout pll; VkPipeline pipe; } PCacheEnt;
 #define PCACHE 16
 static PCacheEnt g_pc[PCACHE];
 static uint32_t g_pc_next=0;
 static long g_pc_hits=0, g_pc_miss=0;
+/* Alle in EINEM Dispatch referenzierten Eintraege werden gepinnt, damit die
+ * Round-Robin-Eviction sie nicht zerstoert, waehrend spaetere Stufen ihre
+ * PCacheEnt*-Zeiger noch halten (MAXSTAGE=32 > PCACHE=16). Nach run_stages
+ * (noch unter g_vk) alle wieder entpinnen. */
+static void unpin_all(void){ for(int i=0;i<PCACHE;i++) g_pc[i].pin=0; }
 static uint64_t fnv1a(const void* p, uint32_t n){ const unsigned char* b=p; uint64_t h=1469598103934665603ULL;
   for(uint32_t i=0;i<n;i++){ h^=b[i]; h*=1099511628211ULL; } return h; }
 static PCacheEnt* get_pipe(const uint32_t* spirv, uint32_t slen, uint32_t nbuf){
   uint64_t h=fnv1a(spirv,slen);
-  for(int i=0;i<PCACHE;i++) if(g_pc[i].used&&g_pc[i].hash==h&&g_pc[i].slen==slen&&g_pc[i].nbuf==nbuf){ g_pc_hits++; return &g_pc[i]; }
+  for(int i=0;i<PCACHE;i++) if(g_pc[i].used&&g_pc[i].hash==h&&g_pc[i].slen==slen&&g_pc[i].nbuf==nbuf){ g_pc_hits++; g_pc[i].pin=1; return &g_pc[i]; }
   g_pc_miss++;
   int idx=-1; for(int i=0;i<PCACHE;i++) if(!g_pc[i].used){ idx=i; break; }
-  if(idx<0){ idx=g_pc_next; g_pc_next=(g_pc_next+1)%PCACHE; PCacheEnt* e=&g_pc[idx];
+  if(idx<0){
+    /* freien Opfer-Slot suchen (Round-Robin), gepinnte Slots ueberspringen */
+    for(uint32_t t=0;t<PCACHE;t++){ uint32_t cand=(g_pc_next+t)%PCACHE; if(!g_pc[cand].pin){ idx=(int)cand; break; } }
+    if(idx<0){ LOG("[gpud-zc] pipeline-cache erschoepft: Dispatch referenziert mehr als %d distinkte Pipelines — abgelehnt\n",PCACHE); return 0; }
+    g_pc_next=((uint32_t)idx+1)%PCACHE;
+    PCacheEnt* e=&g_pc[idx];
     vkDeviceWaitIdle(dev);
     if(e->pipe)vkDestroyPipeline(dev,e->pipe,0); if(e->pll)vkDestroyPipelineLayout(dev,e->pll,0);
     if(e->dsl)vkDestroyDescriptorSetLayout(dev,e->dsl,0); if(e->shader)vkDestroyShaderModule(dev,e->shader,0);
@@ -132,7 +142,7 @@ static PCacheEnt* get_pipe(const uint32_t* spirv, uint32_t slen, uint32_t nbuf){
   VkComputePipelineCreateInfo cpci={.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
     .stage={.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,.stage=VK_SHADER_STAGE_COMPUTE_BIT,.module=e->shader,.pName="main"},.layout=e->pll};
   if(vkCreateComputePipelines(dev,VK_NULL_HANDLE,1,&cpci,0,&e->pipe)!=VK_SUCCESS){ vkDestroyPipelineLayout(dev,e->pll,0); vkDestroyDescriptorSetLayout(dev,e->dsl,0); vkDestroyShaderModule(dev,e->shader,0); return 0; }
-  e->used=1; e->hash=h; e->slen=slen; e->nbuf=nbuf;
+  e->used=1; e->pin=1; e->hash=h; e->slen=slen; e->nbuf=nbuf;
   return e;
 }
 
@@ -199,6 +209,7 @@ static void serve_v1(int c, uint32_t* hdr, int* fds, int nfd){
   for(uint32_t i=0;i<nbuf;i++) if(import_buf(fds[i],bsize[i],&st.buf[i],&mem[i])){ LOG("import buf %u fail\n",i); ok=0; break; }
   if(ok){ st.pc=get_pipe(spirv,spirv_len,nbuf); if(!st.pc) ok=0; }
   if(ok){ LOG("[gpud-zc] v1 req nbuf=%u cache hits=%ld miss=%ld\n",nbuf,g_pc_hits,g_pc_miss); if(run_stages(&st,1)==0) status=0; }
+  unpin_all();
   for(uint32_t i=0;i<nbuf;i++){ if(st.buf[i]) vkDestroyBuffer(dev,st.buf[i],0); if(mem[i]) vkFreeMemory(dev,mem[i],0); }
   VK_UNLOCK();
   wfull(c,&status,4);
@@ -240,6 +251,7 @@ static void serve_v2(int c, uint32_t* hdr, int* fds, int nfd){
       if(ok){ VK_LOCK();      /* erst alles gelesen, dann GPU-Arbeit unter dem Mutex */
         for(uint32_t s=0;s<nstage;s++){ st[s].pc=get_pipe(spv[s],slens[s],st[s].nbuf); if(!st[s].pc){ ok=0; break; } }
         if(ok&&run_stages(st,nstage)==0) status=0;
+        unpin_all();      /* in dieser Dispatch gepinnte Cache-Eintraege freigeben */
         VK_UNLOCK(); }
       ndisp++;
       if(ndisp<=3||ndisp%1000==0) LOG("[gpud-zc] v2 dispatch #%ld nstage=%u status=%u cache hits=%ld miss=%ld\n",ndisp,nstage,status,g_pc_hits,g_pc_miss);

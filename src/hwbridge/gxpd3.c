@@ -67,18 +67,25 @@ static fWait  GxpCapi_Request_Wait;    /* optional: auf Completion warten */
 static void *g_dev, *g_lib, *g_bopts, *g_es, *g_iopts, *g_iopts_c;   /* g_iopts=uncached, g_iopts_c=cacheable */
 
 // Kernel-Tabelle: Client-Name -> ELF-Datei (im KDIR)
+// min_in: kleinste zulaessige Puffergroesse in Bytes fuer das FESTE Zugriffsmuster
+// des Kernels (0 = unbekannt/keine Pruefung, z.B. Auto-Scan-Kernel).
 #define MAXKERN 64
-static struct kern { const char* name; const char* file; void* lib; void* fn; }
+static struct kern { const char* name; const char* file; void* lib; void* fn; uint32_t min_in; }
 g_kern[MAXKERN] = {
-  {"vscale",    "vscale.elf",     0,0},
-  {"vadd",      "ker_vadd.elf",   0,0},
-  {"dot",       "ker_dot.elf",    0,0},
-  {"matmul2x2", "ker_mm.elf",     0,0},
-  {"sum",       "ker_sumloop.elf",0,0},
-  {"softmul",   "ker_softmul2.elf",0,0},
-  {"argmax",    "ker_argmax.elf", 0,0},   /* greedy Token-Auswahl (LLM-Decoding), 16.8. */
+  {"vscale",    "vscale.elf",     0,0, 8},    /* N=buf[0] + >=1 Element */
+  {"vadd",      "ker_vadd.elf",   0,0, 32},   /* 2x [4]int32 */
+  {"dot",       "ker_dot.elf",    0,0, 32},   /* 2x [4]int32 */
+  {"matmul2x2", "ker_mm.elf",     0,0, 48},   /* schreibt out[8..11] = Offsets 32..47 */
+  {"sum",       "ker_sumloop.elf",0,0, 8},    /* count + >=1 Element */
+  {"softmul",   "ker_softmul2.elf",0,0, 12},  /* 2 floats + Ergebnis-Slot */
+  {"argmax",    "ker_argmax.elf", 0,0, 8},    /* greedy Token-Auswahl (LLM-Decoding), 16.8. */
 };
 static int NKERN = 7;   /* feste Eintraege; danach Auto-Scan ker_*.elf im KDIR */
+/* Mindest-Eingabegroesse eines benannten Kernels (0 = keine bekannte Anforderung) */
+static uint32_t kern_min_in(const char* name){
+  for(int i=0;i<NKERN;i++) if(g_kern[i].name && !strcmp(g_kern[i].name,name)) return g_kern[i].min_in;
+  return 0;
+}
 
 #include <dirent.h>
 /* Auto-Scan: jede ker_<name>.elf im Kernel-Verzeichnis wird als Kernel <name> angeboten
@@ -210,11 +217,13 @@ static int recv_with_fds(int c, void* buf, long n, int* fds, int* nfd){
   struct iovec iov={.iov_base=buf,.iov_len=n};
   struct msghdr msg={.msg_iov=&iov,.msg_iovlen=1,.msg_control=cbuf,.msg_controllen=sizeof cbuf};
   *nfd=0;
-  ssize_t r=recvmsg(c,&msg,MSG_WAITALL); if(r!=n) return -1;
+  ssize_t r=recvmsg(c,&msg,MSG_WAITALL);
   struct cmsghdr* cm=CMSG_FIRSTHDR(&msg);
   if(cm&&cm->cmsg_type==SCM_RIGHTS){ int k=(int)((cm->cmsg_len-CMSG_LEN(0))/sizeof(int));
-    if(k>ZC_MAXBUF){ for(int i=0;i<k;i++) close(((int*)CMSG_DATA(cm))[i]); return -1; }
+    /* fds sind bereits installiert — bei Kurzlesung ODER Überzahl trotzdem schließen (kein Leak) */
+    if(r!=n||k>ZC_MAXBUF){ for(int i=0;i<k;i++) close(((int*)CMSG_DATA(cm))[i]); return -1; }
     memcpy(fds,CMSG_DATA(cm),k*sizeof(int)); *nfd=k; }
+  else if(r!=n) return -1;
   return 0;
 }
 
@@ -226,6 +235,8 @@ static void serve_inline(int cfd){
   if(nlen==0||nlen>=MAXNAME||in_size==0||in_size>MAXIO){ uint32_t st=1; write_n(cfd,&st,4); return; }
   char name[MAXNAME]; memset(name,0,sizeof name);
   if(read_n(cfd,name,nlen)) return; name[nlen]=0;
+  { uint32_t mi=kern_min_in(name);   /* Puffer muss das feste Zugriffsmuster des Kernels abdecken */
+    if(mi && in_size<mi){ LOG("[gxpd3] '%s' in_size=%u < min %u — abgelehnt\n",name,in_size,mi); uint32_t st=1; write_n(cfd,&st,4); return; } }
   uint8_t* in=malloc(in_size); uint8_t* out=malloc(in_size);
   if(!in||!out){ free(in);free(out); uint32_t st=8; write_n(cfd,&st,4); return; }
   if(read_n(cfd,in,in_size)){ free(in);free(out); return; }
@@ -283,6 +294,7 @@ static void guard_device(int rc){
 static void serve_zc(int cfd, uint32_t* hdr, int* fds, int nfd){
   ZBufG h[ZC_MAXH]; memset(h,0,sizeof h); for(int i=0;i<ZC_MAXH;i++) h[i].fd=-1;
   void* inflight[ZC_INFLIGHT]; memset(inflight,0,sizeof inflight);   /* async: Token -> Request */
+  uint32_t inflight_h[ZC_INFLIGHT]; memset(inflight_h,0,sizeof inflight_h); /* Bitmaske der von jedem Job referenzierten Handles (ZC_MAXH<=32) */
   long nrun=0;
   for(;;){
     uint32_t cmd=hdr[1], status=1;
@@ -312,6 +324,8 @@ static void serve_zc(int cfd, uint32_t* hdr, int* fds, int nfd){
       void* fn=resolve_fn(name);
       int ok = (fn!=0);
       for(uint32_t i=0;ok&&i<nh;i++) if(hd[i]>=ZC_MAXH||!h[hd[i]].used) ok=0;
+      { uint32_t mi=kern_min_in(name);   /* referenzierter Puffer muss das feste Zugriffsmuster abdecken */
+        if(ok&&mi&&h[hd[0]].size<mi){ ok=0; LOG("[gxpd3] zc '%s' Puffer %u < min %u — abgelehnt\n",name,h[hd[0]].size,mi); } }
       if(ok){
         void* req=0; GxpCapi_CreateRequest(&req); GxpCapi_Request_SetFunction(req,fn);
         for(uint32_t i=0;i<nh;i++) GxpCapi_Request_AppendBuffer(req,h[hd[i]].buf);
@@ -327,7 +341,16 @@ static void serve_zc(int cfd, uint32_t* hdr, int* fds, int nfd){
     } else if(cmd==3){                                 /* RELEASE */
       uint32_t nbuf=hdr[2], hd[ZC_MAXBUF];
       if(nbuf==0||nbuf>ZC_MAXBUF||read_n(cfd,hd,nbuf*4)){ write_n(cfd,&status,4); goto next; }
-      for(uint32_t i=0;i<nbuf;i++) if(hd[i]<ZC_MAXH) zc_release(&h[hd[i]]);
+      for(uint32_t i=0;i<nbuf;i++) if(hd[i]<ZC_MAXH){
+        /* UAF verhindern: jeden noch laufenden Async-Job, der diesen Handle nutzt,
+         * erst abwarten, bevor Unmap/Release/close den Puffer wegzieht. */
+        for(int s=0;s<ZC_INFLIGHT;s++) if(inflight[s] && (inflight_h[s]&(1u<<hd[i]))){
+          if(GxpCapi_Request_Wait) GxpCapi_Request_Wait(inflight[s]);
+          if(GxpCapi_ReleaseRequest) GxpCapi_ReleaseRequest(inflight[s]);
+          inflight[s]=0; inflight_h[s]=0;
+        }
+        zc_release(&h[hd[i]]);
+      }
       status=0; write_n(cfd,&status,4);
     } else if(cmd==4){                                 /* LIST */
       status=0; write_n(cfd,&status,4);
@@ -341,12 +364,14 @@ static void serve_zc(int cfd, uint32_t* hdr, int* fds, int nfd){
       if(read_n(cfd,hd,nh*4)){ write_n(cfd,&status,4); write_n(cfd,&token,4); goto next; }
       void* fn=resolve_fn(name); int ok=(fn!=0);
       for(uint32_t i=0;ok&&i<nh;i++) if(hd[i]>=ZC_MAXH||!h[hd[i]].used) ok=0;
+      { uint32_t mi=kern_min_in(name);
+        if(ok&&mi&&h[hd[0]].size<mi){ ok=0; LOG("[gxpd3] submit '%s' Puffer %u < min %u — abgelehnt\n",name,h[hd[0]].size,mi); } }
       int slot=-1; if(ok){ for(int s=0;s<ZC_INFLIGHT;s++) if(!inflight[s]){slot=s;break;} if(slot<0) ok=0; }
       if(ok){
         void* req=0; GxpCapi_CreateRequest(&req); GxpCapi_Request_SetFunction(req,fn);
-        for(uint32_t i=0;i<nh;i++) GxpCapi_Request_AppendBuffer(req,h[hd[i]].buf);
+        uint32_t rmask=0; for(uint32_t i=0;i<nh;i++){ GxpCapi_Request_AppendBuffer(req,h[hd[i]].buf); rmask|=(1u<<hd[i]); }
         int r=GxpCapi_RunAsync(g_dev,g_es,req);
-        if(r==0){ status=0; inflight[slot]=req; token=(uint32_t)slot; }
+        if(r==0){ status=0; inflight[slot]=req; inflight_h[slot]=rmask; token=(uint32_t)slot; }
         else { status=7; if(GxpCapi_ReleaseRequest)GxpCapi_ReleaseRequest(req); LOG("[gxpd3] RunAsync('%s')=%d\n",name,r); }
       } else status=4;
       write_n(cfd,&status,4); write_n(cfd,&token,4);
@@ -358,7 +383,7 @@ static void serve_zc(int cfd, uint32_t* hdr, int* fds, int nfd){
       if(r==0){ status=0; GxpCapi_Request_GetReturnValue(req,&rv);
         if(GxpCapi_Request_GetExecutionTimeUs){ uint64_t us=0; if(GxpCapi_Request_GetExecutionTimeUs(req,&us)==0) exec_us=(uint32_t)us; } }
       else status=7;
-      if(GxpCapi_ReleaseRequest)GxpCapi_ReleaseRequest(req); inflight[token]=0; nrun++;
+      if(GxpCapi_ReleaseRequest)GxpCapi_ReleaseRequest(req); inflight[token]=0; inflight_h[token]=0; nrun++;
       write_n(cfd,&status,4); write_n(cfd,&rv,8); write_n(cfd,&exec_us,4);
       guard_device((int)status);
     } else { write_n(cfd,&status,4); }

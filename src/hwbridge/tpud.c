@@ -337,11 +337,13 @@ static int recv_with_fds(int c, void* buf, long n, int* fds, int* nfd){
   struct iovec iov={.iov_base=buf,.iov_len=n};
   struct msghdr msg={.msg_iov=&iov,.msg_iovlen=1,.msg_control=cbuf,.msg_controllen=sizeof cbuf};
   *nfd=0;
-  ssize_t r=recvmsg(c,&msg,MSG_WAITALL); if(r!=n) return -1;
+  ssize_t r=recvmsg(c,&msg,MSG_WAITALL);
   struct cmsghdr* cm=CMSG_FIRSTHDR(&msg);
   if(cm&&cm->cmsg_type==SCM_RIGHTS){ int k=(int)((cm->cmsg_len-CMSG_LEN(0))/sizeof(int));
-    if(k>ZC_MAXBUF){ for(int i=0;i<k;i++) close(((int*)CMSG_DATA(cm))[i]); return -1; }
+    /* fds sind bereits installiert — bei Kurzlesung ODER Überzahl trotzdem schließen (kein Leak) */
+    if(r!=n||k>ZC_MAXBUF){ for(int i=0;i<k;i++) close(((int*)CMSG_DATA(cm))[i]); return -1; }
     memcpy(fds,CMSG_DATA(cm),k*sizeof(int)); *nfd=k; }
+  else if(r!=n) return -1;
   return 0;
 }
 

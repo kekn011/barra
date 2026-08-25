@@ -190,9 +190,11 @@ cleanup:
 typedef struct { int used; VkBuffer buf; VkDeviceMemory mem; void* map; uint32_t size; } GBuf;
 static GBuf g_gb[MAXGBUF];
 
+static uint64_t g_gb_live=0;   /* Summe der lebenden Session-Allokationen (Cap: MAXDATA) */
 static int gb_create(uint32_t size){
   int h=-1; for(int i=0;i<MAXGBUF;i++) if(!g_gb[i].used){ h=i; break; }
-  if(h<0||size==0) return -1;
+  /* Größenlimit wie im One-shot-Pfad: pro Puffer und kumuliert je Session <= MAXDATA */
+  if(h<0||size==0||size>MAXDATA||g_gb_live+(uint64_t)size>MAXDATA) return -1;
   VkBuffer buf=0; VkDeviceMemory mem=0; void* map=0;
   VkBufferCreateInfo bci={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=size,.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
   if(vkCreateBuffer(g_dev,&bci,0,&buf)!=VK_SUCCESS) return -1;
@@ -201,10 +203,12 @@ static int gb_create(uint32_t size){
   if(vkAllocateMemory(g_dev,&mai,0,&mem)!=VK_SUCCESS){ vkDestroyBuffer(g_dev,buf,0); return -1; }
   if(vkBindBufferMemory(g_dev,buf,mem,0)!=VK_SUCCESS || vkMapMemory(g_dev,mem,0,VK_WHOLE_SIZE,0,&map)!=VK_SUCCESS){ vkFreeMemory(g_dev,mem,0); vkDestroyBuffer(g_dev,buf,0); return -1; }
   g_gb[h]=(GBuf){1,buf,mem,map,size};
+  g_gb_live+=size;
   return h;
 }
 static void gb_destroy(uint32_t h){
   if(h>=MAXGBUF||!g_gb[h].used) return;
+  if(g_gb_live>=g_gb[h].size) g_gb_live-=g_gb[h].size; else g_gb_live=0;
   if(g_gb[h].map) vkUnmapMemory(g_dev,g_gb[h].mem);
   vkDestroyBuffer(g_dev,g_gb[h].buf,0); vkFreeMemory(g_dev,g_gb[h].mem,0);
   memset(&g_gb[h],0,sizeof(GBuf));
