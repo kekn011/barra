@@ -129,13 +129,22 @@ static bool barra_load_meta(ggml_backend_barra_context * ctx) {
     FILE * f = fopen(mp, "r");
     if (!f) { GGML_LOG_WARN("barra: meta %s nicht lesbar\n", mp); return false; }
     if (fscanf(f, "%d %d %d %d %d", &ctx->D, &ctx->FF, &ctx->B, &ctx->bits, &ctx->NL) != 5) { fclose(f); GGML_LOG_WARN("barra: meta-Kopf ungueltig\n"); return false; }
-    { int c; while ((c = fgetc(f)) == ' ') {} if (c >= '0' && c <= '9') { ungetc(c, f); if (fscanf(f, "%d", &ctx->split) != 1) ctx->split = 1; }
-      while ((c = fgetc(f)) == ' ') {} if (c >= '0' && c <= '9') { ungetc(c, f); if (fscanf(f, "%f", &ctx->out_div) != 1) ctx->out_div = 1.0f; }
-      ctx->out_div_gu = ctx->out_div;   // Feld 8 (optional): eigener DIV fuer gate/up. Hintergrund: die Ausreisser von h
-      while ((c = fgetc(f)) == ' ') {} if (c >= '0' && c <= '9') { ungetc(c, f);   // sind fest und werden ausgelagert (1 Pass
-          if (fscanf(f, "%f", &ctx->out_div_gu) != 1) ctx->out_div_gu = ctx->out_div; }   // reicht), die von a wandern -> down braucht den Mehrpass
-      while ((c = fgetc(f)) == ' ') {} if (c >= '0' && c <= '9') { ungetc(c, f);   // Feld 9 (optional): eigene down-Kachel
-          if (fscanf(f, "%d", &ctx->Bd) != 1) ctx->Bd = 0; } }
+    // Optionale Kopf-Felder 6..9 (split, out_div, out_div_gu, Bd) stehen im REST
+    // DERSELBEN Zeile. Wir lesen den Zeilenrest komplett und parsen ihn mit EINEM
+    // sscanf; so kann ein fehlendes Feld nicht den Zeilenumbruch verschlucken und in
+    // die Layer-Daten der naechsten Zeile hineinlesen (Feld 8 = eigener DIV fuer
+    // gate/up, Feld 9 = eigene down-Kachel).
+    ctx->split = 1; ctx->out_div = 1.0f; ctx->out_div_gu = 1.0f; ctx->Bd = 0;
+    { char rest[256];
+      if (fgets(rest, sizeof rest, f)) {
+          float od = 1.0f, odg = 1.0f; int sp = 1, bd = 0;
+          int nf = sscanf(rest, "%d %f %f %d", &sp, &od, &odg, &bd);
+          if (nf >= 1) ctx->split      = sp;
+          if (nf >= 2) ctx->out_div    = od;
+          ctx->out_div_gu = (nf >= 3) ? odg : ctx->out_div;   // Feld 8 fehlt -> gleicher DIV wie down
+          if (nf >= 4) ctx->Bd         = bd;
+      } else ctx->out_div_gu = ctx->out_div;
+    }
     if (ctx->Bd <= 0 || ctx->Bd > ctx->B) ctx->Bd = ctx->B;   // Default: down laeuft in derselben Kachel wie gate/up
     if (ctx->split != 1 && ctx->split != 3) { fclose(f); GGML_LOG_WARN("barra: split=%d nicht unterstuetzt\n", ctx->split); return false; }
     ctx->q.resize(ctx->NL * ctx->split);

@@ -20,6 +20,8 @@ extern "C" {
 #include <thread>
 #include <atomic>
 #include <functional>
+#include <mutex>
+#include <condition_variable>
 
 static double now_ms_battn() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
@@ -65,17 +67,31 @@ static bool ggml_vk_battn_env_on(void) {
 
 #define BALOG(...) GGML_LOG_WARN(__VA_ARGS__)
 
-// ---------- Mini-Threadpool fuer den CPU-Glue (Zeilen-Quant/-Dequant) ----------
+// ---------- Persistenter Threadpool fuer den CPU-Glue (Zeilen-Quant/-Dequant) ----------
+// Frueher wurde je Aufruf ein std::thread-Satz gespawnt (~ms je Start) — im Prefill
+// hunderte Male. Jetzt persistente Worker (BARRA_ATTN_THREADS), Job = fn(r) fuer r in
+// [0,n), dynamische Vergabe per Atomic-Zaehler; Worker spinnen kurz, dann cond-wait.
+// (Gespiegelt von barra_pool in ggml-barra.cpp; eigene Instanz, da eigene TU.)
+struct battn_pool {
+    int nt = 1; std::vector<std::thread> th; std::mutex mu; std::condition_variable cv;
+    std::atomic<int> gen{0}, next{0}, done{0}; int n = 0; const std::function<void(int)> * fn = nullptr; bool stop = false;
+    void work() { for (;;) { int r = next.fetch_add(1); if (r >= n) break; (*fn)(r); } }
+    void worker() { int seen = 0; for (;;) {
+            int spins = 0; while (gen.load(std::memory_order_acquire) == seen && !stop) { if (++spins < 20000) continue; std::unique_lock<std::mutex> lk(mu); cv.wait(lk, [&] { return gen.load() != seen || stop; }); }
+            if (stop) return; seen = gen.load(); work(); done.fetch_add(1); } }
+    explicit battn_pool(int nthreads) { nt = nthreads < 1 ? 1 : nthreads; for (int i = 1; i < nt; i++) th.emplace_back([this] { worker(); }); }
+    ~battn_pool() { { std::lock_guard<std::mutex> lk(mu); stop = true; } cv.notify_all(); for (auto & t : th) if (t.joinable()) t.join(); }
+    void run(int n_, const std::function<void(int)> & f) {
+        if (nt == 1 || n_ < 2) { for (int r = 0; r < n_; r++) f(r); return; }
+        n = n_; fn = &f; next.store(0); done.store(0);
+        { std::lock_guard<std::mutex> lk(mu); gen.fetch_add(1, std::memory_order_release); } cv.notify_all();
+        work(); while (done.load(std::memory_order_acquire) < nt - 1) std::this_thread::yield();
+    }
+};
+static battn_pool & battn_pool_get() { static battn_pool p(g_battn.nthreads); return p; }
 static void battn_par(int n, const std::function<void(int)> & fn) {
-    battn_state & st = g_battn;
-    int nt = st.nthreads;
-    if (nt <= 1 || n < 4) { for (int i = 0; i < n; i++) fn(i); return; }
-    std::atomic<int> next{0};
-    auto work = [&]() { for (;;) { int i = next.fetch_add(1); if (i >= n) break; fn(i); } };
-    std::vector<std::thread> th;
-    for (int i = 1; i < nt; i++) th.emplace_back(work);
-    work();
-    for (auto & t : th) t.join();
+    if (g_battn.nthreads <= 1 || n < 4) { for (int i = 0; i < n; i++) fn(i); return; }
+    battn_pool_get().run(n, fn);
 }
 
 // ---------- eigenes Vulkan-Geraet (dmabuf-Import via barra_zc) ----------
@@ -529,6 +545,11 @@ static void battn_scan(ggml_cgraph * cg, std::vector<battn_range> & out) {
         if (!lshared) {
             if (setk->type != GGML_TYPE_F16 || setv->type != GGML_TYPE_F16) continue;
             if ((int) setk->ne[0] != st.NKV * lhd || (int) setv->ne[0] != st.NKV * lhd) continue;
+            // Die SET_ROWS-Index-Tensoren werden im Exec als int64 gelesen. ggml erlaubt
+            // auch I32-ids; ein Upstream-Wechsel darauf wuerde die memcpys in wilde
+            // Offsets schreiben. Nur bei I64 uebernehmen, sonst Vulkan-Fallback.
+            if (!setk->src[1] || setk->src[1]->type != GGML_TYPE_I64) continue;
+            if (!setv->src[1] || setv->src[1]->type != GGML_TYPE_I64) continue;
         }
         if (fa->src[1]->ne[1] < T) continue;
         float fap[3]; memcpy(fap, fa->op_params, sizeof(fap));
@@ -662,6 +683,14 @@ static bool battn_exec_gemma(const battn_range & r) {
     const ggml_fp16_t * ksrc = haskv ? (const ggml_fp16_t *) (full ? st.bKf.map : st.bKs.map) : nullptr;
     const ggml_fp16_t * vsrc = haskv ? (const ggml_fp16_t *) (full ? st.bVf.map : st.bVs.map) : nullptr;
     const size_t knb1 = haskv ? r.setk->nb[1] : 0, vnb1 = haskv ? r.setv->nb[1] : 0;
+    if (haskv) {   // ids VOR dem ersten memcpy pruefen -> kein Teilschreiben bei Fallback
+        const int64_t krows = r.setk->ne[1], vrows = r.setv->ne[1];
+        for (int t = 0; t < T; t++) if (kids[t] < 0 || kids[t] >= krows || vids[t] < 0 || vids[t] >= vrows) {
+            if (st.log) BALOG("barra-attn: L%d SET_ROWS id ausser Bereich (t=%d) — Vulkan-Fallback\n", r.L, t);
+            barra_zc_cpu_end(full ? &st.bKf : &st.bKs); barra_zc_cpu_end(full ? &st.bVf : &st.bVs);
+            return false;
+        }
+    }
     battn_par(T, [&](int t) {
         float * orow = (float *) ((char *) odst + (size_t) t * onb1);
         const float os = Q.o.osc * st.srow_c[t];
@@ -850,6 +879,12 @@ static bool battn_exec(const battn_range & r) {
     const int rowe = st.NKV * st.HD;
     const ggml_fp16_t * ksrc = (const ggml_fp16_t *) st.bQK.map + (size_t) S * st.H * st.HD;
     const size_t knb1 = r.setk->nb[1], vnb1 = r.setv->nb[1];
+    { const int64_t krows = r.setk->ne[1], vrows = r.setv->ne[1];   // ids vor dem ersten memcpy pruefen
+      for (int t = 0; t < T; t++) if (kids[t] < 0 || kids[t] >= krows || vids[t] < 0 || vids[t] >= vrows) {
+          if (st.log) BALOG("barra-attn: L%d SET_ROWS id ausser Bereich (t=%d) — Vulkan-Fallback\n", r.L, t);
+          barra_zc_cpu_end(&st.bO); barra_zc_cpu_end(&st.bQK); barra_zc_cpu_end(st.kvmerge ? &st.bK : &st.bV);
+          return false;
+      } }
     battn_par(T, [&](int t) {
         float * orow = (float *) ((char *) odst + (size_t) t * onb1);
         const float os = Q.o.osc * st.srow_c[t];
