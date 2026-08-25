@@ -13,7 +13,12 @@ pins_on(){   # TTS nutzt den Grafikkern (David-Vokoder) -> Mali-Mindesttakt anhe
   echo 890000 > /sys/class/misc/mali0/device/hint_min_freq 2>/dev/null
 }
 pins_off(){
-  echo 0 > /sys/class/misc/mali0/device/scaling_min_freq 2>/dev/null
+  # HW-Idle-Minimaltakt (150 MHz) zuruecksetzen. WICHTIG: "echo 0" ist auf diesem mali-devfreq
+  # ein No-op (Treiber ignoriert 0) -> das alte pins_off hat NIE entpinnt (Mali blieb bis Reboot
+  # auf 890). Konkreten Wert schreiben, BEIDE Regler (scaling + hint), sonst haelt der nicht
+  # zurueckgesetzte den Takt oben. (Am Node am 25.8. verifiziert.)
+  echo 150000 > /sys/class/misc/mali0/device/scaling_min_freq 2>/dev/null
+  echo 150000 > /sys/class/misc/mali0/device/hint_min_freq 2>/dev/null
 }
 insys(){ printf %s "$1" > $U/root/.ttsctl.sh; sh "$ES" $U/root/.ttsctl.sh 2>&1; rm -f $U/root/.ttsctl.sh; }
 

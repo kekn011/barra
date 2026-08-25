@@ -122,6 +122,11 @@ static float* process(const float* zf,int T,int* out_n){
   flush_batch();
   int sw=slot("wav"); int Tt=sT[sw];
   barra_zc_cpu_begin(&sbuf[sw]); u16* wv=sbuf[sw].map; float* out=malloc((size_t)Tt*4); if(!out){ *out_n=0; return 0; } for(int t=0;t<Tt;t++) out[t]=h2f(wv[t]);
+  /* Per-Request-Handles aus der gpud-zc-Session freigeben, sonst laeuft die Handle-Tabelle
+   * (MAXH=64) nach ~3 Requests voll -> "import fail (slot -1)" -> Vokoder bricht ab (Fund F25,
+   * am Node am 25.8. verifiziert). ZW/ZB/ppool bleiben importiert (warm); nur die je Request
+   * frischen sbuf werden freigegeben. Blockweise, da barra_gpu_release max. ZC_MAXBUF(16) nimmt. */
+  for(int i=0;i<nsl;){ barra_zbuf* rel[16]; int k=0; while(k<16 && i<nsl) rel[k++]=&sbuf[i++]; barra_gpu_release(G,rel,k); }
   for(int i=0;i<nsl;i++) barra_zc_free(&sbuf[i]);
   *out_n=Tt; return out;
 }
