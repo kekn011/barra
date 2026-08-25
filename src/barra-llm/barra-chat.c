@@ -49,7 +49,7 @@ static int emit_content(const char* line){
   while(*p==' ')p++; if(*p!='"') return 0; p++;
   int any=0;
   while(*p && *p!='"'){
-    if(*p=='\\'){ p++;
+    if(*p=='\\'){ p++; if(!*p) break;   /* Backslash am Zeilenende: nicht ueber die NUL laufen */
       if(*p=='n'){ putchar('\n'); }
       else if(*p=='t'){ putchar('\t'); }
       else if(*p=='u'){ int v; sscanf(p+1,"%4x",&v); p+=4; if(v<128) putchar(v); else { /* UTF-8 */ if(v<0x800){ putchar(0xC0|(v>>6)); putchar(0x80|(v&0x3F)); } else { putchar(0xE0|(v>>12)); putchar(0x80|((v>>6)&0x3F)); putchar(0x80|(v&0x3F)); } } }
@@ -100,7 +100,7 @@ int main(int argc,char**argv){
               /* content sammeln (fuer History) + ausgeben */
               const char* cp=strstr(pending,"\"content\":");
               if(cp){ /* in acc anhaengen: roher (noch escaped) content-Teil bis zum schliessenden " */
-                cp+=10; while(*cp==' ')cp++; if(*cp=='"'){ cp++; const char* st=cp; while(*cp&&*cp!='"'){ if(*cp=='\\')cp++; cp++; }
+                cp+=10; while(*cp==' ')cp++; if(*cp=='"'){ cp++; const char* st=cp; while(*cp&&*cp!='"'){ if(*cp=='\\'){ cp++; if(!*cp) break; } cp++; }
                   size_t cl=cp-st; if(acc_len+cl+1>acc_cap){ acc_cap=(acc_len+cl)*2; acc=realloc(acc,acc_cap);} memcpy(acc+acc_len,st,cl); acc_len+=cl; acc[acc_len]=0; }
                 emit_content(pending);
               }

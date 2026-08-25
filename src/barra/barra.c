@@ -12,12 +12,13 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/types.h>
+#include <errno.h>
 
 #define SOCK_DIR "/opt/hwbridge"   /* Override: env BARRA_SOCK_DIR (z.B. Test-Daemons) */
 static const char* sock_dir(void){ const char* d=getenv("BARRA_SOCK_DIR"); return (d&&*d)?d:SOCK_DIR; }
 
-static int rn(int fd,void*p,size_t n){uint8_t*b=p;size_t g=0;while(g<n){ssize_t k=read(fd,b+g,n-g);if(k<=0)return -1;g+=k;}return 0;}
-static int wn(int fd,const void*p,size_t n){const uint8_t*b=p;size_t s=0;while(s<n){ssize_t k=write(fd,b+s,n-s);if(k<=0)return -1;s+=k;}return 0;}
+static int rn(int fd,void*p,size_t n){uint8_t*b=p;size_t g=0;while(g<n){ssize_t k=read(fd,b+g,n-g);if(k<0){if(errno==EINTR)continue;return -1;}if(k==0)return -1;g+=(size_t)k;}return 0;}
+static int wn(int fd,const void*p,size_t n){const uint8_t*b=p;size_t s=0;while(s<n){ssize_t k=write(fd,b+s,n-s);if(k<0){if(errno==EINTR)continue;return -1;}if(k==0)return -1;s+=(size_t)k;}return 0;}
 
 static int dial(const char* name){
   int s=socket(AF_UNIX,SOCK_STREAM,0); if(s<0) return -1;
@@ -139,6 +140,7 @@ int barra_zc_cpu_begin(barra_zbuf* z){ struct dma_buf_sync s={DMA_BUF_SYNC_START
 int barra_zc_cpu_end(barra_zbuf* z){   struct dma_buf_sync s={DMA_BUF_SYNC_END  |DMA_BUF_SYNC_RW}; return (z&&z->fd>=0&&ioctl(z->fd,DMA_BUF_IOCTL_SYNC,&s)==0)?0:-1; }
 
 int barra_zc_alloc(barra_zbuf* z, uint32_t size){
+  if(z){ z->fd=-1; z->map=0; z->size=0; z->gpu_h=-1; z->tpu_h=-1; z->dsp_h=-1; }  /* fehlgeschlagene Allocs inert machen */
   int h=open("/dev/dma_heap/system",O_RDONLY|O_CLOEXEC); if(h<0) return -1;
   struct dma_heap_allocation_data d; memset(&d,0,sizeof d); d.len=size; d.fd_flags=O_RDWR|O_CLOEXEC;
   if(ioctl(h,DMA_HEAP_IOCTL_ALLOC,&d)<0){ close(h); return -1; }
@@ -411,6 +413,7 @@ int barra_dsp_submit(barra_dsp* d, const char* func, barra_zbuf** bufs, int n, u
      ||rn(d->sock,&status,4)||rn(d->sock,&tok,4));
   if(io||status!=0){
     fprintf(stderr,"barra: DSP-Submit '%s' fehlgeschlagen (status=%u)\n",func,status);
+    for(int i=0;i<n;i++) barra_zc_cpu_begin(bufs[i]);   /* CPU-Zugriff wiederherstellen (Sync-Klammer ausbalancieren) */
     return io?dsp_dead(d):-1; }
   if(token)*token=tok;
   return 0;

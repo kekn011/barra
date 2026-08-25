@@ -13,19 +13,19 @@ int main(int argc,char**argv){
   if(argc<3){ fprintf(stderr,"hammer <dsp|tpu|gpu> <sek> [spv]\n"); return 2; }
   const char* mode=argv[1]; double T=atof(argv[2]); long it=0; double t0=now();
   if(!strcmp(mode,"dsp")){
-    barra_dsp d; if(barra_dsp_open(&d))return 1; barra_zbuf z; barra_zc_alloc(&z,16); barra_zbuf* b[1]={&z};
+    barra_dsp d; if(barra_dsp_open(&d))return 1; barra_zbuf z; if(barra_zc_alloc(&z,16)){fprintf(stderr,"alloc fail\n");return 1;} barra_zbuf* b[1]={&z};
     int32_t* m=z.map; m[0]=3;m[1]=5;m[2]=10;m[3]=100; int64_t rv; uint32_t us;
     while(now()-t0<T){ barra_dsp_run(&d,"vscale",b,1,&rv,&us); it++; }
     barra_zc_free(&z); barra_dsp_close(&d);
   } else if(!strcmp(mode,"tpu")){
-    barra_tpu t; if(barra_tpu_open(&t))return 1; uint32_t in=0,out=0,n=0; barra_tpu_info(&t,0,&in,&out,&n);
-    barra_zbuf zi,zo; barra_zc_alloc(&zi,in); barra_zc_alloc(&zo,out); uint32_t us;
+    barra_tpu t; if(barra_tpu_open(&t))return 1; uint32_t in=0,out=0,n=0; if(barra_tpu_info(&t,0,&in,&out,&n)||!in||!out){fprintf(stderr,"tpu_info fail\n");return 1;}
+    barra_zbuf zi,zo; if(barra_zc_alloc(&zi,in)||barra_zc_alloc(&zo,out)){fprintf(stderr,"alloc fail\n");return 1;} uint32_t us;
     while(now()-t0<T){ barra_tpu_infer(&t,0,&zi,&zo,&us); it++; }
     barra_zc_free(&zi); barra_zc_free(&zo); barra_tpu_close(&t);
   } else if(!strcmp(mode,"gpu")){
     if(argc<4){ fprintf(stderr,"gpu braucht spv\n"); return 2; }
     uint32_t sl=0; uint8_t* spv=slurp(argv[3],&sl); if(!spv)return 1;
-    barra_gpu g; if(barra_gpu_open(&g))return 1; barra_zbuf z; barra_zc_alloc(&z,4096); barra_zbuf* b[1]={&z};
+    barra_gpu g; if(barra_gpu_open(&g))return 1; barra_zbuf z; if(barra_zc_alloc(&z,4096)){fprintf(stderr,"alloc fail\n");return 1;} barra_zbuf* b[1]={&z};
     while(now()-t0<T){ barra_gpu_dispatch(&g,spv,sl,16,1,1,b,1); it++; }
     barra_zc_free(&z); barra_gpu_close(&g);
   } else { fprintf(stderr,"unbekannter mode\n"); return 2; }

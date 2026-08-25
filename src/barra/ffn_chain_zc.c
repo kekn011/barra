@@ -6,6 +6,7 @@
 #include <time.h>
 static double now_us(){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec*1e6+t.tv_nsec/1e3; }
 int main(int argc,char**argv){
+  if(argc<3){ fprintf(stderr,"usage: ffn_chain_zc <in.i16> <out.i16> [B=32] [D=896]\n"); return 2; }
   const char* inpath=argv[1]; const char* outpath=argv[2];
   uint32_t B=argc>3?atoi(argv[3]):32, D=argc>4?atoi(argv[4]):896;
   uint32_t sz=B*D*2; /* int16 */
@@ -13,7 +14,7 @@ int main(int argc,char**argv){
   barra_zbuf ZI,ZM,ZO;
   if(barra_zc_alloc(&ZI,sz)||barra_zc_alloc(&ZM,sz)||barra_zc_alloc(&ZO,sz)){ fprintf(stderr,"alloc fail\n"); return 1; }
   /* load x0_i16 into ZI */
-  FILE* f=fopen(inpath,"rb"); if(!f){fprintf(stderr,"no input\n");return 1;} fread(ZI.map,1,sz,f); fclose(f);
+  FILE* f=fopen(inpath,"rb"); if(!f){fprintf(stderr,"no input\n");return 1;} if(fread(ZI.map,1,sz,f)!=sz){fprintf(stderr,"input zu kurz (%u B erwartet)\n",sz);fclose(f);return 1;} fclose(f);
   uint32_t us0=0,us1=0;
   /* warmup + chain */
   barra_tpu_infer(&t,0,&ZI,&ZM,&us0); barra_tpu_infer(&t,1,&ZM,&ZO,&us1);
@@ -23,6 +24,6 @@ int main(int argc,char**argv){
   double per=(now_us()-t0)/N;
   fprintf(stderr,"[chain] L0 %u us + L1 %u us ; wall %.1f us/chain (%.2f ms/Tok @B=%u)\n",us0,us1,per,per/B/1000.0,B);
   /* write ZO out */
-  FILE* g=fopen(outpath,"wb"); fwrite(ZO.map,1,sz,g); fclose(g);
+  FILE* g=fopen(outpath,"wb"); if(!g){fprintf(stderr,"kann %s nicht schreiben\n",outpath);return 1;} if(fwrite(ZO.map,1,sz,g)!=sz){fprintf(stderr,"Ausgabe unvollstaendig\n");fclose(g);return 1;} fclose(g);
   return 0;
 }

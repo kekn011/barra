@@ -99,6 +99,7 @@ static void att_rows(int lo,int hi,void*c_){att_ctx*c=c_;
     for(int t2=0;t2<=b;t2++){float wgt=sc[t2]/se;const float*vh=c->v+((long)t2*NKV+gg)*HD;for(int d=0;d<HD;d++)co[d]+=wgt*vh[d];}}}
 int main(int argc,char**argv){
   int B=argc>1?atoi(argv[1]):8, NL=argc>2?atoi(argv[2]):24;
+  if(B<1||B>512){ fprintf(stderr,"B muss 1..512 sein (Attention-Scratch sc[512])\n"); return 2; }
   const char*dir=argc>3?argv[3]:".";
   char p[512];
   snprintf(p,sizeof p,"%s/embed_B%d.bin",dir,B); float*x=rd(p,(long)B*D);
