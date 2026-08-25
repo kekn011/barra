@@ -18,7 +18,7 @@ rm -rf $R/proc/* $R/sys/* $R/dev/* $R/run/* $R/tmp/* $R/oldroot/* $R/core $R/var
 find $R/home -name '*.gguf' -delete 2>/dev/null || true; rm -rf $R/home/*/models $R/opt/hwbridge/*.sock $R/opt/hwbridge/*.log 2>/dev/null || true
 # Kit-Reste sicher entfernen (Container-Seite): Verzeichnisse, Werkzeuge, systemd-Units
 rm -rf $R/opt/barra-pya $R/opt/barra/pya $R/opt/barra-tts $R/opt/barra-wake 2>/dev/null || true
-rm -f $R/usr/local/bin/barra-diarize $R/etc/systemd/system/barra-tts.service $R/etc/systemd/system/barra-wake.service 2>/dev/null || true
+rm -f $R/usr/local/bin/barra-diarize $R/usr/local/bin/barra-img $R/etc/systemd/system/barra-tts.service $R/etc/systemd/system/barra-wake.service 2>/dev/null || true
 mkdir -p $R/proc $R/sys $R/dev $R/run $R/tmp $R/oldroot $R/var/log/journal $R/var/cache/apt $R/var/lib/apt/lists; chmod 1777 $R/tmp
 : > $R/var/log/wtmp; : > $R/var/log/btmp; : > $R/var/log/lastlog
 echo "Rootfs-Kopie: $(du -sm $R | cut -f1) MB"
@@ -52,11 +52,17 @@ S=$A/baseos/config; [ -f $S ] && { grep -v '^WIFI_SSID=' $S | grep -v '^WIFI_PSK
 rm -rf $A/baseos/run; mkdir -p $A/baseos/run; chmod 700 $A/baseos/run
 rm -f $A/baseos/state $A/baseos/disable $A/baseos/boot.log $A/baseos/bin/*.bak* 2>/dev/null; rm -rf $A/baseos/boot.lock 2>/dev/null
 rm -f $A/hwbridge/*.log $A/hwbridge/*.pid $A/hwbridge/dash-run.sh 2>/dev/null
-# Kit-Reste sicher entfernen (Android-Seite): Server-Skripte + Mic-Bridge kommen aus den Kits
-rm -f $A/baseos/bin/pyaserver.sh $A/baseos/bin/ttsserver.sh $A/baseos/bin/wakeserver.sh $A/hwbridge/audiod-record 2>/dev/null
+# Kit-Reste sicher entfernen (Android-Seite): Server-Skripte + Mic-Bridge kommen aus den Kits.
+# WICHTIG: hier muss JEDES neue Kit eingetragen werden, das etwas unter /data/adb ablegt, sonst
+# backt der naechste Bake es still mit ein. Am 25.8. genau so aufgefallen: Bild-Kit (imgserver.sh)
+# und Dev-Kit (baseos/dev mit frida-server+glslang = 55 MB Fremdbinaries, dazu dev-mode/devdeploy
+# und der service.d-Hook) waren nach dem v13-Bake dazugekommen und standen nicht in der Liste.
+rm -f $A/baseos/bin/pyaserver.sh $A/baseos/bin/ttsserver.sh $A/baseos/bin/wakeserver.sh $A/baseos/bin/imgserver.sh $A/hwbridge/audiod-record 2>/dev/null
+rm -rf $A/baseos/dev 2>/dev/null; rm -f $A/baseos/bin/barra-dev-mode.sh $A/baseos/bin/devdeploy.sh $A/service.d/55-barra-dev.sh 2>/dev/null
 echo "adb-Teile: $(du -sm $A | cut -f1) MB (llm $(du -sm $A/baseos/llm 2>/dev/null | cut -f1) MB, tpu $(du -sm $A/baseos/tpu 2>/dev/null | cut -f1) MB)"
 echo "== Kontrolle =="
 grep -rl 'WIFI_PSK\|psk=' $A 2>/dev/null | head -3 || true
+echo "Kit-Reste (muss ueberall 0 sein): dev=$(ls -d $A/baseos/dev 2>/dev/null | wc -l) frida=$(find $A -name 'frida*' 2>/dev/null | wc -l) kitserver=$(ls $A/baseos/bin/pyaserver.sh $A/baseos/bin/ttsserver.sh $A/baseos/bin/wakeserver.sh $A/baseos/bin/imgserver.sh 2>/dev/null | wc -l) devhook=$(ls $A/service.d/55-barra-dev.sh 2>/dev/null | wc -l) opt=$(ls -d $R/opt/barra-tts $R/opt/barra-wake $R/opt/barra-pya 2>/dev/null | wc -l)"
 echo "host-keys: $(ls $R/etc/ssh/ssh_host_* 2>/dev/null | wc -l)  machine-id: $(wc -c < $R/etc/machine-id)  firstboot: $(ls $R/etc/barra-firstboot.pending)  user: $(awk -F: '$3==1001{print $1\":\"$6}' $R/etc/passwd)  gguf: $(find $R -name '*.gguf' | wc -l)"
 echo "== packen =="
 rm -f $OUT; cd $B && tar -czf $OUT ubuntu adb
