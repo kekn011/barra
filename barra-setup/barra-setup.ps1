@@ -400,6 +400,9 @@ function Start-Core($precfg,$coreMode=$null){
     $script:PreCfg = $barraPreCfgIn
     # Answer/Cancel aus der GUI durchreichen
     $script:Answer = $sync.answerQ
+    # F7: kooperativen Abbruch wirklich verdrahten — der Kern pollt diesen Hook (Chk/Ask/Run)
+    # und setzt $script:Cancel, sodass laufende adb/fastboot-Kinder gekillt werden.
+    $script:CancelCheck = { if ($sync.cancel) { $script:Cancel = $true } }
     $t = [System.Threading.Thread]::CurrentThread
     try { if ($barraModeIn -eq 'unflash') { Run-Unflash } elseif ($barraModeIn -eq 'kits') { Run-Kits } else { Run-Flash } } catch { $sync.q.Enqueue(@{ k='fail'; d=(T 'core.corefail' "$_") }) }
     $sync.done=$true
@@ -441,7 +444,10 @@ $ui.BtnNext1.Add_Click({
   if ($ssid -and $psk -and $psk.Length -lt 8) { $ui.FErr.Text=T 'setup.err.psk'; return }
   $ui.FErr.Text=''
   # Passwort geht in die preconfig (wird auf dem Geraet als root per chpasswd gesetzt; Datei danach geloescht)
-  $script:precfg = [ordered]@{ USER=$u; PASS=$p1; HOST=$h; TZ=$tz; SSID=$ssid; PSK=$psk; SSHKEY=($key -replace "`r?`n",' '); CHARGE_START=$ui.FChgS.Text; CHARGE_STOP=$ui.FChgE.Text; DISPLAY_TIMEOUT=$ui.FDisp.Text; LANG_UI=$script:lang }
+  # SSH-Key(s) base64-kodiert transportieren: erhaelt mehrere Zeilen (mehrere Keys) und ist
+  # injektionssicher (kein Newline->Space-Flattening, keine Quote-Ausbrueche auf dem Geraet).
+  $keyB64 = if ($key) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($key -replace "`r`n","`n"))) } else { '' }
+  $script:precfg = [ordered]@{ USER=$u; PASS=$p1; HOST=$h; TZ=$tz; SSID=$ssid; PSK=$psk; SSHKEY_B64=$keyB64; CHARGE_START=$ui.FChgS.Text; CHARGE_STOP=$ui.FChgE.Text; DISPLAY_TIMEOUT=$ui.FDisp.Text; LANG_UI=$script:lang }
   Save-Cfg @{ user=$u; host=$h; tz=$tz; ssid=$ssid; psk=$psk; key=$key; chgS=$ui.FChgS.Text; chgE=$ui.FChgE.Text; disp=$ui.FDisp.Text; lang=$script:lang }
   # Weiter zum Paket-Bildschirm (falls Kits vorliegen), sonst direkt zum Flashen
   Detect-Kits

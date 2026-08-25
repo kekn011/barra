@@ -26,6 +26,10 @@ $script:Stock  = Join-Path $script:Kit 'stock'          # image\ + bootloader-*.
 $script:Emit   = { param($kind,$data) }                 # GUI setzt das
 $script:Answer = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
 $script:Cancel = $false
+# Optionaler Hook, mit dem die GUI einen kooperativen Abbruch durchreicht (setzt $script:Cancel).
+# Standalone (ohne GUI) bleibt er $null und wird uebersprungen.
+$script:CancelCheck = $null
+function RefreshCancel(){ if ($script:CancelCheck) { & $script:CancelCheck } }
 $script:PreCfg = $null                                  # Pre-Einrichtung (Hashtable) oder $null
 
 function Emit($kind,$data){ & $script:Emit $kind $data }
@@ -39,11 +43,11 @@ function Step($n,$title,$state){ Emit 'step' @{ n=$n; title=$title; state=$state
 function Progress($pct,$text){ Emit 'progress' @{ pct=$pct; text=$text } }
 function Ask($text,$id='ask'){
   Emit 'ask' @{ text=$text; id=$id }
-  $a=$null; while (-not $script:Answer.TryDequeue([ref]$a)) { if ($script:Cancel) { throw 'CANCEL' }; Start-Sleep -Milliseconds 200 }
+  $a=$null; while (-not $script:Answer.TryDequeue([ref]$a)) { RefreshCancel; if ($script:Cancel) { throw 'CANCEL' }; Start-Sleep -Milliseconds 200 }
   return $a
 }
 function WaitUser($text){ [void](Ask $text 'ok') }
-function Chk(){ if ($script:Cancel) { throw 'CANCEL' } }
+function Chk(){ RefreshCancel; if ($script:Cancel) { throw 'CANCEL' } }
 function MMSS($el){ '{0:d2}:{1:d2}' -f [int]($el/60), ($el%60) }
 
 # ---- Prozess-Aufrufe (ohne Fenster, mit Zeilen-Callback) ---------------------
@@ -65,7 +69,7 @@ function Run($exe,$argstr,[scriptblock]$onLine,$timeoutSec=600,$live='err'){
     $rt = $liveRd.ReadLineAsync()
     while (-not $rt.Wait(200)) {
       if (((Get-Date)-$t0).TotalSeconds -gt $timeoutSec) { try{$p.Kill()}catch{}; break }
-      if ($script:Cancel) { try{$p.Kill()}catch{}; throw 'CANCEL' }
+      RefreshCancel; if ($script:Cancel) { try{$p.Kill()}catch{}; throw 'CANCEL' }
     }
     if (-not $rt.IsCompleted) { break }
     $l = $rt.Result
@@ -393,7 +397,13 @@ function Flash-Stock(){
   # Phase 3: Wipe
   Info (T 'core.fs.p3')
   Progress 100 (T 'core.fs.p3')
-  [void](FbOut 'erase userdata' 120); [void](FbOut 'erase metadata' 60)
+  # Exit-Status pruefen: ein stiller erase-Fehler (z.B. Geraet faellt nach dem super-Flash vom USB)
+  # laesst frisch geflashtes System mit alten FBE-Keys zurueck -> Decrypt-Bootloop, der erst spaeter
+  # als unklarer "kein adb"-Timeout auffaellt.
+  $eu = Run $script:FB 'erase userdata' $null 120
+  if ($eu.code -ne 0 -or (($eu.lines -join ' ') -match 'FAILED|error:')) { Fail 'fastboot erase userdata fehlgeschlagen - Abbruch (sonst Decrypt-Bootloop mit alten FBE-Keys)' }
+  $em = Run $script:FB 'erase metadata' $null 60
+  if ($em.code -ne 0 -or (($em.lines -join ' ') -match 'FAILED|error:')) { Fail 'fastboot erase metadata fehlgeschlagen - Abbruch (sonst Decrypt-Bootloop mit alten FBE-Keys)' }
   PbEnd
 }
 
@@ -418,6 +428,25 @@ function Step2_Stock(){
   Ok (T 'core.s2.ok' $kv); Step 2 (T 'setup.steps.stock') 'ok'
 }
 
+# F5: Payload-Artefakt gegen payload/SHA256SUMS pruefen, BEVOR es geflasht/installiert wird.
+# -NonFatal: nur warnen (fuer init_boot-magisk.img, das Ensure-InitBoot lokal neu patchen kann).
+function Verify-PayloadFile($name, [switch]$NonFatal){
+  $sums = Join-Path $script:Payload 'SHA256SUMS'
+  $file = Join-Path $script:Payload $name
+  $bail = { param($m) if ($NonFatal) { Warn $m } else { Fail $m } }
+  if (-not (Test-Path $sums)) { & $bail "SHA256SUMS fehlt - $name nicht verifizierbar"; return }
+  if (-not (Test-Path $file)) { & $bail "$name fehlt im payload-Ordner"; return }
+  $want = $null
+  foreach ($ln in (Get-Content $sums)) {
+    $parts = $ln -split '\s+', 2
+    if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $name) { $want = $parts[0].Trim().ToLower(); break }
+  }
+  if (-not $want) { & $bail "$name nicht in SHA256SUMS gelistet"; return }
+  $have = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+  if ($have -ne $want) { & $bail "$name SHA256 stimmt nicht (beschaedigt/getauscht?)"; return }
+  Info "Integritaet ok: $name"
+}
+
 function Step3_KernelRoot(){
   Step 3 (T 'setup.steps.kernel') 'run'
   if ((AdbState) -eq 'device') {
@@ -425,6 +454,7 @@ function Step3_KernelRoot(){
     if ($kv -like '6.1.157-android14-11-g*' -and $root) { Ok (T 'core.s3.already' $kv); Step 3 (T 'setup.steps.kernel') 'ok'; return }
     if ($kv -notlike '6.1.157-android14-11-g*') {
       Ensure-InitBoot
+      Verify-PayloadFile 'Magisk-30.7.apk'
       Info (T 'core.s3.magisk_install')
       $r = Run $script:ADB "install -r `"$(Join-Path $script:Payload 'Magisk-30.7.apk')`"" $null 120
       if (($r.lines -join ' ') -match 'Success') { Ok (T 'core.s3.magisk_ok') } else { Warn (T 'core.s3.magisk_fail') }
@@ -435,6 +465,8 @@ function Step3_KernelRoot(){
   if ((FbState) -eq 'bootloader') {
     # Backstop: ohne gepatchtes init_boot nicht flashen — patchen geht nur mit Geraet in Android.
     if (-not (Test-Path (Join-Path $script:Payload 'init_boot-magisk.img'))) { Fail (T 'core.ib.missing_bl') }
+    Verify-PayloadFile 'boot-lz4.img'                     # geshipptes Kernel-Image: fatal bei Mismatch
+    Verify-PayloadFile 'init_boot-magisk.img' -NonFatal   # kann von Ensure-InitBoot lokal neu gepatcht sein -> nur warnen
     Info (T 'core.s3.flash')
     FbFlash 'boot' (Join-Path $script:Payload 'boot-lz4.img') (T 'core.s3.kernel_lbl')
     FbFlash 'init_boot' (Join-Path $script:Payload 'init_boot-magisk.img') (T 'core.s3.root_lbl')
@@ -477,8 +509,12 @@ function Step4_Base(){
     $pre = Join-Path $env:TEMP 'barra-preconfig.env'
     ($script:PreCfg.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "`n" | Set-Content $pre -Encoding ASCII -NoNewline
     [void](AdbSh 'mkdir -p /data/local/tmp/barra-kit' 10)
-    [void](Run $script:ADB "push `"$(Join-Path $script:Kit 'device-install.sh')`" /data/local/tmp/barra-kit/" $null 60)
-    [void](Run $script:ADB "push `"$pre`" /data/local/tmp/barra-kit/preconfig.env" $null 60)
+    # F9: Push-Ergebnisse pruefen — schlaegt der preconfig.env-Push fehl, wendet das
+    # Geraeteskript nichts an, meldet aber trotzdem Erfolg (Passwort/WLAN nie gesetzt).
+    $rd = Run $script:ADB "push `"$(Join-Path $script:Kit 'device-install.sh')`" /data/local/tmp/barra-kit/" $null 60
+    if (($rd.lines -join ' ') -notmatch 'file pushed') { Remove-Item $pre -Force -ErrorAction SilentlyContinue; Fail (T 'core.s4.pre_fail') }
+    $rp = Run $script:ADB "push `"$pre`" /data/local/tmp/barra-kit/preconfig.env" $null 60
+    if (($rp.lines -join ' ') -notmatch 'file pushed') { Remove-Item $pre -Force -ErrorAction SilentlyContinue; Fail (T 'core.s4.pre_fail') }
     Remove-Item $pre -Force -ErrorAction SilentlyContinue
     Progress -1 (T 'core.s4.pre_apply')
     $r = Run $script:ADB "shell su -c 'sh /data/local/tmp/barra-kit/device-install.sh preconfig'" $null 300
@@ -489,6 +525,7 @@ function Step4_Base(){
   # (Auf dem PC wird nichts entpackt: Ubuntu-Rootfs mit Symlinks/Rechten hat auf NTFS nichts verloren.)
   $tar = Join-Path $script:Payload 'barra-base.tar.gz'
   if (-not (Test-Path $tar)) { Fail (T 'core.s4.tar_missing') }
+  Verify-PayloadFile 'barra-base.tar.gz'   # F5: vor dem Push gegen SHA256SUMS pruefen
   # Pre-Einrichtung als Datei mitgeben
   $pre = Join-Path $env:TEMP 'barra-preconfig.env'
   if ($script:PreCfg) { ($script:PreCfg.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join "`n" | Set-Content $pre -Encoding ASCII -NoNewline } elseif (Test-Path $pre) { Remove-Item $pre }

@@ -8,6 +8,9 @@ MODE=${1:-install}     # install (Standard) | preconfig (nur Pre-Einrichtung auf
 if [ "$MODE" = preconfig ]; then
   echo "-- Modus: nur Pre-Einrichtung (Base bleibt) --"
   [ -d /data/local/ubuntu ] || { echo "Base fehlt (/data/local/ubuntu)"; exit 1; }
+  # F9: In diesem Modus MUSS preconfig.env vorhanden sein — sonst wuerde nichts angewendet,
+  # aber unten trotzdem "OK - Base installiert" gemeldet (GUI meldet faelschlich Erfolg).
+  [ -f "$K/preconfig.env" ] || { echo "FEHLER: preconfig.env fehlt - nichts angewendet"; exit 1; }
   # Container NICHT anhalten (ein Container-Neustart reisst den USB-Gadget/adb mit) - usermod/chpasswd/
   # Hostname gehen auch im laufenden Rootfs (barra-config macht es genauso); wirksam ab dem Neustart in Schritt 5.
 else
@@ -52,7 +55,9 @@ if [ -f "$PRE" ]; then
   echo "-- Pre-Einrichtung anwenden --"
   U=/data/local/ubuntu
   getv(){ sed -n "s/^$1=//p" "$PRE" | head -1; }
-  P_USER=$(getv USER); P_PASS=$(getv PASS); P_HOST=$(getv HOST); P_TZ=$(getv TZ); P_SSID=$(getv SSID); P_PSK=$(getv PSK); P_KEY=$(getv SSHKEY)
+  P_USER=$(getv USER); P_PASS=$(getv PASS); P_HOST=$(getv HOST); P_TZ=$(getv TZ); P_SSID=$(getv SSID); P_PSK=$(getv PSK)
+  # SSH-Key(s) base64-kodiert transportiert (mehrzeilig + injektionssicher); Fallback: alte SSHKEY-Zeile
+  P_KEY_B64=$(getv SSHKEY_B64); if [ -n "$P_KEY_B64" ]; then P_KEY=$(printf '%s' "$P_KEY_B64" | base64 -d 2>/dev/null); else P_KEY=$(getv SSHKEY); fi
   P_CS=$(getv CHARGE_START); P_CE=$(getv CHARGE_STOP); P_DT=$(getv DISPLAY_TIMEOUT); P_LANG=$(getv LANG_UI)
   # chroot ins Rootfs fuer usermod/chpasswd (Container laeuft noch nicht). /proc/dev/sys kurz binden.
   # (bei laufendem Container sind proc/dev dort schon gemountet -> mount/umount duerfen scheitern)
@@ -69,8 +74,23 @@ if [ -f "$PRE" ]; then
   [ -z "$P_USER" ] && P_USER=ubuntu
   if [ -n "$P_PASS" ]; then printf '%s:%s\n' "$P_USER" "$P_PASS" | $CH 'chpasswd' && echo "passwort gesetzt"; fi
   $CH "chage -d -1 '$P_USER' 2>/dev/null; chage -E -1 '$P_USER' 2>/dev/null" || true
-  # SSH-Key
-  if [ -n "$P_KEY" ]; then $CH "H=\$(getent passwd '$P_USER' | cut -d: -f6); mkdir -p \$H/.ssh; touch \$H/.ssh/authorized_keys; grep -qxF '$P_KEY' \$H/.ssh/authorized_keys || echo '$P_KEY' >> \$H/.ssh/authorized_keys; chmod 700 \$H/.ssh; chmod 600 \$H/.ssh/authorized_keys; chown -R '$P_USER:$P_USER' \$H/.ssh" && echo "ssh-key hinterlegt"; fi
+  # SSH-Key(s): Werte per ENV in den chroot geben (NICHT in den bash -c-Text interpolieren) —
+  # sonst bricht ein einfaches Anfuehrungszeichen im Key aus der Quotierung aus und laeuft als
+  # root im chroot. Der bash -c-Rumpf ist single-quoted; BARRA_KEY/BARRA_USER kommen ueber env.
+  # while-read verarbeitet mehrere Zeilen (mehrere Keys) korrekt.
+  if [ -n "$P_KEY" ]; then
+    chroot $U /usr/bin/env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+      BARRA_KEY="$P_KEY" BARRA_USER="$P_USER" /bin/bash -c '
+        H=$(getent passwd "$BARRA_USER" | cut -d: -f6)
+        mkdir -p "$H/.ssh"; touch "$H/.ssh/authorized_keys"
+        printf "%s\n" "$BARRA_KEY" | while IFS= read -r k; do
+          [ -n "$k" ] || continue
+          grep -qxF "$k" "$H/.ssh/authorized_keys" || printf "%s\n" "$k" >> "$H/.ssh/authorized_keys"
+        done
+        chmod 700 "$H/.ssh"; chmod 600 "$H/.ssh/authorized_keys"
+        chown -R "$BARRA_USER:$BARRA_USER" "$H/.ssh"
+      ' && echo "ssh-key hinterlegt"
+  fi
   # Hostname
   if [ -n "$P_HOST" ]; then echo "$P_HOST" > $U/etc/hostname; sed -i "s/^127.0.1.1.*/127.0.1.1\t$P_HOST/" $U/etc/hosts; grep -q '127.0.1.1' $U/etc/hosts || printf '127.0.1.1\t%s\n' "$P_HOST" >> $U/etc/hosts; echo "hostname: $P_HOST"; fi
   # Zeitzone
