@@ -38,8 +38,8 @@ static int run_dsp(const barra_op* op,const uint8_t* in,uint32_t in_size,uint8_t
   if(wn(s,hdr,sizeof hdr)||wn(s,op->dsp_func,nlen)||wn(s,in,in_size)){ close(s); return -1; }
   uint32_t status; if(rn(s,&status,4)){ close(s); return -1; }
   if(status!=0){ close(s); fprintf(stderr,"barra: DSP status=%u\n",status); return -1; }
-  int64_t rv; uint32_t exec_us,osz;
-  rn(s,&rv,8); rn(s,&exec_us,4); rn(s,&osz,4);
+  int64_t rv=0; uint32_t exec_us=0,osz=0;
+  if(rn(s,&rv,8)||rn(s,&exec_us,4)||rn(s,&osz,4)){ close(s); return -1; }
   if(osz>cap) osz=cap;
   int r=rn(s,out,osz); close(s);
   return r?-1:(int)osz;
@@ -52,9 +52,9 @@ static int run_tpu(const barra_op* op,const uint8_t* in,uint32_t in_size,uint8_t
   int s=dial("tpu.sock"); if(s<0){ fprintf(stderr,"barra: TPU-Socket nicht erreichbar\n"); return -1; }
   uint32_t hdr[3]={0x54504432u,op->tpu_model_id,in_size};
   if(wn(s,hdr,sizeof hdr)||wn(s,in,in_size)){ close(s); return -1; }
-  uint32_t status,osz; if(rn(s,&status,4)){ close(s); return -1; }
+  uint32_t status,osz=0; if(rn(s,&status,4)){ close(s); return -1; }
   if(status!=0){ close(s); fprintf(stderr,"barra: TPU status=%u\n",status); return -1; }
-  rn(s,&osz,4); if(osz>cap) osz=cap;
+  if(rn(s,&osz,4)){ close(s); return -1; } if(osz>cap) osz=cap;
   int r=rn(s,out,osz); close(s);
   return r?-1:(int)osz;
 }
@@ -76,7 +76,11 @@ static int run_gpu(const barra_op* op,const uint8_t* in,uint32_t in_size,uint8_t
 /* ---- CPU: in-process ------------------------------------------------------ */
 static int run_cpu(const barra_op* op,const uint8_t* in,uint32_t in_size,uint8_t* out,uint32_t cap){
   if(!op->cpu_fn) return -1;
-  uint32_t osz=0; op->cpu_fn(in,in_size,out,&osz);
+  /* Vertrag: *out_size traegt beim Aufruf die Ausgabe-KAPAZITAET; der Callback
+   * darf hoechstens so viele Bytes schreiben und setzt *out_size auf die echte
+   * Groesse. Das nachgelagerte Clamp ist nur eine zweite Verteidigungslinie —
+   * ein Callback, der cap ignoriert und mehr schreibt, ueberlaeuft 'out'. */
+  uint32_t osz=cap; op->cpu_fn(in,in_size,out,&osz);
   return (int)(osz>cap?cap:osz);
 }
 
@@ -90,18 +94,24 @@ int barra_run(const barra_op* op,const uint8_t* in,uint32_t in_size,uint8_t* out
   return -1;
 }
 
+#define BARRA_STAGE_CAP (1u<<20)
 int barra_pipeline(const barra_op* ops,int n,const uint8_t* in,uint32_t in_size,uint8_t* out,uint32_t cap){
   /* Doppelpuffer: Ausgabe jeder Stufe wird Eingabe der naechsten (heute Kopie;
-   * spaeter dmabuf-Handoff ohne Kopie). */
-  static uint8_t a[1<<20], b[1<<20];
-  const uint8_t* cur=in; uint32_t cur_sz=in_size; uint8_t* dst=a;
+   * spaeter dmabuf-Handoff ohne Kopie). Puffer werden pro Aufruf allokiert, damit
+   * parallele Pipelines sich nicht dieselben Stufenpuffer teilen (Thread-Safety). */
+  uint8_t* a=malloc(BARRA_STAGE_CAP); uint8_t* b=malloc(BARRA_STAGE_CAP);
+  if(!a||!b){ free(a); free(b); fprintf(stderr,"barra: Pipeline-Puffer OOM\n"); return -1; }
+  const uint8_t* cur=in; uint32_t cur_sz=in_size; uint8_t* dst=a; int ret=-1;
   for(int i=0;i<n;i++){
-    int r=barra_run(&ops[i],cur,cur_sz,dst,1<<20);
-    if(r<0){ fprintf(stderr,"barra: Stufe %d (%s @ %s) fehlgeschlagen\n",i,ops[i].label?ops[i].label:"",barra_devname(ops[i].device)); return -1; }
+    int r=barra_run(&ops[i],cur,cur_sz,dst,BARRA_STAGE_CAP);
+    if(r<0){ fprintf(stderr,"barra: Stufe %d (%s @ %s) fehlgeschlagen\n",i,ops[i].label?ops[i].label:"",barra_devname(ops[i].device)); goto done; }
+    if((uint32_t)r>=BARRA_STAGE_CAP){ fprintf(stderr,"barra: Stufe %d Ausgabe an Puffergrenze (%u B) — moegliche Trunkierung, Abbruch\n",i,(unsigned)BARRA_STAGE_CAP); goto done; }
     printf("  [%d] %-14s @ %-3s : %u B -> %u B\n", i, ops[i].label?ops[i].label:"op", barra_devname(ops[i].device), cur_sz, (unsigned)r);
     cur=dst; cur_sz=(uint32_t)r; dst=(dst==a)?b:a;
   }
-  uint32_t osz=cur_sz>cap?cap:cur_sz; memcpy(out,cur,osz); return (int)osz;
+  { uint32_t osz=cur_sz>cap?cap:cur_sz; memcpy(out,cur,osz); ret=(int)osz; }
+done:
+  free(a); free(b); return ret;
 }
 
 const char* barra_devname(barra_device d){
@@ -141,6 +151,11 @@ int barra_zc_alloc(barra_zbuf* z, uint32_t size){
 }
 void barra_zc_free(barra_zbuf* z){
   if(!z) return;
+  /* Der lokale fd wird geschlossen, aber die Daemons halten ihre dup'ten fds bis
+   * zum Session-Ende. Wer einen noch importierten Puffer freigibt, laesst den
+   * dmabuf daemon-seitig gepinnt: erst barra_*_release rufen. */
+  if(z->gpu_h>=0||z->tpu_h>=0||z->dsp_h>=0)
+    fprintf(stderr,"barra: WARN barra_zc_free eines noch importierten Puffers (gpu_h=%d tpu_h=%d dsp_h=%d) — vorher barra_*_release rufen, sonst bleibt der dmabuf daemon-seitig gepinnt\n",z->gpu_h,z->tpu_h,z->dsp_h);
   if(z->map){ barra_zc_cpu_end(z); munmap(z->map,z->size); }
   if(z->fd>=0) close(z->fd);
   z->map=0; z->fd=-1; z->size=0; z->gpu_h=-1; z->tpu_h=-1; z->dsp_h=-1;
@@ -183,15 +198,22 @@ int barra_gpu_open(barra_gpu* g){
 }
 void barra_gpu_close(barra_gpu* g){ if(g&&g->sock>=0){ close(g->sock); g->sock=-1; } }
 
+/* Nach einem Protokollfehler mitten in einer Nachricht ist der Stream desynchron:
+ * Session schliessen (sock=-1), damit Folgeaufrufe deterministisch scheitern und
+ * der Daemon die Handles beim Verbindungsabbruch aufraeumt. */
+static int gpu_dead(barra_gpu* g){ if(g&&g->sock>=0){ close(g->sock); g->sock=-1; } return -1; }
+static int tpu_dead(barra_tpu* t){ if(t&&t->sock>=0){ close(t->sock); t->sock=-1; } return -1; }
+static int dsp_dead(barra_dsp* d){ if(d&&d->sock>=0){ close(d->sock); d->sock=-1; } return -1; }
+
 int barra_gpu_import(barra_gpu* g, barra_zbuf** bufs, int n){
   if(!g||g->sock<0||n<=0||n>ZC_MAXBUF) return -1;
   int fds[ZC_MAXBUF]; uint32_t sizes[ZC_MAXBUF], hd[ZC_MAXBUF];
   for(int i=0;i<n;i++){ fds[i]=bufs[i]->fd; sizes[i]=bufs[i]->size; }
   uint32_t hdr[6]={GPZ2_MAGIC,1,(uint32_t)n,0,0,0};
   uint32_t status=1;
-  if(send_hdr_fds(g->sock,hdr,fds,n)||wn(g->sock,sizes,n*4)||rn(g->sock,&status,4)) return -1;
+  if(send_hdr_fds(g->sock,hdr,fds,n)||wn(g->sock,sizes,n*4)||rn(g->sock,&status,4)) return gpu_dead(g);
   if(status!=0){ fprintf(stderr,"barra: GPU-Import status=%u\n",status); return -1; }
-  if(rn(g->sock,hd,n*4)) return -1;
+  if(rn(g->sock,hd,n*4)) return gpu_dead(g);
   for(int i=0;i<n;i++) bufs[i]->gpu_h=(int)hd[i];
   g->nimported+=n; return 0;
 }
@@ -201,9 +223,10 @@ int barra_gpu_release(barra_gpu* g, barra_zbuf** bufs, int n){
   for(int i=0;i<n;i++) if(bufs[i]->gpu_h>=0) hd[k++]=(uint32_t)bufs[i]->gpu_h;
   if(k==0) return 0;
   uint32_t hdr[6]={GPZ2_MAGIC,3,(uint32_t)k,0,0,0}; uint32_t status=1;
-  if(send_hdr_fds(g->sock,hdr,0,0)||wn(g->sock,hd,k*4)||rn(g->sock,&status,4)) return -1;
+  if(send_hdr_fds(g->sock,hdr,0,0)||wn(g->sock,hd,k*4)||rn(g->sock,&status,4)) return gpu_dead(g);
+  if(status!=0) return -1;   /* Daemon meldet Fehler, aber Stream ist synchron: Handles NICHT lokal loeschen */
   for(int i=0;i<n;i++) bufs[i]->gpu_h=-1;
-  g->nimported-=k; return status==0?0:-1;
+  g->nimported-=k; return 0;
 }
 int barra_gpu_batch(barra_gpu* g, const barra_gpu_stage* st, int nstage){
   if(!g||g->sock<0||nstage<=0||nstage>ZC_MAXSTAGE) return -1;
@@ -216,19 +239,20 @@ int barra_gpu_batch(barra_gpu* g, const barra_gpu_stage* st, int nstage){
   }
   /* 2) CPU-Zugriff schliessen (Cache-Flush), Batch senden */
   for(int s=0;s<nstage;s++) for(int i=0;i<st[s].nbuf;i++) barra_zc_cpu_end(st[s].bufs[i]);
-  uint32_t hdr[6]={GPZ2_MAGIC,2,(uint32_t)nstage,0,0,0}; int rc=-1; uint32_t status=1;
+  uint32_t hdr[6]={GPZ2_MAGIC,2,(uint32_t)nstage,0,0,0}; int rc=-1,desync=0; uint32_t status=1;
   if(send_hdr_fds(g->sock,hdr,0,0)==0){
     rc=0;
     for(int s=0;s<nstage&&rc==0;s++){
       uint32_t sh[5]={st[s].slen,st[s].gx,st[s].gy,st[s].gz,(uint32_t)st[s].nbuf}; uint32_t hd[ZC_MAXBUF];
       for(int i=0;i<st[s].nbuf;i++) hd[i]=(uint32_t)st[s].bufs[i]->gpu_h;
-      if(wn(g->sock,sh,20)||wn(g->sock,hd,st[s].nbuf*4)||wn(g->sock,st[s].spirv,st[s].slen)) rc=-1;
+      if(wn(g->sock,sh,20)||wn(g->sock,hd,st[s].nbuf*4)||wn(g->sock,st[s].spirv,st[s].slen)){ rc=-1; desync=1; }
     }
-    if(rc==0){ if(rn(g->sock,&status,4)||status!=0) rc=-1; }
-  }
+    if(rc==0){ if(rn(g->sock,&status,4)){ rc=-1; desync=1; } else if(status!=0) rc=-1; }
+  } else desync=1;
   /* 3) CPU-Zugriff wieder oeffnen (Cache-Invalidate) */
   for(int s=0;s<nstage;s++) for(int i=0;i<st[s].nbuf;i++) barra_zc_cpu_begin(st[s].bufs[i]);
   if(rc) fprintf(stderr,"barra: GPU-Batch fehlgeschlagen (status=%u)\n",status);
+  if(desync) gpu_dead(g);   /* Stream desynchron: Session verwerfen */
   return rc;
 }
 int barra_gpu_dispatch(barra_gpu* g, const uint8_t* spirv, uint32_t slen, uint32_t gx, uint32_t gy, uint32_t gz, barra_zbuf** bufs, int nbuf){
@@ -260,9 +284,9 @@ int barra_tpu_import(barra_tpu* t, barra_zbuf** bufs, int n){
   int fds[ZC_MAXBUF]; uint32_t sizes[ZC_MAXBUF], hd[ZC_MAXBUF];
   for(int i=0;i<n;i++){ fds[i]=bufs[i]->fd; sizes[i]=bufs[i]->size; }
   uint32_t hdr[6]={TPZ2_MAGIC,1,(uint32_t)n,0,0,0}; uint32_t status=1;
-  if(send_hdr_fds(t->sock,hdr,fds,n)||wn(t->sock,sizes,n*4)||rn(t->sock,&status,4)) return -1;
+  if(send_hdr_fds(t->sock,hdr,fds,n)||wn(t->sock,sizes,n*4)||rn(t->sock,&status,4)) return tpu_dead(t);
   if(status!=0){ fprintf(stderr,"barra: TPU-Import status=%u\n",status); return -1; }
-  if(rn(t->sock,hd,n*4)) return -1;
+  if(rn(t->sock,hd,n*4)) return tpu_dead(t);
   for(int i=0;i<n;i++) bufs[i]->tpu_h=(int)hd[i];
   return 0;
 }
@@ -272,9 +296,10 @@ int barra_tpu_release(barra_tpu* t, barra_zbuf** bufs, int n){
   for(int i=0;i<n;i++) if(bufs[i]->tpu_h>=0) hd[k++]=(uint32_t)bufs[i]->tpu_h;
   if(k==0) return 0;
   uint32_t hdr[6]={TPZ2_MAGIC,3,(uint32_t)k,0,0,0}; uint32_t status=1;
-  if(send_hdr_fds(t->sock,hdr,0,0)||wn(t->sock,hd,k*4)||rn(t->sock,&status,4)) return -1;
+  if(send_hdr_fds(t->sock,hdr,0,0)||wn(t->sock,hd,k*4)||rn(t->sock,&status,4)) return tpu_dead(t);
+  if(status!=0) return -1;
   for(int i=0;i<n;i++) bufs[i]->tpu_h=-1;
-  return status==0?0:-1;
+  return 0;
 }
 int barra_tpu_infer(barra_tpu* t, uint32_t model_id, barra_zbuf* in, barra_zbuf* out, uint32_t* exec_us){
   if(!t||t->sock<0||!in||!out||in==out) return -1;
@@ -284,10 +309,12 @@ int barra_tpu_infer(barra_tpu* t, uint32_t model_id, barra_zbuf* in, barra_zbuf*
   if(k&&barra_tpu_import(t,need,k)) return -1;
   barra_zc_cpu_end(in); barra_zc_cpu_end(out);
   uint32_t hdr[6]={TPZ2_MAGIC,2,model_id,(uint32_t)in->tpu_h,(uint32_t)out->tpu_h,0}; uint32_t r[2]={1,0};
-  int rc=(send_hdr_fds(t->sock,hdr,0,0)||rn(t->sock,r,8)||r[0]!=0)?-1:0;
+  int io=(send_hdr_fds(t->sock,hdr,0,0)||rn(t->sock,r,8));
+  int rc=(io||r[0]!=0)?-1:0;
   barra_zc_cpu_begin(in); barra_zc_cpu_begin(out);
   if(exec_us)*exec_us=r[1];
   if(rc) fprintf(stderr,"barra: TPU-Inferenz (zc) fehlgeschlagen (status=%u)\n",r[0]);
+  if(io) tpu_dead(t);
   return rc;
 }
 
@@ -299,15 +326,17 @@ int barra_tpu_submit(barra_tpu* t, uint32_t model_id, barra_zbuf* in, barra_zbuf
   if(k&&barra_tpu_import(t,need,k)) return -1;
   barra_zc_cpu_end(in); barra_zc_cpu_end(out);
   uint32_t hdr[6]={TPZ2_MAGIC,2,model_id,(uint32_t)in->tpu_h,(uint32_t)out->tpu_h,0};
-  if(send_hdr_fds(t->sock,hdr,0,0)){ barra_zc_cpu_begin(in); barra_zc_cpu_begin(out); return -1; }
+  if(send_hdr_fds(t->sock,hdr,0,0)){ barra_zc_cpu_begin(in); barra_zc_cpu_begin(out); return tpu_dead(t); }
   return 0;
 }
 
 int barra_tpu_wait(barra_tpu* t, barra_zbuf* in, barra_zbuf* out, uint32_t* exec_us){
   if(!t||t->sock<0||!in||!out) return -1;
   uint32_t r[2]={1,0};
-  int rc=(rn(t->sock,r,8)||r[0]!=0)?-1:0;
+  int io=rn(t->sock,r,8);
+  int rc=(io||r[0]!=0)?-1:0;
   barra_zc_cpu_begin(in); barra_zc_cpu_begin(out);
+  if(io) tpu_dead(t);
   if(exec_us)*exec_us=r[1];
   if(rc) fprintf(stderr,"barra: TPU-Inferenz (zc, split) fehlgeschlagen (status=%u)\n",r[0]);
   return rc;
@@ -328,9 +357,9 @@ int barra_dsp_import_ex(barra_dsp* d, barra_zbuf** bufs, int n, int cacheable){
   int fds[ZC_MAXBUF]; uint32_t sizes[ZC_MAXBUF], hd[ZC_MAXBUF];
   for(int i=0;i<n;i++){ fds[i]=bufs[i]->fd; sizes[i]=bufs[i]->size; }
   uint32_t hdr[6]={GXPZ_MAGIC,1,(uint32_t)n,(uint32_t)(cacheable?1:0),0,0}; uint32_t status=1;
-  if(send_hdr_fds(d->sock,hdr,fds,n)||wn(d->sock,sizes,n*4)||rn(d->sock,&status,4)) return -1;
+  if(send_hdr_fds(d->sock,hdr,fds,n)||wn(d->sock,sizes,n*4)||rn(d->sock,&status,4)) return dsp_dead(d);
   if(status!=0){ fprintf(stderr,"barra: DSP-Import status=%u\n",status); return -1; }
-  if(rn(d->sock,hd,n*4)) return -1;
+  if(rn(d->sock,hd,n*4)) return dsp_dead(d);
   for(int i=0;i<n;i++) bufs[i]->dsp_h=(int)hd[i];
   return 0;
 }
@@ -341,9 +370,10 @@ int barra_dsp_release(barra_dsp* d, barra_zbuf** bufs, int n){
   for(int i=0;i<n;i++) if(bufs[i]->dsp_h>=0) hd[k++]=(uint32_t)bufs[i]->dsp_h;
   if(k==0) return 0;
   uint32_t hdr[6]={GXPZ_MAGIC,3,(uint32_t)k,0,0,0}; uint32_t status=1;
-  if(send_hdr_fds(d->sock,hdr,0,0)||wn(d->sock,hd,k*4)||rn(d->sock,&status,4)) return -1;
+  if(send_hdr_fds(d->sock,hdr,0,0)||wn(d->sock,hd,k*4)||rn(d->sock,&status,4)) return dsp_dead(d);
+  if(status!=0) return -1;
   for(int i=0;i<n;i++) bufs[i]->dsp_h=-1;
-  return status==0?0:-1;
+  return 0;
 }
 int barra_dsp_run(barra_dsp* d, const char* func, barra_zbuf** bufs, int n,
                   int64_t* rv, uint32_t* exec_us){
@@ -358,12 +388,14 @@ int barra_dsp_run(barra_dsp* d, const char* func, barra_zbuf** bufs, int n,
   uint32_t hd[ZC_MAXBUF]; for(int i=0;i<n;i++) hd[i]=(uint32_t)bufs[i]->dsp_h;
   uint32_t hdr[6]={GXPZ_MAGIC,2,nlen,(uint32_t)n,0,0};
   uint32_t status=1; int64_t rrv=0; uint32_t us=0;
-  int rc=(send_hdr_fds(d->sock,hdr,0,0)||wn(d->sock,func,nlen)||wn(d->sock,hd,(uint32_t)n*4)
-          ||rn(d->sock,&status,4)||rn(d->sock,&rrv,8)||rn(d->sock,&us,4)||status!=0)?-1:0;
+  int io=(send_hdr_fds(d->sock,hdr,0,0)||wn(d->sock,func,nlen)||wn(d->sock,hd,(uint32_t)n*4)
+          ||rn(d->sock,&status,4)||rn(d->sock,&rrv,8)||rn(d->sock,&us,4));
+  int rc=(io||status!=0)?-1:0;
   for(int i=0;i<n;i++) barra_zc_cpu_begin(bufs[i]);
   if(rv)*rv=rrv;
   if(exec_us)*exec_us=us;
   if(rc) fprintf(stderr,"barra: DSP-Kernel '%s' (zc) fehlgeschlagen (status=%u)\n",func,status);
+  if(io) dsp_dead(d);
   return rc;
 }
 int barra_dsp_submit(barra_dsp* d, const char* func, barra_zbuf** bufs, int n, uint32_t* token){
@@ -375,20 +407,24 @@ int barra_dsp_submit(barra_dsp* d, const char* func, barra_zbuf** bufs, int n, u
   for(int i=0;i<n;i++) barra_zc_cpu_end(bufs[i]);          /* Flush: DSP liest */
   uint32_t hd[ZC_MAXBUF]; for(int i=0;i<n;i++) hd[i]=(uint32_t)bufs[i]->dsp_h;
   uint32_t hdr[6]={GXPZ_MAGIC,5,nlen,(uint32_t)n,0,0}; uint32_t status=1, tok=0xffffffff;
-  if(send_hdr_fds(d->sock,hdr,0,0)||wn(d->sock,func,nlen)||wn(d->sock,hd,(uint32_t)n*4)
-     ||rn(d->sock,&status,4)||rn(d->sock,&tok,4)||status!=0){
-    fprintf(stderr,"barra: DSP-Submit '%s' fehlgeschlagen (status=%u)\n",func,status); return -1; }
+  int io=(send_hdr_fds(d->sock,hdr,0,0)||wn(d->sock,func,nlen)||wn(d->sock,hd,(uint32_t)n*4)
+     ||rn(d->sock,&status,4)||rn(d->sock,&tok,4));
+  if(io||status!=0){
+    fprintf(stderr,"barra: DSP-Submit '%s' fehlgeschlagen (status=%u)\n",func,status);
+    return io?dsp_dead(d):-1; }
   if(token)*token=tok;
   return 0;
 }
 int barra_dsp_wait(barra_dsp* d, uint32_t token, barra_zbuf** bufs, int n, int64_t* rv, uint32_t* exec_us){
   if(!d||d->sock<0) return -1;
   uint32_t hdr[6]={GXPZ_MAGIC,6,token,0,0,0}; uint32_t status=1; int64_t rrv=0; uint32_t us=0;
-  int rc=(send_hdr_fds(d->sock,hdr,0,0)||rn(d->sock,&status,4)||rn(d->sock,&rrv,8)||rn(d->sock,&us,4)||status!=0)?-1:0;
+  int io=(send_hdr_fds(d->sock,hdr,0,0)||rn(d->sock,&status,4)||rn(d->sock,&rrv,8)||rn(d->sock,&us,4));
+  int rc=(io||status!=0)?-1:0;
   for(int i=0;i<n;i++) barra_zc_cpu_begin(bufs[i]);        /* Invalidate: CPU sieht Ergebnis */
   if(rv)*rv=rrv;
   if(exec_us)*exec_us=us;
   if(rc) fprintf(stderr,"barra: DSP-Wait token=%u fehlgeschlagen (status=%u)\n",token,status);
+  if(io) dsp_dead(d);
   return rc;
 }
 

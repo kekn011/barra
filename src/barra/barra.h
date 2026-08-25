@@ -25,7 +25,10 @@ typedef enum { BARRA_CPU=0, BARRA_TPU=1, BARRA_GPU=2, BARRA_DSP=3 } barra_device
 
 typedef struct {
   barra_device device;
-  /* CPU: in-process-Funktion (out_size wird gesetzt) */
+  /* CPU: in-process-Funktion. VERTRAG: *out_size traegt beim Aufruf die Ausgabe-
+   * KAPAZITAET (out_cap). Der Callback darf hoechstens so viele Bytes nach 'out'
+   * schreiben und setzt *out_size auf die tatsaechliche Groesse. Mehr zu schreiben
+   * ueberlaeuft den Aufrufer-Puffer (barra clampt nur die gemeldete Groesse). */
   void (*cpu_fn)(const uint8_t* in, uint32_t in_size, uint8_t* out, uint32_t* out_size);
   /* DSP: Funktionsname in der geladenen Lib ("reverse_string", spaeter "vscale") */
   const char* dsp_func;
@@ -59,7 +62,7 @@ void        barra_devices(void);   /* Capability-Tabelle ausgeben */
  * fremde DMA erwartet, kann barra_zc_cpu_end/_begin selbst rufen. */
 typedef struct { int fd; void* map; uint32_t size; int gpu_h; int tpu_h; int dsp_h; } barra_zbuf;   /* gpu_h/tpu_h/dsp_h: Handle in einer GPU-/TPU-/DSP-Session, -1 = nicht importiert */
 int  barra_zc_alloc(barra_zbuf* z, uint32_t size);   /* dmabuf + mmap; 0=ok */
-void barra_zc_free(barra_zbuf* z);
+void barra_zc_free(barra_zbuf* z);                   /* erst barra_*_release rufen, sonst bleibt der dmabuf daemon-seitig gepinnt (Warnung) */
 int  barra_zc_cpu_begin(barra_zbuf* z);              /* DMA_BUF_SYNC_START|RW (CPU greift zu) */
 int  barra_zc_cpu_end(barra_zbuf* z);                /* DMA_BUF_SYNC_END|RW   (CPU fertig, Geraet darf) */
 

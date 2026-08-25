@@ -6,12 +6,17 @@
 #include <string.h>
 #include <ctype.h>
 
+/* *on traegt beim Aufruf die Ausgabe-Kapazitaet (siehe barra.h cpu_fn-Vertrag). */
 static void cpu_upper(const uint8_t* in,uint32_t n,uint8_t* out,uint32_t* on){
+  uint32_t cap=*on; if(n>cap) n=cap;
   for(uint32_t i=0;i<n;i++) out[i]=(uint8_t)toupper(in[i]);
   *on=n;
 }
 static void cpu_tag(const uint8_t* in,uint32_t n,uint8_t* out,uint32_t* on){
-  memcpy(out,in,n); const char* t=" <barra>"; memcpy(out+n,t,8); *on=n+8;
+  uint32_t cap=*on; const char* t=" <barra>";
+  uint32_t nc=n>cap?cap:n; memcpy(out,in,nc);
+  uint32_t tc=(cap>nc)?(cap-nc<8?cap-nc:8):0; if(tc) memcpy(out+nc,t,tc);
+  *on=nc+tc;
 }
 
 static void show(const char* pfx,const uint8_t* b,int n){
