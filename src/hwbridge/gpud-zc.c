@@ -198,7 +198,7 @@ out:
 static void serve_v1(int c, uint32_t* hdr, int* fds, int nfd){
   uint32_t status=1;
   uint32_t spirv_len=hdr[1],gx=hdr[2],gy=hdr[3],gz=hdr[4],nbuf=hdr[5];
-  if(nbuf==0||nbuf>MAXBUF||(int)nbuf!=nfd||spirv_len==0||spirv_len>MAXSPIRV||(spirv_len&3)){ wfull(c,&status,4); return; }
+  if(nbuf==0||nbuf>MAXBUF||(int)nbuf!=nfd||spirv_len==0||spirv_len>MAXSPIRV||(spirv_len&3)||gx>65535u||gy>65535u||gz>65535u){ wfull(c,&status,4); return; }
   uint32_t bsize[MAXBUF];
   if(rfull(c,bsize,nbuf*4)){ wfull(c,&status,4); return; }
   uint32_t* spirv=malloc(spirv_len);
@@ -241,7 +241,7 @@ static void serve_v2(int c, uint32_t* hdr, int* fds, int nfd){
       for(uint32_t s=0; ok&&s<nstage; s++){
         uint32_t sh[5]; if(rfull(c,sh,20)){ ok=0; break; }
         uint32_t slen=sh[0]; memset(&st[s],0,sizeof st[s]); st[s].gx=sh[1]; st[s].gy=sh[2]; st[s].gz=sh[3]; st[s].nbuf=sh[4];
-        if(st[s].nbuf==0||st[s].nbuf>MAXBUF||slen==0||slen>MAXSPIRV||(slen&3)){ ok=0; break; }
+        if(st[s].nbuf==0||st[s].nbuf>MAXBUF||slen==0||slen>MAXSPIRV||(slen&3)||sh[1]>65535u||sh[2]>65535u||sh[3]>65535u){ ok=0; break; }
         uint32_t hd[MAXBUF]; if(rfull(c,hd,st[s].nbuf*4)){ ok=0; break; }
         for(uint32_t i=0;i<st[s].nbuf;i++){ if(hd[i]>=MAXH||!h[hd[i]].used){ ok=0; break; } st[s].buf[i]=h[hd[i]].b; }
         if(!ok) break;

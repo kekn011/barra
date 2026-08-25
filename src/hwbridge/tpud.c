@@ -405,6 +405,7 @@ static void serve_zc(int c, uint32_t* hdr, int* fds, int nfd){
       for(uint32_t i=0;i<nbuf;i++){
         int slot=-1; for(int k=0;k<ZC_MAXH;k++) if(!h[k].used){slot=k;break;}
         if(slot<0){ ok=0; break; }
+        if(sz[i]==0||sz[i]>(512u*1024*1024)){ ok=0; fprintf(stderr,"[tpud] Import-Groesse %u ausserhalb 1..512MiB\n",sz[i]); break; }
         void* b=0; int dfd=dup(fds[i]);                     /* die Lib bekommt ein dup; unser fd bleibt fuer mmap/close */
         impFd(g_factory,g_opt,0,dfd,(long)sz[i],0,&b);
         if(!b){ close(dfd); ok=0; fprintf(stderr,"[tpud] ImportBufferByFd FAIL (size %u)\n",sz[i]); break; }

@@ -120,6 +120,7 @@ static void handle(int c){
   if(ru32(c,&magic)||magic!=MAGIC){ return; }
   if(ru32(c,&spirv_len)||ru32(c,&gx)||ru32(c,&gy)||ru32(c,&gz)||ru32(c,&nbuf)) return;
   if(spirv_len==0||spirv_len>MAXSPIRV||(spirv_len&3)||nbuf==0||nbuf>MAXBUF){ uint32_t s=1; write_full(c,&s,4); return; }
+  if(gx>65535u||gy>65535u||gz>65535u){ uint32_t s=1; write_full(c,&s,4); return; }   /* Vulkan maxComputeWorkGroupCount */
   uint32_t bsize[MAXBUF], bflags[MAXBUF]; long total=0;
   for(uint32_t i=0;i<nbuf;i++){ if(ru32(c,&bsize[i])||ru32(c,&bflags[i])){return;} total+=bsize[i]; if(bsize[i]==0||total>MAXDATA){uint32_t s=2;write_full(c,&s,4);return;} }
   uint32_t* spirv=malloc(spirv_len);
@@ -218,6 +219,7 @@ static void gb_destroy(uint32_t h){
 static uint32_t cmd_run(int c){
   uint32_t slen=0,gx=0,gy=0,gz=0,nbind=0;
   if(ru32(c,&slen)||ru32(c,&gx)||ru32(c,&gy)||ru32(c,&gz)||ru32(c,&nbind)) return 100;
+  if(gx>65535u||gy>65535u||gz>65535u) return 101;   /* Vulkan maxComputeWorkGroupCount */
   if(slen==0||slen>MAXSPIRV||(slen&3)||nbind==0||nbind>MAXBUF) return 101;
   uint32_t hnd[MAXBUF];
   for(uint32_t i=0;i<nbind;i++){ if(ru32(c,&hnd[i])) return 102; if(hnd[i]>=MAXGBUF||!g_gb[hnd[i]].used) return 103; }

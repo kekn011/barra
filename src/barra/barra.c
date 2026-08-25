@@ -23,7 +23,8 @@ static int wn(int fd,const void*p,size_t n){const uint8_t*b=p;size_t s=0;while(s
 static int dial(const char* name){
   int s=socket(AF_UNIX,SOCK_STREAM,0); if(s<0) return -1;
   struct sockaddr_un a; memset(&a,0,sizeof a); a.sun_family=AF_UNIX;
-  snprintf(a.sun_path,sizeof a.sun_path,"%s/%s",sock_dir(),name);
+  int pn=snprintf(a.sun_path,sizeof a.sun_path,"%s/%s",sock_dir(),name);
+  if(pn<0||(size_t)pn>=sizeof a.sun_path){ fprintf(stderr,"barra: Socket-Pfad zu lang (BARRA_SOCK_DIR?)\n"); close(s); return -1; }
   if(connect(s,(struct sockaddr*)&a,sizeof a)<0){ close(s); return -1; }
   return s;
 }

@@ -132,6 +132,13 @@ static bool barra_load_meta(ggml_backend_barra_context * ctx) {
     FILE * f = fopen(mp, "r");
     if (!f) { GGML_LOG_WARN("barra: meta %s nicht lesbar\n", mp); return false; }
     if (fscanf(f, "%d %d %d %d %d", &ctx->D, &ctx->FF, &ctx->B, &ctx->bits, &ctx->NL) != 5) { fclose(f); GGML_LOG_WARN("barra: meta-Kopf ungueltig\n"); return false; }
+    // Header-Werte begrenzen: sie steuern spaeter Allokationsgroessen (B*D*bpe, B*FF, ...) in
+    // 32-bit-Arithmetik; unplausible Werte wuerden ueberlaufen/riesig allozieren.
+    if (ctx->D < 1 || ctx->D > 65536 || ctx->FF < 1 || ctx->FF > 262144 ||
+        ctx->B < 1 || ctx->B > 65536 || ctx->NL < 1 || ctx->NL > 512 ||
+        (ctx->bits != 8 && ctx->bits != 16)) {
+        fclose(f); GGML_LOG_WARN("barra: meta-Kopf ausserhalb plausibler Grenzen (D=%d FF=%d B=%d bits=%d NL=%d)\n", ctx->D, ctx->FF, ctx->B, ctx->bits, ctx->NL); return false;
+    }
     // Optionale Kopf-Felder 6..9 (split, out_div, out_div_gu, Bd) stehen im REST
     // DERSELBEN Zeile. Wir lesen den Zeilenrest komplett und parsen ihn mit EINEM
     // sscanf; so kann ein fehlendes Feld nicht den Zeilenumbruch verschlucken und in

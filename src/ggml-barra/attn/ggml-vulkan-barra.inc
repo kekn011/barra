@@ -462,7 +462,10 @@ static void battn_scan(ggml_cgraph * cg, std::vector<battn_range> & out) {
         if (L < 0 || L >= st.NL || !st.layer_on[L]) continue;
         std::set<ggml_tensor *> claim; claim.insert(wo);
         ggml_tensor * fa = battn_skipv(wo->src[1], &claim);
-        if (!fa || fa->op != GGML_OP_FLASH_ATTN_EXT || fa->src[4]) continue;
+        // src[4] (sinks) nicht unterstuetzt; src[3] (Maske) MUSS vorhanden sein — der
+        // Offload wendet feste kausale Maskierung an, eine Null-Maske (bidirektional)
+        // waere nicht-kausal. ALiBi/logit-softcap werden weiter unten (fap[1]/fap[2]) abgelehnt.
+        if (!fa || fa->op != GGML_OP_FLASH_ATTN_EXT || fa->src[4] || !fa->src[3]) continue;
         claim.insert(fa);
         ggml_tensor * rq = battn_skipv(fa->src[0], &claim);
         if (!rq || rq->op != GGML_OP_ROPE) continue;
