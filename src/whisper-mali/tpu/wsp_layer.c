@@ -13,6 +13,10 @@
 #include <time.h>
 #include "barra.h"
 
+/* saettigende int16-Requantisierung: bei rq>1 nahe der Grenze wuerde (short)lrintf
+ * ueberlaufen und ins Vorzeichen kippen (vgl. np.clip in whisper_pkgs6.py). */
+static inline short qs16(float v){ long r=lrintf(v); return (short)(r>32767?32767:(r<-32768?-32768:r)); }
+
 #define S 1500
 #define D 512
 #define H 8
@@ -74,7 +78,7 @@ int main(int argc,char**argv){
     for(int h=0;h<H;h++){
       short* src=Y+((long)h*3*S)*HD + (long)S*HD;                       /* k+v = 2S Zeilen ab S */
       short* dst=Cm+((long)h*(BQ+2*S))*HD + (long)BQ*HD;
-      for(long i=0;i<(long)2*S*HD;i++){ float v=src[i]*rq; dst[i]=(short)lrintf(v); }
+      for(long i=0;i<(long)2*S*HD;i++){ float v=src[i]*rq; dst[i]=qs16(v); }
     }
     double t2=nowms();
 
@@ -82,7 +86,7 @@ int main(int argc,char**argv){
       for(int h=0;h<H;h++){                                             /* q-Block-Slice tauschen */
         short* src=Y+((long)h*3*S)*HD + (long)b*BQ*HD;
         short* dst=Cm+((long)h*(BQ+2*S))*HD;
-        for(long i=0;i<(long)BQ*HD;i++){ float v=src[i]*rq; dst[i]=(short)lrintf(v); }
+        for(long i=0;i<(long)BQ*HD;i++){ float v=src[i]*rq; dst[i]=qs16(v); }
       }
       double ta=nowms();
       if(barra_tpu_infer(&TC,0,&bC,&bO,&us)){ return 1; }              /* core Block b */

@@ -51,7 +51,14 @@ int main(int argc,char**argv){
         time_t now=time(0);
         FILE* f=fopen(g_trig,"w"); if(f){ fprintf(f,"%ld\n",(long)now); fclose(f); }
         fprintf(stderr,"[wake] %ld WAKE: %s\n",(long)now, r->keyword);
-        if(g_hook && g_hook[0]){ char cmd[512]; snprintf(cmd,sizeof cmd,"%s >>/tmp/barra-wake/wake.log 2>&1 &",g_hook); system(cmd); }
+        if(g_hook && g_hook[0]){
+          /* Log neben die Trigger-Datei legen (deren Verzeichnis existiert — RuntimeDirectory);
+           * die frueher hartkodierte /tmp/barra-wake wurde nie angelegt, der Redirect scheiterte
+           * und der Hook lief nie. */
+          char logp[512]; snprintf(logp,sizeof logp,"%s",g_trig);
+          char* sl=strrchr(logp,'/'); if(sl && (size_t)(sl+1-logp)+9<sizeof logp) strcpy(sl+1,"wake.log"); else snprintf(logp,sizeof logp,"wake.log");
+          char cmd[1024]; snprintf(cmd,sizeof cmd,"%s >>%s 2>&1 &",g_hook,logp); system(cmd);
+        }
         SherpaOnnxResetKeywordStream(kws, st);
       }
       if(r) SherpaOnnxDestroyKeywordResult(r);

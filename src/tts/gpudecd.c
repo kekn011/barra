@@ -13,6 +13,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/time.h>
 #include <errno.h>
 #include "convfused16_spv.h"
 #include "convfused16s_spv.h"
@@ -78,7 +79,7 @@ static float* process(const float* zf,int T,int* out_n){
         int ai=slot(an); int di=slot(dn); if((long)sC[ai]*sT[ai]>ssz[di])ssz[di]=(long)sC[ai]*sT[ai]; sC[di]=sC[ai]; sT[di]=sT[ai]; }
     }
   }
-  for(int i=0;i<nsl;i++) barra_zc_alloc(&sbuf[i],(size_t)ssz[i]*2);
+  for(int i=0;i<nsl;i++) if(barra_zc_alloc(&sbuf[i],(size_t)ssz[i]*2)){ fprintf(stderr,"[gpudecd] zc_alloc Slot %d (%ld B) fehlgeschlagen\n",i,(long)ssz[i]*2); *out_n=0; return 0; }
   barra_zc_cpu_begin(&sbuf[sz]); u16* zt=(u16*)sbuf[sz].map; for(int c=0;c<192;c++) for(int t=0;t<T;t++) zt[c*T+t]=f2h(zf[c*T+t]); barra_zc_cpu_end(&sbuf[sz]);
   sC[sz]=192; sT[sz]=T;
 
@@ -119,7 +120,7 @@ static float* process(const float* zf,int T,int* out_n){
   }
   flush_batch();
   int sw=slot("wav"); int Tt=sT[sw];
-  barra_zc_cpu_begin(&sbuf[sw]); u16* wv=sbuf[sw].map; float* out=malloc((size_t)Tt*4); for(int t=0;t<Tt;t++) out[t]=h2f(wv[t]);
+  barra_zc_cpu_begin(&sbuf[sw]); u16* wv=sbuf[sw].map; float* out=malloc((size_t)Tt*4); if(!out){ *out_n=0; return 0; } for(int t=0;t<Tt;t++) out[t]=h2f(wv[t]);
   for(int i=0;i<nsl;i++) barra_zc_free(&sbuf[i]);
   *out_n=Tt; return out;
 }
@@ -144,13 +145,16 @@ int main(int argc,char**argv){
   struct sockaddr_un a; memset(&a,0,sizeof a); a.sun_family=AF_UNIX; strncpy(a.sun_path,sockpath,sizeof(a.sun_path)-1);
   unlink(sockpath);
   if(bind(srv,(struct sockaddr*)&a,sizeof a)<0){ perror("bind"); return 1; }
-  chmod(sockpath,0666); listen(srv,4);
+  chmod(sockpath,0660); listen(srv,4);   /* nur Owner/Gruppe (nicht welt-beschreibbar) */
   fprintf(stderr,"[gpudecd] bereit, lauscht auf %s (Vokoder warm nach 1. Request)\n",sockpath);
 
   for(;;){
     int c=accept(srv,0,0); if(c<0) continue;
+    struct timeval tv={5,0};   /* Lese-Timeout: ein Client, der zu wenig sendet, blockiert den Daemon nicht mehr */
+    setsockopt(c,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof tv);
     int T=0; if(readn(c,&T,4)||T<=0||T>100000){ close(c); continue; }
     float* zf=malloc((size_t)192*T*4);
+    if(!zf){ close(c); continue; }
     if(readn(c,zf,(size_t)192*T*4)){ free(zf); close(c); continue; }
     double t0=now(); int n=0; float* wav=process(zf,T,&n); double dt=now()-t0;
     fprintf(stderr,"[gpudecd] T=%d -> %d samples (%.2fs Audio) in %.3fs (RTF %.3f)\n",T,n,n/22050.0,dt,dt/(n/22050.0));

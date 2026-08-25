@@ -10,6 +10,9 @@
 #include <time.h>
 #include "barra.h"
 
+/* saettigende int16-Requantisierung (kein Wrap bei rq>1 nahe der Grenze) */
+static inline short qs16(float v){ long r=lrintf(v); return (short)(r>32767?32767:(r<-32768?-32768:r)); }
+
 #define S 1500
 #define D 512
 #define H 8
@@ -94,13 +97,13 @@ int main(int argc,char**argv){
       for(int h=0;h<H;h++){
         short* src=Y+((long)h*3*S)*HD + (long)S*HD;
         short* dst=Cm+((long)h*(BQ+2*S))*HD + (long)BQ*HD;
-        for(long i=0;i<(long)2*S*HD;i++) dst[i]=(short)lrintf(src[i]*rq);
+        for(long i=0;i<(long)2*S*HD;i++) dst[i]=qs16(src[i]*rq);
       }
       for(int b=0;b<NB;b++){
         for(int h=0;h<H;h++){
           short* src=Y+((long)h*3*S)*HD + (long)b*BQ*HD;
           short* dst=Cm+((long)h*(BQ+2*S))*HD;
-          for(long i=0;i<(long)BQ*HD;i++) dst[i]=(short)lrintf(src[i]*rq);
+          for(long i=0;i<(long)BQ*HD;i++) dst[i]=qs16(src[i]*rq);
         }
         double tc=nowms();
         if(barra_tpu_infer(&TC,0,&bC,&bO,&us)) return 1;                /* core */

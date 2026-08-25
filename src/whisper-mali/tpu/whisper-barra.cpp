@@ -12,6 +12,9 @@
 #include <sched.h>
 #include <unistd.h>
 
+/* saettigende int16-Requantisierung (kein Wrap bei rq>1 nahe der Grenze) */
+static inline short qs16(float v){ long r=lrintf(v); return (short)(r>32767?32767:(r<-32768?-32768:r)); }
+
 extern "C" {
 #include "barra.h"
 }
@@ -386,8 +389,8 @@ extern "C" int wsp_barra_encode(const float* x0, float* out, int S_, int D_){
           short* dk=Cm+((long)hl*(WSP_BQ+2*WSP_S) + WSP_BQ + s)*WSP_HD;
           short* dv=Cm+((long)hl*(WSP_BQ+2*WSP_S) + WSP_BQ + WSP_S + s)*WSP_HD;
           for(int d=0;d<WSP_HD;d++){
-            dk[d]=(short)lrintf(wsp_yget(Y,1,h,s,d)*rq);
-            dv[d]=(short)lrintf(wsp_yget(Y,2,h,s,d)*rq);
+            dk[d]=qs16(wsp_yget(Y,1,h,s,d)*rq);
+            dv[d]=qs16(wsp_yget(Y,2,h,s,d)*rq);
           }
         }
       });
@@ -411,7 +414,7 @@ extern "C" int wsp_barra_encode(const float* x0, float* out, int S_, int D_){
             int hl=(int)(i/WSP_BQ), r=(int)(i%WSP_BQ);
             int h=grp*g.HG+hl;
             short* dq=CmT+((long)hl*(WSP_BQ+2*WSP_S) + r)*WSP_HD;
-            for(int d=0;d<WSP_HD;d++) dq[d]=(short)lrintf(wsp_yget(Y,0,h,bb*WSP_BQ+r,d)*rq);
+            for(int d=0;d<WSP_HD;d++) dq[d]=qs16(wsp_yget(Y,0,h,bb*WSP_BQ+r,d)*rq);
           }
         });
       };

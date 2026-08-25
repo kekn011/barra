@@ -65,6 +65,7 @@ int main(int argc,char**argv){
   std::vector<uint8_t> io; std::string out;
   int n_gen=0, mism=0; double t_dsp=0, t_dec=0, t_dsp_max=0;
   double t_pf0=now_ms();
+  llama_token cur=0;   /* ausserhalb der Schleife: batch haelt &cur ueber Iterationsgrenzen hinweg (kein Dangling) */
   for(int n_pos=0; n_pos+batch.n_tokens<n_prompt+n_predict; ){
     double td0=now_ms();
     if(llama_decode(ctx,batch)){ fprintf(stderr,"decode fail\n"); return 1; }
@@ -77,7 +78,7 @@ int main(int argc,char**argv){
     if(llama_vocab_is_eog(vocab,tok)) break;
     char buf[256]; int n=llama_token_to_piece(vocab,tok,buf,sizeof buf,0,true); if(n>0){ out.append(buf,n); fwrite(buf,1,n,stdout); fflush(stdout); }
     n_gen++;
-    llama_token nt=tok; batch=llama_batch_get_one(&nt,1);
+    cur=tok; batch=llama_batch_get_one(&cur,1);
   }
   double t_all=now_ms()-t_pf0;
   printf("\n");
