@@ -356,6 +356,9 @@ void main(){
 #endif
   [[unroll]] for(int r=0;r<R;r++){
     float t = subgroupClusteredAdd(acc[r], TPR);
-    if(lane==0u) y[row0+uint(r)] = t;
+    // Host startet ceil(M/RPW) Workgroups; die letzte deckt Zeilen >= M ab. Ohne diese
+    // Grenze schreibt der Store ueber das Y-Ende hinaus (bislang nur durch
+    // robustBufferAccess abgefangen, das gpugemv.c per GEMV_NOROBUST abschalten kann).
+    if(lane==0u && row0+uint(r) < p.M) y[row0+uint(r)] = t;
   }
 }
