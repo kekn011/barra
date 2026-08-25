@@ -52,7 +52,9 @@ int main(int argc,char**argv){
   void* spirv=malloc(slen); if(fread(spirv,1,slen,f)!=(size_t)slen){fclose(f);return 1;} fclose(f);
 
   long szA=(long)M*K*4, szB=(long)K*NN*4, szC=(long)M*NN*4;
+  if(szA>0xFFFFFFFFL||szB>0xFFFFFFFFL||szC>0xFFFFFFFFL){ fprintf(stderr,"zu gross: Puffer > 4 GiB passt nicht in die uint32-Wire-Groesse\n"); return 2; }
   float *A=malloc(szA),*B=malloc(szB),*C=malloc(szC);
+  if(!A||!B||!C){ fprintf(stderr,"malloc fail\n"); return 1; }
   for(int i=0;i<M;i++) for(int k=0;k<K;k++) A[i*K+k]=av(i,k,K);
   for(int k=0;k<K;k++) for(int j=0;j<NN;j++) B[k*NN+j]=bv(k,j,NN);
   uint32_t dims[4]={(uint32_t)M,(uint32_t)NN,(uint32_t)K,0};

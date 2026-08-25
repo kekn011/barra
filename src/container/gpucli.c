@@ -21,6 +21,7 @@ int main(int argc,char**argv){
   if(argc<3){ fprintf(stderr,"usage: gpucli <sock> <vadd.spv> [N=4096] [runs=1]\n"); return 2; }
   const char* sock=argv[1]; const char* spv=argv[2];
   int N=argc>3?atoi(argv[3]):4096; int runs=argc>4?atoi(argv[4]):1;
+  if(N<=0 || N>(1<<26)){ fprintf(stderr,"N ausserhalb 1..67108864\n"); return 2; }
   if(N%64){ N=(N/64)*64; if(N==0)N=64; }
 
   FILE* f=fopen(spv,"rb"); if(!f){ printf("kann SPIR-V nicht oeffnen: %s\n",spv); return 1; }
@@ -29,6 +30,7 @@ int main(int argc,char**argv){
 
   long bytes=(long)N*4;
   float *A=malloc(bytes),*B=malloc(bytes),*C=malloc(bytes);
+  if(!A||!B||!C){ fprintf(stderr,"malloc fail\n"); return 1; }
   for(int i=0;i<N;i++){ A[i]=(float)i; B[i]=(float)(3*i); }
 
   double t0=ms(); int last_bad=0;

@@ -26,9 +26,11 @@ int main(int argc,char**argv){
   wn(s,hdr,sizeof hdr); wn(s,fn,nlen); wn(s,buf,in_size);
   uint32_t status; if(rn(s,&status,4)){ fprintf(stderr,"keine Antwort\n"); return 1; }
   if(status!=0){ printf("STATUS=%u (Fehler)\n",status); return 1; }
-  int64_t rv; uint32_t exec_us, osz;
-  rn(s,&rv,8); rn(s,&exec_us,4); rn(s,&osz,4);
-  int32_t* out=malloc(osz); rn(s,out,osz);
+  int64_t rv=0; uint32_t exec_us=0, osz=0;
+  if(rn(s,&rv,8)||rn(s,&exec_us,4)||rn(s,&osz,4)){ fprintf(stderr,"Antwort unvollstaendig\n"); return 1; }
+  if(osz>64) osz=64;                          /* wie gxpcli.c: Ausgabe deckeln */
+  int32_t* out=malloc(osz?osz:4); if(!out){ return 1; }
+  if(rn(s,out,osz)){ free(out); fprintf(stderr,"out unvollstaendig\n"); return 1; }
   printf("OK rv=%lld exec=%uus  (k=%d)\n",(long long)rv,exec_us,buf[0]);
   printf("in :"); for(int i=0;i<nv;i++) printf(" %d",buf[i]); printf("\n");
   printf("out:"); for(uint32_t i=0;i<osz/4;i++) printf(" %d",out[i]); printf("\n");

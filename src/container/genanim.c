@@ -61,7 +61,9 @@ int main(int argc,char**argv){
     bar(bx,by,bw,bh,frac,91,141,239);
     char path[256]; snprintf(path,sizeof path,"%s/%05d.png",dir,fr); writepng(path);
   }
-  FILE*d=fopen(desc,"w"); if(d){ fprintf(d,"%d %d %d\np 0 0 part0\n",W,H,FPS); fclose(d); }
+  const char* base=strrchr(dir,'/'); base = base ? base+1 : dir;   /* Part-Name = basename(dir), nicht hartkodiert 'part0' */
+  FILE*d=fopen(desc,"w"); if(d){ fprintf(d,"%d %d %d\np 0 0 %s\n",W,H,FPS,base); fclose(d); }
+  else { fprintf(stderr,"kann %s nicht schreiben\n",desc); return 1; }
   printf("OK %d Frames -> %s, desc -> %s\n",NFR,dir,desc);
   return 0;
 }
