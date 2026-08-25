@@ -41,7 +41,14 @@ static void run_action(const char* action){
   else if(!strcmp(action,"display"))    system("sh " DISP " toggle 2>/dev/null &");
   else if(!strcmp(action,"displayon"))  system("sh " DISP " on 2>/dev/null &");
   else if(!strcmp(action,"displayoff")) system("sh " DISP " off 2>/dev/null &");
-  else if(!strncmp(action,"exec:",5)) { char c[300]; snprintf(c,sizeof c,"sh %s &",action+5); system(c); }
+  else if(!strncmp(action,"exec:",5)) {
+    /* Defense-in-depth: nur Skripte aus dem root-eigenen, container-unschreibbaren
+     * Verzeichnis ausfuehren (cfgd validiert bereits, aber wir laufen als root). */
+    const char* path=action+5;
+    if(!strncmp(path,"/data/adb/hwbridge/actions/",sizeof("/data/adb/hwbridge/actions/")-1) && !strstr(path,"..")){
+      char c[300]; snprintf(c,sizeof c,"sh %s &",path); system(c);
+    }
+  }
   /* log / none / leer -> nichts weiter */
 }
 

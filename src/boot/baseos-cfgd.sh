@@ -22,6 +22,12 @@ OLD=$(cat "$PIDF" 2>/dev/null)
 if [ -n "$OLD" ] && grep -qa baseos-cfgd "/proc/$OLD/cmdline" 2>/dev/null; then exit 0; fi
 echo $$ > "$PIDF"; trap 'rm -f "$PIDF"' EXIT
 
+# ACHTUNG Vertrauensgrenze: $CFG ist in den Container gemountet und welt-beschreibbar,
+# damit jeder Container-uid Requests ablegen kann. Dieser Daemon laeuft als Android-root
+# und fuehrt die Requests unauthentifiziert aus — jeder Container-Prozess kann also z.B.
+# 'power reboot' ausloesen. 'exec:'-Aktionen sind auf ein root-eigenes Verzeichnis
+# beschraenkt (s. apply_button). Fuer echte Isolation: $CFG auf 770 mit einer dem
+# Container gemeinsamen Gruppe statt 777, oder Requests authentifizieren.
 mkdir -p "$CFG" 2>/dev/null; chmod 777 "$CFG" 2>/dev/null
 
 setkv(){ # key value -> in den root-Config-Store (robust gegen / & und Leerzeichen im Wert)
@@ -44,7 +50,22 @@ apply_charge(){
 apply_button(){   # KEY AKTION -> in buttons.conf setzen (btnd liest sie frisch je Druck)
   K=$1; A=$2
   case "$K" in POWER|POWER_LONG|VOLUMEUP|VOLUMEDOWN) ;; *) echo "ERR button: Taste?"; return;; esac
-  case "$A" in none|log|shutdown|reboot|volup|voldown|display|displayon|displayoff|exec:*) ;; *) echo "ERR button: Aktion?"; return;; esac
+  # WICHTIG: cfgd laeuft als Android-root und bedient unauthentifizierte Requests aus
+  # dem container-sichtbaren, welt-beschreibbaren $CFG. 'exec:' laeuft spaeter als root
+  # (btnd), also NUR Skripte aus einem root-eigenen, container-UNschreibbaren Verzeichnis
+  # zulassen — sonst ist das ein Container->Android-root-Eskalationspfad.
+  case "$A" in
+    exec:*)
+      P=${A#exec:}
+      case "$P" in
+        /data/adb/hwbridge/actions/*) ;;
+        *) echo "ERR button: exec-Pfad nur unter /data/adb/hwbridge/actions/"; return;;
+      esac
+      case "$P" in *..*) echo "ERR button: exec-Pfad ungueltig"; return;; esac
+      ;;
+    none|log|shutdown|reboot|volup|voldown|display|displayon|displayoff) ;;
+    *) echo "ERR button: Aktion?"; return;;
+  esac
   BC=/data/adb/hwbridge/buttons.conf; touch "$BC"
   if grep -q "^$K=" "$BC" 2>/dev/null; then sed -i "s|^$K=.*|$K=$A|" "$BC"; else echo "$K=$A" >> "$BC"; fi
   echo "OK button $K=$A"
