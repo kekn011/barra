@@ -26,7 +26,10 @@ case "${1:-status}" in
   start)
     pins_on
     insys "systemctl start barra-tts; sleep 3; systemctl is-active barra-tts"
-    echo "TTS gestartet -> http://<node>:8095/say?voice=david|piper-de|piper-en&text=...";;
+    # Hebel 5 (Lazy-Compile-Warmup): der erste David-/say zahlt den ~2,4s Mali-Shader-Compile.
+    # Jetzt beim Start abfangen statt beim Nutzer. Kurzer Text, play=0, best-effort mit Retries.
+    insys "for i in 1 2 3 4 5; do curl -s -m 30 -o /dev/null 'http://localhost:8095/say?voice=david&play=0&text=warmup' && break; sleep 2; done; echo warmup-done"
+    echo "TTS gestartet (vorgewaermt) -> http://<node>:8095/say?voice=david|piper-de|piper-en&text=...";;
   stop)
     insys "systemctl stop barra-tts"
     pins_off
