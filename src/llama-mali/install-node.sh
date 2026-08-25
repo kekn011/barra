@@ -7,7 +7,9 @@ SER=${1:-}; [ -n "$SER" ] && ADB="adb -s $SER" || ADB=adb
 BIN=${2:-$HOME/llama.cpp/build-android-vulkan-idp/stage}
 case "$(uname -s)" in MINGW*|MSYS*) BIN=${2:-//wsl.localhost/Ubuntu-24.04/home/kevin/llama.cpp/build-android-vulkan-idp/stage}; SRC=$(cygpath -w "$SRC");; esac
 T=/data/local/tmp/llm-stage
-$ADB shell "mkdir -p $T"
+# Stage-Verzeichnis 700: nur shell-Kontext + root, damit kein anderer App-uid die gepushten
+# Binaries zwischen push und dem root-cp nach /data/adb/baseos austauscht (TOCTOU).
+$ADB shell "rm -rf $T; mkdir -p $T; chmod 700 $T"
 for f in llama-server llama-bench llama-perplexity llama-quantize llama-cli barra-llm run-llm.sh \
          libggml-base.so libggml-cpu.so libggml-vulkan.so libggml-barra.so libggml.so libllama.so libllama-common.so libmtmd.so \
          libllama-server-impl.so libllama-bench-impl.so libllama-perplexity-impl.so libllama-quantize-impl.so libllama-cli-impl.so; do

@@ -14,8 +14,17 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export TMPDIR=/tmp   # Android-su vererbt sonst /data/local/tmp -> existiert im chroot nicht (dpkg-deb temp file error)
 VER=0.2.0; REV=1; ARCH=$(dpkg --print-architecture)
 SRC=/tmp/barra-src; SDK=/tmp/barra-sdk
-ST=/tmp/barra-debs; OUT=$ST/out
-rm -rf "$ST"; mkdir -p "$OUT"
+# Als root fuehren wir gleich build.sh AUS $SRC aus und dpkg-installieren daraus. Vorher
+# sicherstellen, dass die Eingaben root-eigen und nicht gruppen/welt-schreibbar sind, sonst
+# koennte ein unprivilegierter Prozess sie unterschieben/racen (root-Code-Ausfuehrung).
+chk_safe(){
+  [ -d "$1" ] || { echo "FEHLER: $1 fehlt"; exit 1; }
+  [ "$(stat -c %u "$1" 2>/dev/null)" = 0 ] || { echo "FEHLER: $1 nicht root-eigen - Abbruch"; exit 1; }
+  [ -z "$(find "$1" -maxdepth 0 -perm /022 2>/dev/null)" ] || { echo "FEHLER: $1 gruppen/welt-schreibbar - Abbruch"; exit 1; }
+}
+chk_safe "$SRC"; chk_safe "$SDK"
+ST=$(mktemp -d); OUT=$ST/out       # Ausgabe in ein frisches, privates Verzeichnis
+mkdir -p "$OUT"
 
 echo "== libbarra bauen (gcc, im Container) =="
 ( cd "$SRC" && sh build.sh build >/dev/null )
@@ -100,5 +109,5 @@ ldconfig
 echo "== Verifikation =="
 pkg-config --modversion barra
 pkg-config --cflags --libs barra
-mkdir -p /tmp/barra-verify && cp /usr/share/barra/examples/* /tmp/barra-verify/ && ( cd /tmp/barra-verify && sh build.sh )
+VERIFY=$(mktemp -d) && cp /usr/share/barra/examples/* "$VERIFY/" && ( cd "$VERIFY" && sh build.sh ); rm -rf "$VERIFY"
 echo MKDEBSDONE

@@ -3,6 +3,8 @@
 # Entpackt den Base-Payload und richtet Hooks/Rechte ein. Idempotent (nochmal ausfuehren = Update).
 set -e
 K=/data/local/tmp/barra-kit
+# Klartext-Credentials (Passwort/PSK) garantiert entfernen — auch bei Fehlerabbruch (set -e).
+trap 'rm -f "$K/preconfig.env" 2>/dev/null' EXIT
 TB=$K/barra-base.tar.gz
 MODE=${1:-install}     # install (Standard) | preconfig (nur Pre-Einrichtung auf vorhandene Base anwenden)
 if [ "$MODE" = preconfig ]; then

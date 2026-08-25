@@ -295,6 +295,17 @@ function Ensure-Tools(){
   if ((Ask (T 'core.tl.terms_q') 'yn') -ne 'j') { throw 'CANCEL' }
   $ptZip = Join-Path $env:TEMP 'platform-tools-windows.zip'
   Download-Url $PlatformToolsUrl $ptZip (T 'core.tl.dl_lbl')
+  # F41: falls in stock-target.ps1 ein SHA-256 gepinnt ist, verifizieren (wie beim Factory-Image);
+  # sonst warnen, dass adb/fastboot nur ueber TLS abgesichert sind.
+  if ($PlatformToolsSha) {
+    if ((Get-FileHash $ptZip -Algorithm SHA256).Hash -ne $PlatformToolsSha.ToUpper()) {
+      Remove-Item $ptZip -Force -ErrorAction SilentlyContinue
+      Fail 'platform-tools SHA-256 stimmt nicht - Abbruch'
+    }
+    Ok 'platform-tools Integritaet ok'
+  } else {
+    Warn 'platform-tools ungepinnt (nur TLS) - zum Pinnen PlatformToolsSha in stock-target.ps1 setzen'
+  }
   Progress -1 (T 'core.tl.unpack')
   $ptDir = Join-Path $env:TEMP 'barra-platform-tools'
   Remove-Item $ptDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -515,6 +526,7 @@ function Step4_Base(){
     if (($rd.lines -join ' ') -notmatch 'file pushed') { Remove-Item $pre -Force -ErrorAction SilentlyContinue; Fail (T 'core.s4.pre_fail') }
     $rp = Run $script:ADB "push `"$pre`" /data/local/tmp/barra-kit/preconfig.env" $null 60
     if (($rp.lines -join ' ') -notmatch 'file pushed') { Remove-Item $pre -Force -ErrorAction SilentlyContinue; Fail (T 'core.s4.pre_fail') }
+    [void](AdbSh 'chmod 600 /data/local/tmp/barra-kit/preconfig.env 2>/dev/null' 10)   # Klartext-Credentials sofort abschirmen
     Remove-Item $pre -Force -ErrorAction SilentlyContinue
     Progress -1 (T 'core.s4.pre_apply')
     $r = Run $script:ADB "shell su -c 'sh /data/local/tmp/barra-kit/device-install.sh preconfig'" $null 300
@@ -538,9 +550,9 @@ function Step4_Base(){
     $r = Run $script:ADB "push `"$tar`" /data/local/tmp/barra-kit/barra-base.tar.gz" { param($l) if ($l -match '\[\s*(\d+)%\]') { Progress ([int]$Matches[1]) (T 'core.s4.push_pct' $Matches[1]) } } 900 'out'
     if (($r.lines -join ' ') -match 'file pushed') { $pushed=$true }
   }
-  if (-not $pushed) { Fail (T 'core.s4.push_fail') }
+  if (-not $pushed) { Remove-Item $pre -Force -ErrorAction SilentlyContinue; Fail (T 'core.s4.push_fail') }   # keine Klartext-env in %TEMP% zuruecklassen
   [void](Run $script:ADB "push `"$(Join-Path $script:Kit 'device-install.sh')`" /data/local/tmp/barra-kit/" $null 60)
-  if (Test-Path $pre) { [void](Run $script:ADB "push `"$pre`" /data/local/tmp/barra-kit/preconfig.env" $null 60); Remove-Item $pre -Force -ErrorAction SilentlyContinue }
+  if (Test-Path $pre) { [void](Run $script:ADB "push `"$pre`" /data/local/tmp/barra-kit/preconfig.env" $null 60); [void](AdbSh 'chmod 600 /data/local/tmp/barra-kit/preconfig.env 2>/dev/null' 10); Remove-Item $pre -Force -ErrorAction SilentlyContinue }
   Info (T 'core.s4.install'); Progress -1 (T 'core.s4.install_prog')
   $r = Run $script:ADB "shell su -c 'sh /data/local/tmp/barra-kit/device-install.sh'" $null 900
   if (($r.lines -join ' ') -notmatch 'OK - Base installiert') { Fail (T 'core.s4.incomplete') }

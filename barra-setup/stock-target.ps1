@@ -13,3 +13,7 @@ $StockZip   = Join-Path $env:TEMP ("akita-$StockBuild-factory.zip")
 # Google platform-tools (adb.exe/fastboot.exe) — also fetched, never redistributed.
 # "latest" is Google's stable alias; no pinned SHA (HTTPS direct from Google).
 $PlatformToolsUrl = 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip'
+# Zum Pinnen (empfohlen): eine versionierte platform-tools-URL eintragen und deren SHA-256 hier
+# hinterlegen — dann verifiziert Ensure-Tools die Binaries wie das Factory-Image. Leer = nur TLS.
+# (z.B. https://dl.google.com/android/repository/platform-tools_r35.0.2-windows.zip)
+$PlatformToolsSha = ''

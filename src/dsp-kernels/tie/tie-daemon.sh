@@ -5,7 +5,7 @@ KDIR=/data/local/tmp/tie-kernels
 SOCKDIR=/data/local/ubuntu/opt/hwbridge/test
 GXPD=/data/local/tmp/hb/gxpd3
 pkill -f "gxpd3 $SOCKDIR" 2>/dev/null; sleep 1
-mkdir -p $SOCKDIR; chmod 777 $SOCKDIR
+mkdir -p $SOCKDIR; chmod 755 $SOCKDIR   # nicht welt-beschreibbar (Daemon laeuft als root/shell)
 mkdir -p $KDIR
 chmod 755 $GXPD
 export GXPD_KDIR=$KDIR

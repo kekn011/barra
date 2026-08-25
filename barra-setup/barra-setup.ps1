@@ -438,7 +438,7 @@ $ui.BtnStart.Add_Click({
 $ui.BtnNext1.Add_Click({
   $u=$ui.FUser.Text.Trim(); $p1=$ui.FPass.Password; $p2=$ui.FPass2.Password; $h=$ui.FHost.Text.Trim(); $tz=$ui.FTz.Text.Trim(); $ssid=$ui.FSsid.Text.Trim(); $psk=$ui.FPsk.Password; $key=$ui.FKey.Text.Trim()
   if ($u -notmatch '^[a-z][a-z0-9_-]{0,31}$') { $ui.FErr.Text=T 'setup.err.user'; return }
-  if ($p1.Length -lt 4) { $ui.FErr.Text=T 'setup.err.pass'; return }
+  if ($p1.Length -lt 8) { $ui.FErr.Text=T 'setup.err.pass'; return }
   if ($p1 -ne $p2) { $ui.FErr.Text=T 'setup.err.pass2'; return }
   if ($h -notmatch '^[a-z0-9][a-z0-9-]{0,62}$') { $ui.FErr.Text=T 'setup.err.host'; return }
   if ($ssid -and $psk -and $psk.Length -lt 8) { $ui.FErr.Text=T 'setup.err.psk'; return }
@@ -448,7 +448,8 @@ $ui.BtnNext1.Add_Click({
   # injektionssicher (kein Newline->Space-Flattening, keine Quote-Ausbrueche auf dem Geraet).
   $keyB64 = if ($key) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($key -replace "`r`n","`n"))) } else { '' }
   $script:precfg = [ordered]@{ USER=$u; PASS=$p1; HOST=$h; TZ=$tz; SSID=$ssid; PSK=$psk; SSHKEY_B64=$keyB64; CHARGE_START=$ui.FChgS.Text; CHARGE_STOP=$ui.FChgE.Text; DISPLAY_TIMEOUT=$ui.FDisp.Text; LANG_UI=$script:lang }
-  Save-Cfg @{ user=$u; host=$h; tz=$tz; ssid=$ssid; psk=$psk; key=$key; chgS=$ui.FChgS.Text; chgE=$ui.FChgE.Text; disp=$ui.FDisp.Text; lang=$script:lang }
+  # PSK NICHT persistieren (kein Klartext-WLAN-Passwort in setup.json); SSID/User/etc. sind ok.
+  Save-Cfg @{ user=$u; host=$h; tz=$tz; ssid=$ssid; key=$key; chgS=$ui.FChgS.Text; chgE=$ui.FChgE.Text; disp=$ui.FDisp.Text; lang=$script:lang }
   # Weiter zum Paket-Bildschirm (falls Kits vorliegen), sonst direkt zum Flashen
   Detect-Kits
   if ($script:kitAvail.Count) { Init-Pkg-Screen; Show-Page 'pkg' } else { Enter-FlashPage @() }

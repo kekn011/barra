@@ -86,6 +86,10 @@ static uint32_t kern_min_in(const char* name){
   for(int i=0;i<NKERN;i++) if(g_kern[i].name && !strcmp(g_kern[i].name,name)) return g_kern[i].min_in;
   return 0;
 }
+/* Kernel, die die Elementzahl N aus buf[0] lesen und N Elemente (>=4 B) verarbeiten.
+ * N*4 > in_size ist dann garantiert ein Out-of-bounds — sichere Ablehnung ohne
+ * valide Aufrufe zu treffen (untere Schranke, kein Layout-Rateraten). */
+static int kern_count0(const char* name){ return (!strcmp(name,"sum")||!strcmp(name,"argmax")); }
 
 #include <dirent.h>
 /* Auto-Scan: jede ker_<name>.elf im Kernel-Verzeichnis wird als Kernel <name> angeboten
@@ -240,6 +244,7 @@ static void serve_inline(int cfd){
   uint8_t* in=malloc(in_size); uint8_t* out=malloc(in_size);
   if(!in||!out){ free(in);free(out); uint32_t st=8; write_n(cfd,&st,4); return; }
   if(read_n(cfd,in,in_size)){ free(in);free(out); return; }
+  if(kern_count0(name)){ uint32_t N; memcpy(&N,in,4); if((uint64_t)N*4>in_size){ LOG("[gxpd3] '%s' N=%u passt nicht in %u B - abgelehnt\n",name,N,in_size); free(in);free(out); uint32_t st=1; write_n(cfd,&st,4); return; } }
   int64_t rv=0; uint32_t exec_us=0;
   int st=gxp_run(name,in,in_size,out,&rv,&exec_us);
   uint32_t status=(uint32_t)st; write_n(cfd,&status,4);
