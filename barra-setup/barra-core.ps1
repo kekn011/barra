@@ -711,6 +711,7 @@ function Run-KitsInner(){
     # $D setzt jeder Aufrufer auf sein Zielverzeichnis.
     $KitDiag = 'kdiag(){ echo ==KDIAG $1 i=$i D=$D; id; getenforce; ls -ldZ /data /data/local /data/local/tmp $D; ls -l /proc/1/ns/mnt /proc/self/ns/mnt; grep -E " /data | /data/local/ubuntu " /proc/self/mounts; dmesg | grep -iE "avc|fscrypt|f2fs" | tail -5; echo ==KDIAG-END; }; '
     $kits = @(); if ($script:PreCfg -and $script:PreCfg.KITS) { $kits = @($script:PreCfg.KITS) }
+    Log ("Kit-Lauf startet fuer: [" + ($kits -join ',') + "]")
     if (-not $kits.Count) { Pkg (T 'core.kit.all_ok') 'ok'; return }
     # Koexistenz-Verbot (22.8., am Geraet bewiesen): llm gleichzeitig mit stt/pya = OOM-Panic +
     # TPU-Graph-Limit. Bei Konflikt-Auswahl wird alles INSTALLIERT, aber KEIN Dienst gestartet.

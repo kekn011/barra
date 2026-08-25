@@ -525,6 +525,13 @@ $ui.BtnPkgNext.Add_Click({
   if ($ui.ChkWake.IsEnabled -and $ui.ChkWake.IsChecked) { $sel+='wake' }
   if ($ui.ChkImg.IsEnabled -and $ui.ChkImg.IsChecked) { $sel+='img' }
   if ($ui.ChkDev.IsEnabled -and $ui.ChkDev.IsChecked) { $sel+='dev' }
+  # Auswahl protokollieren: am 25.8. fehlten im Lauf zwei angewaehlte Pakete (tts/wake) im
+  # Installationsschritt, und das Log hielt die Auswahl nicht fest -> nicht rekonstruierbar.
+  # Zustand JEDER Checkbox mitschreiben (enabled+checked), damit der Fall beim naechsten Mal
+  # eindeutig ist: Karte gar nicht angeboten, Haken nicht gesetzt, oder beim Einsammeln verloren.
+  $dbg = @(@('llm',$ui.ChkLlm),@('stt',$ui.ChkStt),@('pya',$ui.ChkPya),@('tts',$ui.ChkTts),@('wake',$ui.ChkWake),@('img',$ui.ChkImg),@('dev',$ui.ChkDev)) |
+    ForEach-Object { "$($_[0])=$(if($_[1].IsEnabled){'an'}else{'aus'})/$(if($_[1].IsChecked){'x'}else{'-'})" }
+  Write-LogFile ("Paketauswahl: [" + ($sel -join ',') + "]  Checkboxen: " + ($dbg -join ' '))
   $script:selKits=$sel; $script:kitModels=@{}
   if ($sel.Count) { $script:modelIdx=0; Show-Model-Screen } else { Enter-FlashPage @() }
 })
