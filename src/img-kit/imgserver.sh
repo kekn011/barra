@@ -17,7 +17,10 @@ pins_on(){   # Mali-Mindesttakt anheben, solange der Dienst laeuft (wie tts)
   echo 890000 > /sys/class/misc/mali0/device/scaling_min_freq 2>/dev/null
   echo 890000 > /sys/class/misc/mali0/device/hint_min_freq 2>/dev/null
 }
-pins_off(){ echo 0 > /sys/class/misc/mali0/device/scaling_min_freq 2>/dev/null; }
+pins_off(){   # 'echo 0' ist auf diesem mali-devfreq ein No-op -> konkreten HW-Idle-Wert, BEIDE Regler
+  echo 150000 > /sys/class/misc/mali0/device/scaling_min_freq 2>/dev/null
+  echo 150000 > /sys/class/misc/mali0/device/hint_min_freq 2>/dev/null
+}
 
 case "${1:-status}" in
   stop)   pkill -f "$K/bin/sd-server"; pins_off; sleep 1; echo "img: stopped";;

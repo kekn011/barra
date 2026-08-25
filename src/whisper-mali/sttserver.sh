@@ -24,7 +24,8 @@ pins_on(){
 pins_off(){
   for CP in /sys/devices/system/cpu/cpufreq/policy*; do echo schedutil > $CP/scaling_governor 2>/dev/null; done
   echo interactive > $F/17000010.devfreq_mif/governor 2>/dev/null
-  echo 0 > /sys/class/misc/mali0/device/scaling_min_freq 2>/dev/null
+  echo 150000 > /sys/class/misc/mali0/device/scaling_min_freq 2>/dev/null   # 'echo 0' = No-op auf mali-devfreq
+  echo 150000 > /sys/class/misc/mali0/device/hint_min_freq 2>/dev/null
 }
 
 start_tpuds(){
