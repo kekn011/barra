@@ -16,6 +16,23 @@ rm -f /etc/machine-id /var/lib/dbus/machine-id
 systemd-machine-id-setup >/dev/null 2>&1
 [ -f /etc/machine-id ] && ln -sf /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
 
+# 2b) journald an die neue machine-id angleichen. journald ist VOR uns gestartet und haelt
+# die alte (transiente) ID: es schreibt den ganzen Erst-Boot weiter nach
+# /var/log/journal/<alt-id>/, waehrend journalctl ab jetzt unter der NEUEN ID sucht ->
+# "No journal files were found", d.h. der komplette Erst-Boot ist unprotokolliert und
+# jedes 'server.sh log' der Kits laeuft leer. (Am 25.8. am frisch geflashten Node
+# beobachtet und mit journalctl -D im Alt-Verzeichnis nachgewiesen.) Alt-Verzeichnisse
+# wegraeumen, dann journald neu starten - ab da sind die Logs auffindbar.
+nid=$(cat /etc/machine-id 2>/dev/null)
+if [ -n "$nid" ] && [ -d /var/log/journal ]; then
+  for d in /var/log/journal/*/; do
+    b=$(basename "$d"); [ "$b" = "*" ] && continue
+    [ "$b" != "$nid" ] && rm -rf "$d"
+  done
+fi
+systemctl restart systemd-journald >/dev/null 2>&1
+logger -t barra-firstboot "machine-id neu ($nid), journald neu gestartet"
+
 # Pre-Einrichtung durch die Setup-GUI? Dann sind Hostname/Benutzer/Passwort schon gesetzt.
 PRE=0; [ -f /var/lib/barra/preconfigured ] && PRE=1
 # 3) Eindeutiger Hostname: barra-<4 hex aus machine-id>, nur wenn noch Default (und nicht vorkonfiguriert)

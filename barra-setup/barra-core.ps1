@@ -765,6 +765,14 @@ function Run-KitsInner(){
         KitPush (Join-Path $script:Kit "whisper-kit\$mf") '/data/local/tmp/stt-model.bin' $name
         $o = AdbSuM ('mkdir -p /data/local/barra-stt/models && mv /data/local/tmp/stt-model.bin /data/local/barra-stt/models/' + $mf + ' && echo MDL_OK') 120
         if ($o -notmatch 'MDL_OK') { throw (T 'core.kit.fail' "$name (model)") }
+        # sttserver.sh aus dem Kit-Ordner (= src/whisper-mali) nachziehen, falls vorhanden: das Base-Image
+        # traegt eine eigene Kopie, die zwischen zwei Bakes veralten kann (v13: pins_off-No-op). Wie beim TTS-Kit.
+        $ssv = Join-Path $script:Kit 'whisper-kit\sttserver.sh'
+        if (Test-Path $ssv) {
+          KitPush $ssv '/data/local/tmp/sttserver.sh' $name
+          $o = AdbSuM ('cp /data/local/tmp/sttserver.sh /data/adb/baseos/bin/sttserver.sh && chmod 755 /data/adb/baseos/bin/sttserver.sh && rm -f /data/local/tmp/sttserver.sh && echo SSV_OK') 60
+          if ($o -notmatch 'SSV_OK') { throw (T 'core.kit.fail' "$name (sttserver.sh)") }
+        }
         # KEIN Auto-Start (Kevin): nur installieren; Start manuell via sttserver.sh start
         Ok (T 'core.kit.ok' $name)
       }

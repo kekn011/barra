@@ -1,0 +1,61 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+// Fusionierter Conv1d (implicit im2col) + Epilog (bias+res+tanh), f16, f32-Akku. Schreibt DIREKT
+// in den Ausgabe-Slot [Cout,Tout] (kein ZC-Scratch, keine Epilog-Stufe).
+#define TM 64
+#define TN 128
+#define TK 32
+#define MM 4
+#define MNV 2
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding=0) readonly buffer P { uint M,N,Kg,Cin,Kk,dil,pad,Tout,leaky,woff,Tin,Cout,boff,flags; } p;
+layout(std430, binding=1) readonly buffer A { float16_t a[]; };
+layout(std430, binding=2) readonly buffer I { float16_t xin[]; };
+layout(std430, binding=3) readonly buffer B { float16_t bias[]; };
+layout(std430, binding=4) readonly buffer R { float16_t res[]; };
+layout(std430, binding=5) writeonly buffer O { float16_t outp[]; };
+shared f16vec4 As[TM][TK/4];
+shared f16vec4 Bs[TK][TN/4];
+void main(){
+  uint tx=gl_LocalInvocationID.x, ty=gl_LocalInvocationID.y;
+  uint brow=gl_WorkGroupID.y*TM, bcol=gl_WorkGroupID.x*TN;
+  uint tid=ty*16u+tx; const uint NT=256u;
+  vec4 acc[MM][MNV];
+  [[unroll]] for(int i=0;i<MM;i++)[[unroll]] for(int v=0;v<MNV;v++) acc[i][v]=vec4(0.0);
+  for(uint k0=0u;k0<p.Kg;k0+=TK){
+    for(uint idx=tid; idx<TM*(TK/4); idx+=NT){ uint r=idx/(TK/4), cc=idx%(TK/4);
+      uint base=p.woff + (brow+r)*p.Kg + k0 + cc*4u;
+      As[r][cc]=f16vec4(a[base],a[base+1u],a[base+2u],a[base+3u]); }
+    for(uint idx=tid; idx<TK*(TN/4); idx+=NT){ uint r=idx/(TN/4), cc=idx%(TN/4);
+      uint kr=k0+r; f16vec4 val=f16vec4(0.0);
+      if(kr < p.Cin*p.Kk){ uint ci=kr/p.Kk, kk=kr%p.Kk; int off=int(kk)*int(p.dil)-int(p.pad);
+        uint tbase=bcol+cc*4u;
+        [[unroll]] for(int e=0;e<4;e++){ int t=int(tbase+uint(e))+off; uint tg=tbase+uint(e);
+          if(tg<p.Tout && t>=0 && t<int(p.Tin)){ float16_t vv=xin[ci*p.Tin+uint(t)]; if(p.leaky==1u && vv<float16_t(0.0)) vv*=float16_t(0.1); val[e]=vv; } } }
+      Bs[r][cc]=val; }
+    barrier();
+    [[unroll]] for(uint k4=0u;k4<TK/4u;k4++){
+      f16vec4 av[MM];
+      [[unroll]] for(int i=0;i<MM;i++) av[i]=As[ty*MM+i][k4];
+      uint kb=k4*4u, cb=tx*MNV;
+      f16vec4 b0[MNV],b1[MNV],b2[MNV],b3[MNV];
+      [[unroll]] for(int v=0;v<MNV;v++){ b0[v]=Bs[kb][cb+v]; b1[v]=Bs[kb+1u][cb+v]; b2[v]=Bs[kb+2u][cb+v]; b3[v]=Bs[kb+3u][cb+v]; }
+      [[unroll]] for(int i=0;i<MM;i++)[[unroll]] for(int v=0;v<MNV;v++){
+        acc[i][v]+=float(av[i].x)*vec4(b0[v]);
+        acc[i][v]+=float(av[i].y)*vec4(b1[v]);
+        acc[i][v]+=float(av[i].z)*vec4(b2[v]);
+        acc[i][v]+=float(av[i].w)*vec4(b3[v]);
+      }
+    }
+    barrier();
+  }
+  [[unroll]] for(int i=0;i<MM;i++){ uint row=brow+ty*MM+i; if(row>=p.Cout) continue;
+    float bs=float(bias[p.boff+row]);
+    [[unroll]] for(int v=0;v<MNV;v++){ uint col0=bcol+(tx*MNV+v)*4u;
+      [[unroll]] for(int e=0;e<4;e++){ uint col=col0+uint(e); if(col>=p.Tout) continue;
+        float val=acc[i][v][e]+bs;
+        if((p.flags&1u)==1u) val+=float(res[row*p.Tout+col]);
+        if((p.flags&2u)==2u) val=tanh(val);
+        outp[row*p.Tout+col]=float16_t(val); } } }
+}

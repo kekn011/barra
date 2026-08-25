@@ -26,3 +26,16 @@ gki_defconfig text eol=lf
 *.wav         binary
 *.tgz         binary
 *.ks          binary
+
+# Geraete-Skripte OHNE Dateiendung: fallen sonst unter "* text=auto" -> bei core.autocrlf=true
+# kommen sie auf Windows mit CRLF aus dem Clone, und per adb aufs Geraet geschoben scheitern
+# sie am ^M ("bad interpreter"). Alle laufen in bionic-sh oder im Container -> LF erzwingen.
+src/boot/barra-apply-rename   text eol=lf
+src/boot/barra-config         text eol=lf
+src/boot/barra-firstboot      text eol=lf
+src/boot/barra-prepare-image  text eol=lf
+src/img-kit/barra-img         text eol=lf
+src/perf/barra-perf           text eol=lf
+src/pyannote/barra-diarize    text eol=lf
+src/sdk/barra-smi             text eol=lf
+src/sdk/barrac                text eol=lf
