@@ -4,8 +4,8 @@
 # 2) vulkan-shaders-gen.cpp: zwei Varianten erzeugen (B=f16, B=f32)
 # 3) ggml-vulkan.cpp: unter GGML_VK_MALI_GEMM=1 die l-Pipelines der f16-Matmuls ersetzen
 import io, shutil, sys, os
-ROOT = os.path.expanduser("~/stable-diffusion.cpp/ggml/src/ggml-vulkan")
-SRC  = "/mnt/c/Users/kevin/projects/pixel-cluster-base/src/sd-mali/mul_mm_mali.comp"
+ROOT = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else "~/stable-diffusion.cpp/ggml/src/ggml-vulkan")
+SRC  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mul_mm_mali.comp")  # repo-relativ
 
 # 1) Shader kopieren
 shutil.copy(SRC, os.path.join(ROOT, "vulkan-shaders/mul_mm_mali.comp"))

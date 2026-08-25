@@ -5,7 +5,7 @@ import os, sys, shutil
 
 LL=os.path.expanduser(sys.argv[1] if len(sys.argv)>1 else "~/llama.cpp")
 SP=os.path.dirname(os.path.abspath(__file__))
-SRC="/mnt/c/Users/kevin/projects/pixel-cluster-base/src"
+SRC=os.path.abspath(os.path.join(SP,"..",".."))   # repo src/ (attn -> ggml-barra -> src)
 VK=os.path.join(LL,"ggml/src/ggml-vulkan")
 
 # 1. Dateien kopieren

@@ -13,7 +13,7 @@ if 'barra_t0' not in u:
     u=u[:li]+'    barra_t1 = std::chrono::steady_clock::now();\n'+u[li:]
     b='    ctx->last_total_flops = total_flops;\n\n    if (vk_perf_logger_enabled) {\n        // End the command buffer and submit/wait\n'
     assert u.count(b)==1
-    u=u.replace(b,'''    ctx->last_total_flops = total_flops;
+    u=u.replace(b,r'''    ctx->last_total_flops = total_flops;
 
     if (barra_time) {
         const auto t2 = std::chrono::steady_clock::now();
@@ -34,7 +34,7 @@ h='/home/kevin/stable-diffusion.cpp/src/core/ggml_extend.hpp'; s=open(h).read()
 if 'barra_tp0' not in s:
     a='        ggml_cgraph* gf = nullptr;\n        if (!prepare_compute_graph(get_graph, &gf)) {\n            return std::nullopt;\n        }\n        GGML_ASSERT(gf != nullptr);\n        rebuild_params_tensor_set();\n'
     assert s.count(a)==1
-    s=s.replace(a,'''        ggml_cgraph* gf = nullptr;
+    s=s.replace(a,r'''        ggml_cgraph* gf = nullptr;
         const auto barra_tp0 = std::chrono::steady_clock::now();
         if (!prepare_compute_graph(get_graph, &gf)) {
             return std::nullopt;
@@ -54,7 +54,7 @@ if 'barra_tp0' not in s:
     s=s.replace(d,'        barra_te2 = std::chrono::steady_clock::now();\n'+d+'        barra_te3 = std::chrono::steady_clock::now();\n')
     e='        if (status != GGML_STATUS_SUCCESS) {\n            LOG_ERROR("%s compute failed: %s", get_desc().c_str(), ggml_status_to_string(status));\n            return std::nullopt;\n        }\n'
     assert s.count(e)==1
-    s=s.replace(e,e+'''        barra_te4 = std::chrono::steady_clock::now();
+    s=s.replace(e,e+r'''        barra_te4 = std::chrono::steady_clock::now();
         if (barra_time) {
             auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
             fprintf(stderr, "barra-sd %s: alloc_buf=%.1f ms sched_alloc=%.1f ms copy_in=%.1f ms compute+sync=%.1f ms\n",

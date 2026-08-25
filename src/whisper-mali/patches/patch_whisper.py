@@ -1,10 +1,11 @@
 import re, shutil, sys, os
-home = os.path.expanduser('~')
-wc = home + '/whisper.cpp'
-srcdir = '/mnt/c/Users/kevin/projects/pixel-cluster-base/src'
+# whisper.cpp-Baum ueber argv[1] oder $WHISPERCPP, Default ~/whisper.cpp;
+# Quellen repo-relativ (src/ ist zwei Ebenen ueber diesem Skript).
+wc = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else os.environ.get('WHISPERCPP', '~/whisper.cpp'))
+srcdir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))  # -> repo src/
 # 1) Dateien einkopieren
-shutil.copy(srcdir + '/experiments/gpu-attn/barra.c', wc + '/src/barra.c')
-shutil.copy(srcdir + '/experiments/gpu-attn/barra.h', wc + '/src/barra.h')
+shutil.copy(srcdir + '/barra/barra.c', wc + '/src/barra.c')
+shutil.copy(srcdir + '/barra/barra.h', wc + '/src/barra.h')
 shutil.copy(srcdir + '/whisper-mali/tpu/whisper-barra.cpp', wc + '/src/whisper-barra.cpp')
 
 f = wc + '/src/whisper.cpp'

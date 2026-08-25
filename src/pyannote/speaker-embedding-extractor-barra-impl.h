@@ -79,8 +79,15 @@ class SpeakerEmbeddingExtractorBarraImpl : public SpeakerEmbeddingExtractorImpl 
       // 5 Segmente: mids 0-4; zbufs je Segment anlegen (Groessen via info2)
       for (int s = 0; s < 5; ++s) {
         uint32_t nin = 0, nout = 0, isz[4] = {0}, oszs[4] = {0};
-        if (barra_tpu_info2(&tpu_, (uint32_t)s, &nin, &nout, isz, oszs, 4) != 0 || nin != 1) {
-          SHERPA_ONNX_LOGE("barra-emb: tita-Segment %d fehlt im tpud", s);
+        // nout MUSS in tita_osz_/tita_out_ ([5][2]) passen — sonst OOB-Schreiben in
+        // benachbarte Member. isz[0] fuer Segment 0 gegen die bekannte Eingabegroesse
+        // (kFrames*kFeat int16) pruefen; ein falscher Package-Satz ueberliefe sonst
+        // beim quant_in das dmabuf-Mapping.
+        if (barra_tpu_info2(&tpu_, (uint32_t)s, &nin, &nout, isz, oszs, 4) != 0 ||
+            nin != 1 || nout < 1 || nout > 2 || isz[0] == 0 ||
+            (s == 0 && isz[0] < (uint32_t)(kFrames * kFeat * 2))) {
+          SHERPA_ONNX_LOGE("barra-emb: tita-Segment %d passt nicht (nin=%u nout=%u in=%u)",
+                           s, nin, nout, isz[0]);
           SHERPA_ONNX_EXIT(-1);
         }
         tita_nout_[s] = (int)nout;

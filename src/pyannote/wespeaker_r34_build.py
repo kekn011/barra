@@ -16,7 +16,8 @@ import kaldi_native_fbank as knf
 import onnxruntime as ort
 
 SRC = sys.argv[1]; NAME = sys.argv[2]
-D = sys.argv[3] if len(sys.argv) > 3 else "/mnt/c/Users/kevin/projects/pixel-cluster-base/tpu-toolchain/pyannote"
+# Ausgabeverzeichnis via argv[3] oder $BARRA_OUT, Default cwd-relativ (nicht mehr maschinenspezifisch)
+D = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("BARRA_OUT", os.path.abspath("tpu-toolchain/pyannote"))
 
 m = onnx.load(SRC)
 tens = {v.name for v in m.graph.value_info} | {i.name for i in m.graph.initializer}

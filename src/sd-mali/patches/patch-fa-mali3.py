@@ -1,6 +1,10 @@
-import sys, shutil, re
-root='/home/kevin/stable-diffusion.cpp/ggml/src/ggml-vulkan/'
-shutil.copy('/mnt/c/Users/kevin/AppData/Local/Temp/claude/C--Users-kevin-projects-pixel-cluster-base/ec4a4720-077e-41d3-9cd9-c71c1f80d54c/scratchpad/fa_mali.comp', root+'vulkan-shaders/fa_mali.comp')
+import sys, shutil, re, os
+# Ziel-Baum ueber argv[1] oder $SDCPP, Default ~/stable-diffusion.cpp; Quell-Shader
+# repo-relativ (../fa_mali.comp) statt aus einem fluechtigen Scratchpad-Pfad.
+HERE=os.path.dirname(os.path.abspath(__file__))
+sdcpp=os.path.expanduser(sys.argv[1] if len(sys.argv)>1 else os.environ.get('SDCPP','~/stable-diffusion.cpp'))
+root=os.path.join(sdcpp,'ggml/src/ggml-vulkan/')
+shutil.copy(os.path.join(HERE,'..','fa_mali.comp'), root+'vulkan-shaders/fa_mali.comp')
 # (name, HD, RT, CT, extra defines)
 VARS=[('r4c4ps',40,4,4,', {"PV_PS", "1"}'),
       ('r4c4ps32',40,4,4,', {"PV_PS", "1"}, {"ACC32", "1"}'),
