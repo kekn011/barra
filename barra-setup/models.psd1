@@ -28,7 +28,13 @@
   # Woher die Dateien kommen, die zu gross fuers Repo sind. base LEER = es gibt noch
   # keine Quelle; fetch-payload.ps1 sagt dann, was zu tun ist, statt stumm zu scheitern.
   # Eintragen, sobald das Release steht: 'https://github.com/kekn011/barra/releases/download/<tag>'
-  '_release' = @{ base='https://github.com/kekn011/barra/releases/download/v0.1.0'; tag='v0.1.0' }
+  # Beide Zeilen zieht release-please beim Versionswechsel selbst nach (extra-files in
+  # release-please-config.json). Je Zeile genau EINE Versionsangabe - sonst weiss der
+  # generische Ersetzer nicht, welche gemeint ist.
+  '_release' = @{
+    base='https://github.com/kekn011/barra/releases/download/v0.1.0' # x-release-please-version
+    tag='v0.1.0' # x-release-please-version
+  }
 
   # ---------- Kleinteile, die der Kit-Lauf ebenfalls uebertraegt ----------
   # Sie sind nicht im Repo (die Kit-Ordner sind ausgeignoriert) und hatten bisher keine

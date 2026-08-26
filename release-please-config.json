@@ -5,6 +5,9 @@
     ".": {
       "package-name": "barra",
       "include-component-in-tag": false,
+      "extra-files": [
+        { "type": "generic", "path": "barra-setup/models.psd1" }
+      ],
       "changelog-path": "CHANGELOG.md",
       "draft": true,
       "changelog-sections": [
