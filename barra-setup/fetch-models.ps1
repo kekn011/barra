@@ -187,9 +187,47 @@ if ($foreign.Count) {
 $own = @($todo | Where-Object { $M[$_].origin -eq 'barra' })
 if ($own.Count) { Write-Host "$($own.Count) Datei(en) aus dem barra-Release (Apache-2.0)." }
 
+# Zu grosse Dateien liegen geteilt im Release (GitHub: max 2 GB je Asset). Jeder Teil wird
+# einzeln geprueft, dann zusammengesetzt und das Ergebnis gegen den Gesamt-SHA geprueft.
+function DownloadParts($e, $dest) {
+  $tmp = @()
+  foreach ($pt in $e.parts) {
+    $pu = $RelBase + '/' + $pt.file
+    $pd = Join-Path (Split-Path $dest) $pt.file
+    Write-Host "  Teil $($pt.file) <- $pu"
+    Download $pu $pd
+    $got = ShaOf $pd
+    if ($pt.sha256 -and $got -ne $pt.sha256.ToLower()) {
+      Remove-Item $pd -Force
+      foreach ($x in $tmp) { Remove-Item $x -Force -ErrorAction SilentlyContinue }
+      Write-Host "  Teil $($pt.file): SHA stimmt nicht - abgebrochen" -ForegroundColor Red
+      return $false
+    }
+    $tmp += $pd
+  }
+  # zusammensetzen (streamend, damit nichts komplett in den Speicher muss)
+  $out = [System.IO.File]::Create($dest)
+  try { foreach ($x in $tmp) { $in = [System.IO.File]::OpenRead($x); try { $in.CopyTo($out) } finally { $in.Dispose() } } }
+  finally { $out.Dispose() }
+  foreach ($x in $tmp) { Remove-Item $x -Force -ErrorAction SilentlyContinue }
+  return $true
+}
+
 $fail = 0
 foreach ($k in $todo) {
   $e = $M[$k]; $t = Target $e
+  if ($e.parts) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $t) | Out-Null
+    Write-Host "[lade]   $k (in $($e.parts.Count) Teilen)"
+    if (-not (DownloadParts $e $t)) { $fail++; continue }
+    $got = ShaOf $t
+    if ($got -ne $e.sha256.ToLower()) {
+      Remove-Item $t -Force
+      Write-Host "[FEHLER] $k : zusammengesetzte Datei hat den falschen SHA." -ForegroundColor Red
+      $fail++
+    } else { Write-Host "[ok]     $k geladen, zusammengesetzt und geprueft." -ForegroundColor Green }
+    continue
+  }
   $u = SourceUrl $e
   Write-Host "[lade]   $k <- $u"
   Download $u $t

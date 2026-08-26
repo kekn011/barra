@@ -31,4 +31,30 @@ respective licenses and terms.
 "barra" is a trademark of the project. See TRADEMARKS.md — the Apache-2.0 license
 grants no trademark rights.
 
+--------------------------------------------------------------------------------
+Derived model artifacts
+--------------------------------------------------------------------------------
+
+barra ships TPU packages and kits that are DERIVED from third-party models (the
+weights, re-quantized and re-laid-out for the Tensor G3 TPU). A derived artifact
+carries the licence of the model it came from, not ours. The full chain — which
+artifact came from which model, under which licence, with which obligations — is
+in docs/models.md, generated from barra-setup/licenses.psd1.
+
+Built with GLM-Edge.
+  The TPU attention packages for GLM-Edge-4B-Chat are derived from Zhipu AI's
+  GLM-Edge model and are covered by the GLM-Edge License, a copy of which is in
+  docs/licenses/GLM-Edge-LICENSE.txt. Commercial use requires registration with
+  the model provider; military and unlawful use are prohibited.
+
+Whisper packages are derived from OpenAI's Whisper (MIT). Speaker-diarization
+artifacts are derived from wespeaker and 3D-Speaker (Apache-2.0) and from
+NVIDIA NeMo TitaNet (CC BY 4.0 — attribution required). The wake-word kit
+contains the sherpa-onnx keyword spotter by k2-fsa (Apache-2.0). The speech kit
+contains Piper voices (MIT) and a CPython runtime (PSF).
+
+No proprietary vendor firmware or vendor libraries are redistributed. The
+Edge-TPU compiler library is generated on the device from the vendor library
+that is already installed there; it never leaves the phone.
+
 This repository includes stb_image.h and uses stb_truetype.h by Sean Barrett (public domain / MIT, https://github.com/nothings/stb).

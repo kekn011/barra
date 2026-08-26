@@ -28,7 +28,7 @@
   # Woher die Dateien kommen, die zu gross fuers Repo sind. base LEER = es gibt noch
   # keine Quelle; fetch-payload.ps1 sagt dann, was zu tun ist, statt stumm zu scheitern.
   # Eintragen, sobald das Release steht: 'https://github.com/kekn011/barra/releases/download/<tag>'
-  '_release' = @{ base=''; tag='' }
+  '_release' = @{ base='https://github.com/kekn011/barra/releases/download/v0.1.0-test'; tag='v0.1.0-test' }
 
   # --- Payload: das, was der Flash zwingend braucht ---
   'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429633604
@@ -47,10 +47,22 @@
 
   # ============================== LLM ==============================
   'qwen3-4b' = @{
-    kit='llm'; file='qwen3-4b.gguf'; origin='upstream'; bytes=2497281120
+    kit='llm'; file='qwen3-4b.gguf'; origin='barra'; bytes=2497281120
     sha256='3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597'
-    url=''; urlCandidate=''
-    license=''; licenseUrl=''; gated=$false
+    # Qwen3-4B steht unter Apache-2.0, wir DUERFEN die Datei also selbst weitergeben - und
+    # tun es hier bewusst: die Datei hinter Qwen/Qwen3-4B-GGUF resolve/main wurde seit August
+    # neu hochgeladen (26.8. geprueft, anderer Hash), und unsere TPU-Attention-Packages sind
+    # gegen GENAU DIESE Fassung kalibriert. Aus dem Release bekommt der Nutzer die passende.
+    #
+    # 2,33 GB sprengen GitHubs Grenze fuer Release-Assets (2 GB je Datei). Deshalb liegt die
+    # Datei geteilt im Release; fetch-models.ps1 laedt beide Teile, prueft jeden einzeln und
+    # setzt sie zusammen - das Ergebnis wird gegen den sha256 oben geprueft (26.8. verifiziert:
+    # part0+part1 ergeben bitgleich das Original). Teile erzeugen:
+    #   split -b 1300M -d -a 1 qwen3-4b.gguf qwen3-4b.gguf.part
+    parts=@(
+      @{ file='qwen3-4b.gguf.part0'; bytes=1363148800; sha256='f14ec25c14ec2ddbbab03274346ae557f2a6ad2cdf3d70d88445b5c0f5f0af5d' }
+      @{ file='qwen3-4b.gguf.part1'; bytes=1134132320; sha256='313ba6e9d71b76ed2de6ea8805874fb69afe42bf3b9a08891fcc6b9217a63647' }
+    )
   }
     # AUSGESCHLOSSEN 26.8.: Qwen/Qwen3-4B-GGUF resolve/main/Qwen3-4B-Q4_K_M.gguf -> 7485fe6f11af2943...
     # Die GROESSE passt (2,5 GB angezeigt = unsere 2.497.281.120 B), der Hash nicht. Wahrscheinlichste

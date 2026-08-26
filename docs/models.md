@@ -19,7 +19,6 @@ Fetch them with `barra-setup\fetch-models.ps1`; `-List` shows what is present.
 | `gemma-4-e4b-q3_k_s.gguf` | **not yet pinned** | [Apache-2.0](https://ai.google.dev/gemma/apache_2) |
 | `glm-edge-4b-chat.gguf` | [link](https://huggingface.co/zai-org/glm-edge-4b-chat-gguf/resolve/e168d9e95cf9af8bfbe54e04df7123516a51415d/ggml-model-Q4_K_M.gguf) | [GLM-4 License (kein OSS-Standard)](https://huggingface.co/zai-org/glm-edge-4b-chat-gguf/blob/main/LICENSE) |
 | `qwen2.5-1.5b.gguf` | [link](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf) | [Apache-2.0](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) |
-| `qwen3-4b.gguf` | **not yet pinned** | **unknown** |
 | `qwen38-4b-distill.gguf` | [link](https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF/resolve/391fc7d103e3942a408def3e4f51c2f85d464417/Qwen3.8-4B-Q4_K_M.gguf) | [Apache-2.0](https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF) |
 
 - **glm-edge-4b-chat.gguf** — Karten-Metadatum 'glm-4', eigener Lizenztext im Repo - NICHT als Apache/MIT behandeln.
@@ -57,37 +56,62 @@ Fetch them with `barra-setup\fetch-models.ps1`; `-List` shows what is present.
 
 ## barra's own artifacts
 
-These 25 files are our build output — TPU packages, kit archives and derived
-float tails. They are Apache-2.0 like the rest of the project and ship as GitHub release
-assets, not as downloads from third parties.
+These 28 files are our build output — TPU packages, kit archives and derived
+float tails — and they ship as GitHub release assets, not as downloads from third parties.
 
-| File | Kit |
-|---|---|
-| `llm-attn-gemma-4-e2b-q4_0.tar` | LLM (KI-Chat) |
-| `llm-attn-glm-edge-4b-chat.tar` | LLM (KI-Chat) |
-| `llm-attn-qwen2.5-1.5b.tar` | LLM (KI-Chat) |
-| `llm-attn-qwen3-4b.tar` | LLM (KI-Chat) |
-| `eres_body.package` | Sprecher-Trennung |
-| `head_eres.bin` | Sprecher-Trennung |
-| `eres_tail.onnx` | Sprecher-Trennung |
-| `img-kit.tar.gz` | Bildgenerator |
-| `pyannote-kit.tar` | Sprecher-Trennung |
-| `head_zh.bin` | Sprecher-Trennung |
-| `r34zh_trunk.package` | Sprecher-Trennung |
-| `tita_glue.bin` | Sprecher-Trennung |
-| `tita_seg0.package` | Sprecher-Trennung |
-| `tita_seg1.package` | Sprecher-Trennung |
-| `tita_seg2.package` | Sprecher-Trennung |
-| `tita_seg3.package` | Sprecher-Trennung |
-| `tita_seg4.package` | Sprecher-Trennung |
-| `tita_tail.onnx` | Sprecher-Trennung |
-| `tts-kit.tar.gz` | Sprachausgabe |
-| `wake-kit.tar.gz` | Weckwort |
-| `whisper-kit-base.tar` | Spracherkennung |
-| `whisper-kit-medium.tar` | Spracherkennung |
-| `whisper-kit-small.tar` | Spracherkennung |
-| `whisper-kit-tiny.tar` | Spracherkennung |
-| `whisper-kit-turbo.tar` | Spracherkennung |
+**They are not automatically Apache-2.0.** A TPU package is not an original work: it is a
+third-party model's weights, re-quantized and re-laid-out for the Tensor G3. It carries the
+licence of the model it came from. The table below names that model and that licence for
+every file; only our own code and shaders are Apache-2.0.
+
+| File | Kit | Derived from | License |
+|---|---|---|---|
+| `llm-attn-gemma-4-e2b-q4_0.tar` | LLM (KI-Chat) | Google Gemma 4 E2B | [Apache-2.0](https://ai.google.dev/gemma/apache_2) |
+| `llm-attn-glm-edge-4b-chat.tar` | LLM (KI-Chat) | GLM-Edge-4B-Chat | [GLM-Edge License](https://huggingface.co/zai-org/glm-edge-4b-chat-gguf/blob/main/LICENSE) |
+| `llm-attn-qwen2.5-1.5b.tar` | LLM (KI-Chat) | Qwen2.5-1.5B-Instruct | [Apache-2.0](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) |
+| `llm-attn-qwen3-4b.tar` | LLM (KI-Chat) | Qwen3-4B | [Apache-2.0](https://huggingface.co/Qwen/Qwen3-4B) |
+| `eres_body.package` | Sprecher-Trennung | ERes2Net (3D-Speaker) | [Apache-2.0](https://github.com/modelscope/3D-Speaker) |
+| `head_eres.bin` | Sprecher-Trennung | ERes2Net (3D-Speaker) | [Apache-2.0](https://github.com/modelscope/3D-Speaker) |
+| `eres_tail.onnx` | Sprecher-Trennung | ERes2Net (3D-Speaker) | [Apache-2.0](https://github.com/modelscope/3D-Speaker) |
+| `img-kit.tar.gz` | Bildgenerator | stable-diffusion.cpp (MIT) + Mali-Kernel von barra | [Apache-2.0 + MIT](https://github.com/leejet/stable-diffusion.cpp) |
+| `barra-base.tar.gz` |  | barra + Ubuntu 24.04 Userland | [Apache-2.0 + Ubuntu-Paketlizenzen](https://github.com/kekn011/barra/blob/main/LICENSE) |
+| `boot-lz4.img` |  | Android GKI 6.1 (modifiziert) | [GPLv2](https://github.com/kekn011/barra/tree/main/kernel) |
+| `pyannote-kit.tar` | Sprecher-Trennung | wespeaker ResNet34 + pyannote/segmentation-3.0 + sherpa-onnx | [Apache-2.0 + MIT](https://huggingface.co/pyannote/segmentation-3.0) |
+| `qwen3-4b.gguf` | LLM (KI-Chat) | Qwen3-4B (unveraendert weitergegeben) | [Apache-2.0](https://huggingface.co/Qwen/Qwen3-4B) |
+| `head_zh.bin` | Sprecher-Trennung | wespeaker ResNet34 CN-Celeb | [Apache-2.0](https://github.com/wenet-e2e/wespeaker) |
+| `r34zh_trunk.package` | Sprecher-Trennung | wespeaker ResNet34 CN-Celeb | [Apache-2.0](https://github.com/wenet-e2e/wespeaker) |
+| `tita_glue.bin` | Sprecher-Trennung | NVIDIA NeMo TitaNet | [CC-BY-4.0](https://huggingface.co/nvidia/speakerverification_en_titanet_large) |
+| `tita_seg0.package` | Sprecher-Trennung | NVIDIA NeMo TitaNet | [CC-BY-4.0](https://huggingface.co/nvidia/speakerverification_en_titanet_large) |
+| `tita_seg1.package` | Sprecher-Trennung | NVIDIA NeMo TitaNet | [CC-BY-4.0](https://huggingface.co/nvidia/speakerverification_en_titanet_large) |
+| `tita_seg2.package` | Sprecher-Trennung | NVIDIA NeMo TitaNet | [CC-BY-4.0](https://huggingface.co/nvidia/speakerverification_en_titanet_large) |
+| `tita_seg3.package` | Sprecher-Trennung | NVIDIA NeMo TitaNet | [CC-BY-4.0](https://huggingface.co/nvidia/speakerverification_en_titanet_large) |
+| `tita_seg4.package` | Sprecher-Trennung | NVIDIA NeMo TitaNet | [CC-BY-4.0](https://huggingface.co/nvidia/speakerverification_en_titanet_large) |
+| `tita_tail.onnx` | Sprecher-Trennung | NVIDIA NeMo TitaNet | [CC-BY-4.0](https://huggingface.co/nvidia/speakerverification_en_titanet_large) |
+| `tts-kit.tar.gz` | Sprachausgabe | Piper-Stimmen Thorsten (de) und Amy (en) + sherpa-onnx + CPython | [MIT + Apache-2.0 + PSF](https://huggingface.co/rhasspy/piper-voices) |
+| `wake-kit.tar.gz` | Weckwort | sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01 (k2-fsa) | [Apache-2.0](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models) |
+| `whisper-kit-base.tar` | Spracherkennung | Whisper base | [MIT](https://huggingface.co/ggerganov/whisper.cpp) |
+| `whisper-kit-medium.tar` | Spracherkennung | Whisper medium | [MIT](https://huggingface.co/ggerganov/whisper.cpp) |
+| `whisper-kit-small.tar` | Spracherkennung | Whisper small | [MIT](https://huggingface.co/ggerganov/whisper.cpp) |
+| `whisper-kit-tiny.tar` | Spracherkennung | Whisper tiny | [MIT](https://huggingface.co/ggerganov/whisper.cpp) |
+| `whisper-kit-turbo.tar` | Spracherkennung | Whisper large-v3-turbo | [MIT](https://huggingface.co/ggerganov/whisper.cpp) |
+
+**Auflagen, die mit der Weitergabe uebernommen werden:**
+
+- `llm-attn-glm-edge-4b-chat.tar` — Lizenztext beilegen (docs/licenses/GLM-Edge-LICENSE.txt); "Built with GLM-Edge" nennen; abgeleitete Modellnamen mit "GLM-Edge" praefixen; keine militaerische oder rechtswidrige Nutzung; kommerzielle Nutzung erfordert Registrierung beim Anbieter.
+- `barra-base.tar.gz` — Enthaelt ein vollstaendiges Ubuntu-Userland; die Lizenztexte der Pakete liegen im Image unter /usr/share/doc. KEINE Vendor-Firmware (seit 26.8. ausgeschlossen und im Bake geprueft).
+- `boot-lz4.img` — GPLv2 verlangt die Quellen: sie liegen im Repo unter kernel/.
+- `pyannote-kit.tar` — Buendelt Fremdmodelle; deren Lizenztexte liegen im Kit. pyannote/segmentation-3.0 ist MIT (der Download-Gate auf HuggingFace ist eine Formalie, keine Weitergabebeschraenkung).
+- `qwen3-4b.gguf` — Apache-2.0: Lizenz und Namensnennung weitergeben. Wir liefern die Datei selbst aus, weil der Upstream seit August eine andere Fassung unter derselben Adresse fuehrt und unsere Packages auf diese kalibriert sind.
+- `tita_glue.bin` — Namensnennung erforderlich.
+- `tita_seg0.package` — Namensnennung erforderlich.
+- `tita_seg1.package` — Namensnennung erforderlich.
+- `tita_seg2.package` — Namensnennung erforderlich.
+- `tita_seg3.package` — Namensnennung erforderlich.
+- `tita_seg4.package` — Namensnennung erforderlich.
+- `tita_tail.onnx` — Namensnennung erforderlich.
+- `tts-kit.tar.gz` — Buendelt Fremdmodelle und eine Python-Laufzeit; deren Lizenztexte liegen im Kit.
+- `wake-kit.tar.gz` — Herkunft am 26.8. per SHA-256 bewiesen: encoder.int8.onnx ist bitgleich zur Datei im Release-Archiv.
+
 
 ## Known gaps
 
@@ -95,6 +119,7 @@ Some of our kit archives still bundle third-party models. Those are **not** cove
 table above and have to be split out before a release, so they can be fetched and licensed
 like everything else:
 
+- `Magisk-30.7.apk` — wird beim Ablegen zu Magisk-30.7.apk umbenannt (patch-initboot.ps1 sucht Magisk-*.apk)
 - `pyannote-kit.tar` — buendelt ResNet34-en (wespeaker) + pyannote-Segmentierung 3.0 + das sherpa-onnx-Binary — diese drei brauchen eigene Manifest-Eintraege
 - `tts-kit.tar.gz` — enthaelt die Piper-Stimmen Thorsten/Amy (MIT) — die gehoeren als Download ins Manifest; die geklonte Stimme David ist am 26.8. entfernt worden
 - `wake-kit.tar.gz` — buendelt das sherpa-onnx-Keyword-Spotter-Modell (int8, 5 MB) — Herkunft und Lizenz noch offen
