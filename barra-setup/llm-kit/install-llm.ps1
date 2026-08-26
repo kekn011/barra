@@ -1,4 +1,4 @@
-# install-llm.ps1 — LLM-Kit auf einen barra-Node schieben (nach dem Flash, per USB/adb).
+﻿# install-llm.ps1 — LLM-Kit auf einen barra-Node schieben (nach dem Flash, per USB/adb).
 # Inhalt: qwen3-4b.gguf (Modell, ins Container-Home) + llm-attn-qwen3-4b.tar (144 TPU-Attention-
 # Packages der v7-Pipeline + attn.meta + aux_attn.bin + pkglist.txt nach /data/local/barra-attn/
 # qwen3-4b). Danach: llmserver.sh start erkennt das Kit und schaltet den TPU-Attention-Offload an

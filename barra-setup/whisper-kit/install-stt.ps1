@@ -1,4 +1,4 @@
-# install-stt.ps1 — Whisper-STT-Kit auf einen barra-Node schieben (Base-Image v10+, per USB/adb).
+﻿# install-stt.ps1 — Whisper-STT-Kit auf einen barra-Node schieben (Base-Image v10+, per USB/adb).
 # Inhalt: whisper-kit-turbo.tar (103 TPU-Packages fuer large-v3-turbo: Encoder+Cross-K/V+Conv-
 # Frontend+Kern + Params -> /data/local/barra-stt/turbo) + ggml-large-v3-turbo-q5_0.bin
 # (Decoder-Modell, q5_0 -> /data/local/barra-stt/models).

@@ -1,4 +1,4 @@
-# install-img.ps1 - Bildgenerator-Kit (Stable Diffusion 1.5, DreamShaper 8 LCM) auf einen barra-Node schieben (USB/adb).
+﻿# install-img.ps1 - Bildgenerator-Kit (Stable Diffusion 1.5, DreamShaper 8 LCM) auf einen barra-Node schieben (USB/adb).
 # Inhalt img-kit.tar.gz: bin/ (sd-cli + sd-server, stable-diffusion.cpp mit Mali-GEMM- und Flash-Attention-Kernen)
 # -> /data/local/barra-img/bin; base/imgserver.sh -> baseos/bin, base/barra-img -> Container /usr/local/bin.
 # Modell DreamShaper8_LCM.safetensors (2,1 GB) + taesd.safetensors (10 MB) -> /data/local/barra-img/models.

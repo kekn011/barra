@@ -1,4 +1,4 @@
-# install-pya.ps1 — Diarization-Kit (Sprecher-Trennung) auf einen barra-Node schieben (USB/adb).
+﻿# install-pya.ps1 — Diarization-Kit (Sprecher-Trennung) auf einen barra-Node schieben (USB/adb).
 # Inhalt pyannote-kit.tar: kit/ (seg.onnx Segmentierung, resnet34.onnx wespeaker-Referenz,
 # r34_trunk.package TPU-Embedding-Trunk, head.bin Pooling+FC-Kopf) -> /data/local/ubuntu/opt/barra-pya
 # und base/ (sherpa-Binary, barra-diarize, pyaserver.sh) — ab Base v11 im Image, hier fuer v10 mitinstalliert.
