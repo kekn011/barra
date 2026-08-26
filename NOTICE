@@ -17,9 +17,27 @@ Third-party components
 The barra kernel tree (kernel/) is a modified Android Generic Kernel Image and
 is licensed under GPLv2, matching its upstream. See kernel/COPYING.
 
-The llama.cpp integration (src/ggml-barra/) patches upstream llama.cpp, which is
-MIT licensed. The patch and our kernels are Apache-2.0; the upstream files they
-apply to remain MIT.
+Upstream projects barra builds on
+---------------------------------
+
+barra patches and rebuilds several upstream projects. Our patches and kernels are
+Apache-2.0; the upstream files they apply to keep their own licence.
+
+  llama.cpp              MIT          src/ggml-barra/, src/llama-mali/
+                                      TPU attention offload + Mali GPU kernels
+  whisper.cpp            MIT          src/whisper-mali/
+                                      TPU encoder path + Mali GPU build
+  stable-diffusion.cpp   MIT          src/sd-mali/
+                                      Mali GEMM and FlashAttention kernels
+  sherpa-onnx (k2-fsa)   Apache-2.0   src/pyannote/
+                                      replaces the ONNX speaker-embedding
+                                      extractor with a TPU implementation
+  AOSP / GKI kernel      GPLv2        kernel/
+                                      config and patches; full tree included
+
+None of these upstream sources are redistributed here in binary form except where
+noted; barra ships patches and build recipes, and builds them on the device or on
+the user's machine.
 
 Documentation under docs/ is licensed under CC BY 4.0.
 
@@ -56,5 +74,10 @@ contains Piper voices (MIT) and a CPython runtime (PSF).
 No proprietary vendor firmware or vendor libraries are redistributed. The
 Edge-TPU compiler library is generated on the device from the vendor library
 that is already installed there; it never leaves the phone.
+
+barra-setup/tools/lpmake.exe is built from AOSP's lpmake (part of the Android Open
+Source Project, Apache License 2.0). Google publishes no Windows build, so barra
+compiles its own from unmodified upstream sources and bundles the result; the build
+recipe is in docs/building-lpmake.md. Copyright (c) The Android Open Source Project.
 
 This repository includes stb_image.h and uses stb_truetype.h by Sean Barrett (public domain / MIT, https://github.com/nothings/stb).
