@@ -7,6 +7,7 @@
 #       -> {"images":["<base64 png>"]}   (auch OpenAI-Route /v1/images/generations)
 # Container-CLI: barra-img "prompt" [-o datei.png] [-s seed] [-W breite] [-H hoehe] [-n schritte]
 K=/data/local/barra-img
+. /data/adb/baseos/bin/barra-i18n.sh
 R=/data/adb/baseos/run; mkdir -p $R
 PORT=8096
 MODELS=$K/models
@@ -23,15 +24,15 @@ pins_off(){   # 'echo 0' ist auf diesem mali-devfreq ein No-op -> konkreten HW-I
 }
 
 case "${1:-status}" in
-  stop)   pkill -f "$K/bin/sd-server"; pins_off; sleep 1; echo "img: stopped";;
+  stop)   pkill -f "$K/bin/sd-server"; pins_off; sleep 1; t img.stopped;;
   status) P=$(pgrep -f "$K/bin/sd-server"|head -1)
-          if [ -n "$P" ]; then echo "img: running (PID $P) -> http://<node>:$PORT"; grep -a "listening\|params memory" $R/imgserver.log | tail -2; else echo "img: off"; fi;;
+          if [ -n "$P" ]; then t img.running "$P" "$PORT"; grep -a "listening\|params memory" $R/imgserver.log | tail -2; else t img.off; fi;;
   log)    tail -50 $R/imgserver.log;;
   start)
     M="${2:-$DEF}"
-    pgrep -f "$K/bin/sd-server" >/dev/null && { echo "img: already running"; exit 0; }
-    [ -f "$M" ] || { echo "img: model missing: $M (models in $MODELS)"; exit 1; }
-    [ -f "$MODELS/taesd.safetensors" ] || { echo "img: taesd.safetensors missing in $MODELS"; exit 1; }
+    pgrep -f "$K/bin/sd-server" >/dev/null && { t img.already_running; exit 0; }
+    [ -f "$M" ] || { t img.model_missing "$M" "$MODELS"; exit 1; }
+    [ -f "$MODELS/taesd.safetensors" ] || { t img.taesd_missing "$MODELS"; exit 1; }
     pins_on
     # Mali-Betriebspunkt (24.8.26): KHR_coopmat aus (Emulationsbremse), eigener GEMM + FA, getunte Stock-Tiles
     export GGML_VK_DISABLE_COOPMAT=1
@@ -44,15 +45,15 @@ case "${1:-status}" in
     P=$!
     i=0; while [ $i -lt 90 ]; do grep -aq "listening on" $R/imgserver.log 2>/dev/null && break; kill -0 $P 2>/dev/null || break; sleep 1; i=$((i+1)); done
     if grep -aq "listening on" $R/imgserver.log 2>/dev/null; then
-      echo "img: started (PID $P): $(basename "$M") -> http://<node>:$PORT/sdapi/v1/txt2img"
+      t img.started "$P" "$(basename "$M")" "$PORT"
       # Hebel 5 (Lazy-Compile-Warmup): der erste txt2img zahlt ~5s Mali-Shader-Compile. Jetzt beim
       # Start abfangen statt beim Nutzer. Minimaler 1-Step-Gen (kompiliert dieselben Shader), via
       # toybox nc (Android-seitig kein curl), best-effort mit Timeout.
       WB='{"prompt":"warmup","seed":1,"width":512,"height":512,"steps":1}'
       printf 'POST /sdapi/v1/txt2img HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "${#WB}" "$WB" | timeout 60 toybox nc localhost $PORT >/dev/null 2>&1
-      echo "img: vorgewaermt"
+      t img.warm
     else
-      echo "img: start failed, see imgserver.sh log"; tail -5 $R/imgserver.log; pins_off; exit 1
+      t img.start_fail; tail -5 $R/imgserver.log; pins_off; exit 1
     fi;;
-  *) echo "imgserver.sh start [model] | stop | status | log";;
+  *) t img.usage;;
 esac

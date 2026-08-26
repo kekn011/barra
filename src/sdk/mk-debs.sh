@@ -39,7 +39,7 @@ Maintainer: barra project
 Section: libs
 Priority: optional
 Depends: $3
-Homepage: https://github.com/barra
+Homepage: https://github.com/kekn011/barra
 Description: $4
 EOF
 }

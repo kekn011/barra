@@ -12,6 +12,7 @@ F=/sys/class/devfreq
 DM=/data/local/ubuntu/opt/hwbridge/pf; DC=/data/local/ubuntu/opt/hwbridge/pfc
 P=$KIT/turbo
 
+. /data/adb/baseos/bin/barra-i18n.sh
 pins_on(){
   [ "$STT_NOPIN" = "1" ] && return
   for CP in /sys/devices/system/cpu/cpufreq/policy*; do echo performance > $CP/scaling_governor 2>/dev/null; done
@@ -40,12 +41,12 @@ start_tpuds(){
   if [ -f $P/conv2.package ]; then MODELS="$MODELS $P/conv2.package"
   elif [ -f $P/conv2w.package ]; then MODELS="$MODELS $P/conv2w.package"; fi
   CORE=$(ls $P/wsp_core*_b0.package 2>/dev/null | head -1)
-  [ -n "$CORE" ] || { echo "Kern-Package fehlt in $P"; return 1; }
+  [ -n "$CORE" ] || { t stt.core_missing "$P"; return 1; }
   export LD_LIBRARY_PATH=/system/lib64:/vendor/lib64
   TPU_CPU=8 setsid $BIN/tpud_pipe4 $DM/tpu.sock $MODELS </dev/null >$R/stt-tpud-main.log 2>&1 &
   TPU_CPU=7 TPU_ZC_BOUNCE=2 setsid $BIN/tpud_pipe4 $DC/tpu.sock $CORE </dev/null >$R/stt-tpud-core.log 2>&1 &
   i=0; while [ $i -lt 240 ]; do grep -aq bereit $R/stt-tpud-main.log && grep -aq bereit $R/stt-tpud-core.log && return 0; sleep 1; i=$((i+1)); done
-  echo "tpud-Start FEHLGESCHLAGEN:"; tail -3 $R/stt-tpud-main.log $R/stt-tpud-core.log; return 1
+  t stt.tpud_fail; tail -3 $R/stt-tpud-main.log $R/stt-tpud-core.log; return 1
 }
 
 case "${1:-status}" in
@@ -53,21 +54,21 @@ case "${1:-status}" in
     pkill -f "$BIN/whisper-server" 2>/dev/null
     pkill -x tpud_pipe4 2>/dev/null
     pins_off
-    echo "gestoppt";;
+    t stt.stopped;;
   status)
     PW=$(pgrep -f "$BIN/whisper-server"|head -1)
     PT=$(pgrep -x tpud_pipe4|head -1)
-    [ -n "$PW" ] && echo "whisper-server laeuft (PID $PW)" || echo "whisper-server aus"
-    [ -n "$PT" ] && echo "tpuds laufen" || echo "tpuds aus"
+    [ -n "$PW" ] && t stt.running "$PW" || t stt.off
+    [ -n "$PT" ] && t stt.tpud_on || t stt.tpud_off
     grep -a "wsp-barra. init ok" $R/sttserver.log 2>/dev/null | tail -1;;
   log) tail -50 $R/sttserver.log;;
   start)
     MDL="${2:-$KIT/models/ggml-large-v3-turbo-q5_0.bin}"
     PORT="${3:-8090}"
-    pgrep -f "$BIN/whisper-server" >/dev/null && { echo "laeuft schon (erst stop)"; exit 0; }
+    pgrep -f "$BIN/whisper-server" >/dev/null && { t stt.already; exit 0; }
     # Koexistenz-Verbot (22.8.): stt+llm zusammen = OOM-Panic + TPU-Graph-Limit (104+145 > ~157)
-    pgrep -f "llama-server" >/dev/null && { echo "KI-Chat (llmserver) laeuft - erst stoppen: llmserver.sh stop (gemeinsamer Betrieb uebersteigt Speicher und TPU-Limit)"; exit 1; }
-    [ -f "$MDL" ] || { echo "Modell fehlt: $MDL"; exit 1; }
+    pgrep -f "llama-server" >/dev/null && { t stt.llm_running; exit 1; }
+    [ -f "$MDL" ] || { t stt.model_missing "$MDL"; exit 1; }
     mkdir -p $R
     pins_on
     # TPU-Encoder, wenn ein Package-Satz fuers Modell installiert ist; sonst CPU
@@ -86,13 +87,13 @@ case "${1:-status}" in
         WSP_PKG_DIR=$P WSP_SOCK_MAIN=$DM WSP_SOCK_CORE=$DC LD_LIBRARY_PATH=$BIN \
           setsid $BIN/whisper-server -m "$MDL" --host 0.0.0.0 --port $PORT -t 8 -bs 1 -bo 1 \
           </dev/null >$R/sttserver.log 2>&1 &
-        echo "gestartet (PID $!): $(basename $MDL) greedy, TPU-Encoder -> http://<node>:$PORT/inference";;
+        t stt.started_tpu "$!" "$(basename $MDL)" "$PORT";;
       *)
         LD_LIBRARY_PATH=$BIN \
           setsid $BIN/whisper-server -m "$MDL" --host 0.0.0.0 --port $PORT -t 8 -bs 1 -bo 1 \
           </dev/null >$R/sttserver.log 2>&1 &
-        echo "gestartet (PID $!): $(basename $MDL) greedy, CPU -> http://<node>:$PORT/inference";;
+        t stt.started_cpu "$!" "$(basename $MDL)" "$PORT";;
     esac
-    echo "Test: curl -F file=@x.wav -F language=de http://<node>:$PORT/inference";;
-  *) echo "sttserver.sh start [modell] [port] | stop | status | log";;
+    t stt.hint "$PORT";;
+  *) t stt.usage;;
 esac
