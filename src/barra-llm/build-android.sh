@@ -6,7 +6,8 @@ NDK=${NDK:-$HOME/android-sdk/ndk/27.2.12479018}
 TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 CC=$TC/aarch64-linux-android34-clang; CXX=$TC/aarch64-linux-android34-clang++
 L=${1:-$HOME/llama.cpp}; B=$L/build-android-vulkan-idp
-SRC=/mnt/c/Users/kevin/projects/pixel-cluster-base/src
+REPO=${BARRA_REPO:-$(cd "$(dirname "$0")/../.." && pwd)}
+SRC=$REPO/src
 O=~/barra-llm-build; mkdir -p $O $B/stage; cd $O
 $CC -O2 -Wall -c $SRC/barra/barra.c -I$SRC/barra -o barra.o
 $CXX -O2 -std=c++17 -I$SRC/barra -I$L/include -I$L/ggml/include -c $SRC/barra-llm/barra-llm.cpp -o barra-llm.o

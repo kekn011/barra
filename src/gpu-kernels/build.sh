@@ -1,7 +1,7 @@
 #!/bin/bash
 # build.sh FMT WG TPR R  -> out/gemv_<fmt>_w<WG>_t<TPR>_r<R>.spv ; baut gpugemv wenn noetig
 FMT=$1; WG=${2:-64}; TPR=${3:-16}; R=${4:-2}
-cd /mnt/c/Users/kevin/projects/pixel-cluster-base/src/experiments/roofline/gemv
+cd "$(dirname "$0")"
 mkdir -p out
 LC=$(echo $FMT | tr A-Z a-z); UC=$(echo $FMT | tr a-z A-Z)
 NAME=gemv_${LC}_w${WG}_t${TPR}_r${R}

@@ -1,6 +1,6 @@
 #!/bin/bash
 # whisper.cpp fuer akita (Android/Bionic, Vulkan auf Mali-G715) — Whisper-Stufe 2. In WSL ausfuehren:
-#   wsl bash /mnt/c/Users/kevin/projects/pixel-cluster-base/src/whisper-mali/build.sh
+#   wsl bash <repo>/src/whisper-mali/build.sh
 # Rezept = src/llama-mali/build.sh ohne Mali-Patch/ggml-barra (Whisper-Modelle sind f16,
 # der Mali-Patch beschleunigt nur q4_K/q6_K-Decode-GEMV). Ergebnis: stage/ mit Binaries+Libs.
 set -e

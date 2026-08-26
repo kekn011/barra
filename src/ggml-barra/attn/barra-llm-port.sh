@@ -15,9 +15,11 @@ GGUF="$1"
 [ -f "$GGUF" ] || { echo "Nutzung: barra-llm-port.sh <modell.gguf>"; exit 1; }
 NAME=$(basename "$GGUF" .gguf)
 SRC="$(cd "$(dirname "$0")" && pwd)"
-WORK=${BARRA_PORT_WORK:-/mnt/c/Users/kevin/projects/pixel-cluster-base/tpu-toolchain/port/$NAME}
+WORK=${BARRA_PORT_WORK:-${BARRA_TOOLCHAIN:?BARRA_PORT_WORK oder BARRA_TOOLCHAIN setzen}/port/$NAME}
 mkdir -p "$WORK/cal" "$WORK/pkg"
-WINADB="/mnt/c/Users/kevin/AppData/Local/Microsoft/WinGet/Packages/Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe/platform-tools/adb.exe"
+BARRA_REPO=${BARRA_REPO:-$(cd "$(dirname "$0")/../../.." && pwd)}
+# adb: PATH zuerst, sonst das mitgelieferte Windows-adb aus dem Repo
+WINADB="${BARRA_ADB:-$BARRA_REPO/barra-setup/tools/adb.exe}"
 ADB=${ADB:-$(command -v adb.exe >/dev/null 2>&1 && echo adb.exe || { [ -x "$WINADB" ] && echo "$WINADB" || echo adb; })}
 # Windows-adb braucht Windows-Pfade fuer lokale Dateien (WSL-Bruecke)
 apath(){ case "$ADB" in *.exe) wslpath -w "$1";; *) printf '%s' "$1";; esac; }

@@ -16,7 +16,9 @@ import kaldi_native_fbank as knf
 import onnxruntime as ort
 
 SRC = sys.argv[1]; NAME = sys.argv[2]
-D = sys.argv[3] if len(sys.argv) > 3 else "/mnt/c/Users/kevin/projects/pixel-cluster-base/tpu-toolchain/pyannote"
+D = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("BARRA_TOOLCHAIN", "")
+if not D:
+    sys.exit("Zielverzeichnis fehlt: als 3. Argument uebergeben oder BARRA_TOOLCHAIN setzen.")
 
 m = onnx.load(SRC)
 tens = {v.name for v in m.graph.value_info} | {i.name for i in m.graph.initializer}

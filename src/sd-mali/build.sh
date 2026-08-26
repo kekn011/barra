@@ -1,7 +1,7 @@
 #!/bin/bash
 # stable-diffusion.cpp fuer akita (Android/Bionic, Vulkan auf Mali-G715) — Bild-Kit Stufe 1+2.
 # In WSL ausfuehren:
-#   wsl bash /mnt/c/Users/kevin/projects/pixel-cluster-base/src/sd-mali/build.sh
+#   wsl bash <repo>/src/sd-mali/build.sh
 # Rezept = src/whisper-mali/build.sh (gleiche NDK-/glslc-wrap-Toolchain). sd.cpp baut das
 # CLI-Binary "sd" statisch; wir bauen ZWEI Varianten: sd-cpu (Korrektheits-Baseline) und
 # sd (Vulkan). Ergebnis: stage/ mit gestrippten Binaries.

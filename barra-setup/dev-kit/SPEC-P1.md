@@ -47,7 +47,7 @@ powershell -File barra-setup/dev-kit/fetch-devtools.ps1
 #    frida-server: gepinnt+verifiziert. glslang: -Supply noetig (kein Prebuilt, s. §5).
 # 2) packen - MUSS ueber WSL laufen (git-bash chmod greift auf NTFS NICHT -> tpuc1/
 #    frida-server/.sh landen als 644 und laufen am Geraet nicht; am 25.8. genau so erlebt):
-MSYS_NO_PATHCONV=1 wsl.exe -e sh /mnt/c/Users/kevin/projects/barra/barra-setup/dev-kit/pack-dev-kit.sh
+MSYS_NO_PATHCONV=1 wsl.exe -e sh <repo>/barra-setup/dev-kit/pack-dev-kit.sh
 ```
 `pack-dev-kit.sh` assembliert stage/ aus src/dev + src/gpu-kernels + dev-kit/tpu +
 dev-kit/third-party, setzt +x und tart nach barra-dev-kit.tar.gz. **VERIFIZIERT 25.8.:**
@@ -135,7 +135,7 @@ gesyncten AOSP-Baum -> boot-lz4.img -> reflash (barra-setup Kernel-Schritt). Der
 + Bazel-Build + Live-Reflash ist der schwere Einmal-Vorlauf des Entwicklers (Rezept kernel/README.md,
 Pins kernel/PINS.txt) und wurde bewusst NICHT in-session gefahren (Zeit + Reflash-Risiko).
 
-## 6. Abnahme am Node (E2E) — GRUEN am 25.8. (Pixel 8a 43251JEKB03751)
+## 6. Abnahme am Node (E2E) — GRUEN am 25.8. (Pixel 8a)
 
 1. **install + devdoctor: PASS.** DEV_OK; devdoctor grün (GPU-Shader/Harness, tpuc1, DSP-Quellen,
    frida, /dev/mali0|edgetpu-soc|gxp). Erwartet FEHLT: glslang (P2), libcomp_std (on-device-gen).

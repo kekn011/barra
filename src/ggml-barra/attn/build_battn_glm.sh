@@ -2,7 +2,7 @@
 # ggml-barra GLM-Edge: .inc installieren, alle Shader (Qwen-Satz + GLM-Varianten) bauen,
 # libggml-vulkan neu bauen + strippen. Ausgabe nach $SP/out.
 set -e
-SP=/mnt/c/Users/kevin/projects/pixel-cluster-base/src/ggml-barra/attn
+SP=$(cd "$(dirname "$0")" && pwd)
 python3 "$SP/battn_install.py" ~/llama.cpp
 GLS=~/glslang-new/bin/glslang
 mkdir -p "$SP/out"

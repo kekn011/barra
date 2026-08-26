@@ -3,8 +3,8 @@
 #   gen-model.sh <name> <ggml-bin> <NL> <H>
 set -e
 NAME=$1; GGML=$2; NL=$3; H=$4
-cd /mnt/c/Users/kevin/projects/pixel-cluster-base/src/whisper-mali/tpu
-WD=/mnt/c/Users/kevin/projects/pixel-cluster-base/tpu-toolchain/whisper
+cd "$(dirname "$0")"
+WD=${BARRA_TOOLCHAIN:?BARRA_TOOLCHAIN setzen (TPU-Toolchain-Datenverzeichnis)}/whisper
 OUT=$WD/${NAME}_pkgs
 mkdir -p "$OUT"
 FILT='WARNING|oneDNN|cuda|absl|fully_quantize|cpu_feature|interpreter.py|UserWarning|migration|deletion|LiteRT|XNNPACK|^\s*$|^INFO'

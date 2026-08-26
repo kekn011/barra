@@ -1,10 +1,10 @@
 #!/bin/bash
 # Rebuild sd-cli (nach ggml-vulkan-Patches) + test-backend-ops als GEMM-Sweep-Werkzeug.
-# In WSL: wsl bash /mnt/c/Users/kevin/projects/pixel-cluster-base/src/sd-mali/build-bench.sh
+# In WSL: wsl bash <repo>/src/sd-mali/build-bench.sh
 set -e
 NDK=${NDK:-$HOME/android-sdk/ndk/27.2.12479018}
 S=$HOME/stable-diffusion.cpp
-W=/mnt/c/Users/kevin/AppData/Local/Temp/claude/C--Users-kevin-projects-pixel-cluster-base/3fe240e5-5b19-4c9f-929a-a40d4c151ed9/scratchpad
+W=${BARRA_WORK:-${TMPDIR:-/tmp}/barra}; mkdir -p "$W"
 cd $S
 echo "== sd-cli (inkrementell) =="
 ninja -C build-android-vulkan sd-cli 2>&1 | tail -2

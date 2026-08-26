@@ -127,7 +127,8 @@ for K in CONFIG_PID_NS CONFIG_USER_NS CONFIG_RFKILL CONFIG_IP_SET CONFIG_NETFILT
          CONFIG_FHANDLE CONFIG_NFSD CONFIG_NFS_FS CONFIG_NFS_V4; do
     printf '  %-36s %s\n' "$K" "$(grep -e "^$K=" -e "^# $K is not set" "$IK" || echo '(fehlt)')"
 done
-OUT=/mnt/c/Users/kevin/projects/pixel-cluster-base/images/gki-6.1.157-usbnet
+REPO=${BARRA_REPO:-$(cd "$(dirname "$0")/.." && pwd)}
+OUT=${BARRA_OUT:-$REPO/out/gki-6.1.157-usbnet}
 mkdir -p "$OUT"
 cp "$DIST/boot-lz4.img" "$OUT/"
 cp "$DIST"/*.ko "$OUT/" 2>/dev/null || true

@@ -14,8 +14,10 @@ set -e
 ONNX="$1"; NAME="$2"
 [ -f "$ONNX" ] && [ -n "$NAME" ] || { echo "Nutzung: barra-emb-port.sh <r34.onnx> <name>"; exit 1; }
 SRC="$(cd "$(dirname "$0")" && pwd)"
-D=${BARRA_EMB_WORK:-/mnt/c/Users/kevin/projects/pixel-cluster-base/tpu-toolchain/pyannote}
-WINADB="/mnt/c/Users/kevin/AppData/Local/Microsoft/WinGet/Packages/Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe/platform-tools/adb.exe"
+D=${BARRA_EMB_WORK:-${BARRA_TOOLCHAIN:?BARRA_EMB_WORK oder BARRA_TOOLCHAIN setzen}/pyannote}
+BARRA_REPO=${BARRA_REPO:-$(cd "$(dirname "$0")/../.." && pwd)}
+# adb: PATH zuerst, sonst das mitgelieferte Windows-adb aus dem Repo
+WINADB="${BARRA_ADB:-$BARRA_REPO/barra-setup/tools/adb.exe}"
 ADB=${ADB:-$(command -v adb.exe >/dev/null 2>&1 && echo adb.exe || { [ -x "$WINADB" ] && echo "$WINADB" || echo adb; })}
 # Windows-adb braucht Windows-Pfade fuer lokale Dateien (WSL-Bruecke)
 apath(){ case "$ADB" in *.exe) wslpath -w "$1";; *) printf '%s' "$1";; esac; }

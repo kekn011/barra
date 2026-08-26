@@ -1,7 +1,8 @@
 #!/bin/bash
 # llama.cpp (Android, Vulkan) neu bauen mit Integer-Dot-faehigem Shader-Compiler (glslang 16.5 via glslc-wrap.sh)
 set -e
-cp /mnt/c/Users/kevin/projects/pixel-cluster-base/src/experiments/roofline/gemv/glslc-wrap.sh ~/glslc-wrap.sh; chmod +x ~/glslc-wrap.sh
+REPO=${BARRA_REPO:-$(cd "$(dirname "$0")/../../.." && pwd)}
+cp "$REPO/src/gpu-kernels/glslc-wrap.sh" ~/glslc-wrap.sh; chmod +x ~/glslc-wrap.sh
 # Selbsttest des Wrappers am Feature-Test-Shader
 cd ~/llama.cpp
 ~/glslc-wrap.sh -o - -fshader-stage=compute --target-env=vulkan1.3 ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/integer_dot.comp > /dev/null && echo "wrapper: integer_dot OK"

@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-SP=/mnt/c/Users/kevin/AppData/Local/Temp/claude/C--Users-kevin-projects-pixel-cluster-base/087317f8-7a2e-477e-8ec5-ccbe33ea455c/scratchpad/gpu-attn
+SP=${BARRA_WORK:-${TMPDIR:-/tmp}/barra}/gpu-attn; mkdir -p "$SP"
 python3 "$SP/battn_install.py" ~/llama.cpp
 GLS=~/glslang-new/bin/glslang
 mkdir -p "$SP/out"

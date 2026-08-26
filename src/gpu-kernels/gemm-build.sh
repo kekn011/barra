@@ -1,5 +1,5 @@
 TM=$1; TN=$2; TK=$3; MM=$4; MN=$5; LX=$6; LY=$7
-cd /mnt/c/Users/kevin/projects/pixel-cluster-base/src/experiments/roofline
+cd "$(dirname "$0")"
 sed -e "s/#define TM .*/#define TM $TM/" -e "s/#define TN .*/#define TN $TN/" -e "s/#define TK .*/#define TK $TK/" \
     -e "s/#define MM .*/#define MM $MM/" -e "s/#define MN .*/#define MN $MN/" \
     -e "s/layout(local_size_x = 16, local_size_y = 16)/layout(local_size_x = $LX, local_size_y = $LY)/" \

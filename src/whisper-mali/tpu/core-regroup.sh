@@ -3,8 +3,9 @@
 #   core-regroup.sh <name> <HG> <HTOT>
 set -e
 NAME=$1; HG=$2; HTOT=$3
-cd /mnt/c/Users/kevin/projects/pixel-cluster-base/src/whisper-mali/tpu
-OUT=/mnt/c/Users/kevin/projects/pixel-cluster-base/tpu-toolchain/whisper/${NAME}_pkgs
+cd "$(dirname "$0")"
+TC=${BARRA_TOOLCHAIN:?BARRA_TOOLCHAIN setzen (TPU-Toolchain-Datenverzeichnis)}
+OUT=$TC/whisper/${NAME}_pkgs
 rm -f "$OUT/wsp_core5_b0.tflite" "$OUT/wsp_core5_b0.qparams.json"
 python3 whisper_core.py "$OUT/ref_base_l0.npz" "$OUT/wsp_core5g${HG}_b0" 16x8 375 375 $HG 64 0 v5 $HTOT 0 2>&1 | grep -E "WROTE|cos" | tail -2
 python3 - "$OUT" $HG <<'EOF'
