@@ -231,6 +231,9 @@ foreach ($k in $todo) {
   $u = SourceUrl $e
   Write-Host "[lade]   $k <- $u"
   Download $u $t
+  # Nicht jeder Eintrag hat einen Pin: die Pruefsummenliste selbst ist die Referenz und
+  # traegt bewusst keinen eigenen Hash. Ohne diese Pruefung lief .ToLower() auf $null.
+  if (-not $e.sha256) { Write-Host "[ok]     $k geladen (kein Pin - Referenzdatei)." -ForegroundColor Green; continue }
   $got = ShaOf $t
   if ($got -ne $e.sha256.ToLower()) {
     Remove-Item $t -Force

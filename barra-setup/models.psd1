@@ -33,7 +33,7 @@
   # --- Payload: das, was der Flash zwingend braucht ---
   # Die Pruefsummenliste selbst: sie kommt aus dem Release wie die Dateien, die sie beschreibt.
   # Bewusst OHNE eigenen sha256 - sie ist die Referenz, nicht der Prueffall.
-  'payload-sums' = @{ kit='payload'; file='SHA256SUMS'; origin='barra'; bytes=332
+  'payload-sums' = @{ kit='payload'; file='SHA256SUMS'; origin='barra'; bytes=245
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429633604
     sha256='086096406cec96d4baa877826883cc728a191b07140ba65c2d8e2af4e966dc42'
