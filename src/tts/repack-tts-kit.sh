@@ -49,6 +49,23 @@ echo "== Dienst-Dateien aus src/ nachziehen =="
 cp "$SRC/ttsd.py"    "$K/bin/ttsd.py"
 cp "$SRC/launch.sh"  "$K/bin/launch.sh"
 cp "$SRC/tools/piper_ids.py" "$K/bin/piper_ids.py"
+
+# gpudecd MUSS mitgezogen werden: die SPIR-V-Shader sind IN die Binaerdatei kompiliert.
+# Am 26.8.2026 blieb hier die alte Binaerdatei aus dem Vor-Tar liegen, waehrend program2.json
+# schon die neue leaky-Kodierung nutzte -> die Aktivierung vor conv_post fiel STILL aus
+# (cos 0,971 statt 1,000, hoerbar als Kratzen, so ins Release gegangen). Der Ausweis unten
+# vergleicht die Binaerdatei mit ihren Quellen, damit das nicht wieder unbemerkt passiert.
+BIN=$SRC/prebuilt/gpudecd; BI=$SRC/prebuilt/gpudecd.buildinfo
+[ -f "$BIN" ] && [ -f "$BI" ] || { echo "FEHLER: $BIN oder sein Bau-Ausweis fehlt"; exit 1; }
+if ! ( cd "$SRC" && grep -v "^#" "$BI" | sha256sum -c --quiet - ); then
+  echo "FEHLER: prebuilt/gpudecd passt nicht zu gpudecd.c / spv/*.h - die Binaerdatei ist veraltet."
+  echo "        Im Container auf einem Node neu bauen:"
+  echo "            gcc -O2 gpudecd.c -Ispv -o gpudecd -lbarra -lm"
+  echo "        danach prebuilt/gpudecd ersetzen und gpudecd.buildinfo neu schreiben."
+  exit 1
+fi
+cp "$BIN" "$K/bin/gpudecd"
+echo "  gpudecd: aus prebuilt/ nachgezogen, Ausweis stimmt"
 chmod 755 "$K/bin/launch.sh" "$K/bin/gpudecd" 2>/dev/null || true
 
 echo "== Kontrolle =="

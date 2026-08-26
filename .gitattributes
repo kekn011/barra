@@ -39,3 +39,9 @@ src/perf/barra-perf           text eol=lf
 src/pyannote/barra-diarize    text eol=lf
 src/sdk/barra-smi             text eol=lf
 src/sdk/barrac                text eol=lf
+
+# Vokoder-Binaerdatei: niemals durch eine Zeilenende-Umsetzung schicken.
+src/tts/prebuilt/gpudecd           binary
+# Ihr Bau-Ausweis wird von "sha256sum -c" gelesen - ein CRLF haengt sich an den Dateinamen
+# und der Wachter meldet dann "No such file" statt einer echten Abweichung.
+src/tts/prebuilt/gpudecd.buildinfo text eol=lf

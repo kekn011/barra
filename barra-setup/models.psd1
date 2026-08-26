@@ -28,7 +28,7 @@
   # Woher die Dateien kommen, die zu gross fuers Repo sind. base LEER = es gibt noch
   # keine Quelle; fetch-payload.ps1 sagt dann, was zu tun ist, statt stumm zu scheitern.
   # Eintragen, sobald das Release steht: 'https://github.com/kekn011/barra/releases/download/<tag>'
-  '_release' = @{ base='https://github.com/kekn011/barra/releases/download/v0.1.0-test'; tag='v0.1.0-test' }
+  '_release' = @{ base='https://github.com/kekn011/barra/releases/download/v0.1.0'; tag='v0.1.0' }
 
   # ---------- Kleinteile, die der Kit-Lauf ebenfalls uebertraegt ----------
   # Sie sind nicht im Repo (die Kit-Ordner sind ausgeignoriert) und hatten bisher keine
@@ -231,6 +231,6 @@
   # tts-kit.tar.gz enthaelt derzeit die geklonte Stimme "David" (kein Upstream, keine Lizenz)
   # sowie Piper Thorsten/Amy. Entscheidung 26.8.: GPU-Vokoder auf eine Piper-Stimme umziehen,
   # David faellt raus. Danach ist das Kit rein 'barra' + Piper-Downloads.
-  'tts-kit'  = @{ kit='tts';  file='tts-kit.tar.gz';  origin='barra'; bytes=332935117; sha256='6fc862a9522ad0d33168ed3535db8638d9317dd9aa3a0bb6e3e4d8cd72721b5a'; note='enthaelt die Piper-Stimmen Thorsten/Amy (MIT) — die gehoeren als Download ins Manifest; die geklonte Stimme David ist am 26.8. entfernt worden' }
+  'tts-kit'  = @{ kit='tts';  file='tts-kit.tar.gz';  origin='barra'; bytes=332932765; sha256='27495ca3aa318c1953ec805703b15beffae930238d3f68c10d3628f53b36ce60'; note='enthaelt die Piper-Stimmen Thorsten/Amy (MIT) — die gehoeren als Download ins Manifest; die geklonte Stimme David ist am 26.8. entfernt worden; gpudecd am 26.8. abend neu gebaut - die ausgelieferte Binaerdatei war aelter als die leaky-Korrektur und liess die Aktivierung vor conv_post weg (cos 0,971 statt 1,000)' }
   'wake-kit' = @{ kit='wake'; file='wake-kit.tar.gz'; origin='barra'; bytes=16969662;  sha256='566174871dc58d78ca88aa3a86b4fdf58132d9c30bdadc3f3a8f4865fee25cc2'; note='buendelt das sherpa-onnx-Keyword-Spotter-Modell (int8, 5 MB) — Herkunft und Lizenz noch offen' }
 }

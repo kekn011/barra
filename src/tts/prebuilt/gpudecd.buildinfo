@@ -1,0 +1,17 @@
+# Bau-Ausweis fuer prebuilt/gpudecd - von repack-tts-kit.sh geprueft.
+# Die SPIR-V-Shader werden IN die Binaerdatei kompiliert. Aendert sich eine der Quellen
+# unten, MUSS die Binaerdatei neu gebaut werden - sonst trifft ein neuer Kennwert im alten
+# Shader keine Verzweigung und eine Rechenstufe faellt STILL aus (26.8.2026: leaky=2 vor
+# conv_post wurde ignoriert, cos 0,971 statt 1,000, hoerbar als Kratzen).
+#
+# Bauen im Container auf einem Node (dort liegen libbarra.so.1 und barra.h):
+#     gcc -O2 gpudecd.c -Ispv -o gpudecd -lbarra -lm
+# Gebaut 26.8.2026 auf Node barra-a4a6, gcc 13.3.0 (Ubuntu 24.04 aarch64).
+# Abgenommen gegen das Original-ONNX AUF DER ECHTEN GPU: cos 0,99999985, SNR 62,3 dB.
+#
+fb16fb0657c738ef7ba0899ab1768d2fd47f7b7b37f4cc21eac57b1eb4d4711e *gpudecd.c
+79e97793025f3bc7a517ecd234900df82c65c062f0336e0291047c0963827008 *spv/convfused16_spv.h
+c5edd8fc66f0da51073f3079e28345d31a6b97cad42466f7abb1d5a91858c15f *spv/convfused16s_spv.h
+2e21b12a1ae600ab45962d4d3f0c5526a3928c77c74d27db55f50c8771e7051f *spv/mrf16_spv.h
+b0800f7b787fedf9ebbf84d9fa9c62759edf4f89effbced812f142c0805678dd *spv/shuffle16_spv.h
+2a8225faa465c09f26c218ccccd5f53785560cf6e5d7bef162844775346091ac *prebuilt/gpudecd
