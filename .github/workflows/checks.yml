@@ -1,0 +1,55 @@
+# Kleine Waechter gegen genau die Fehler, die dieses Projekt schon einmal ausgeliefert hat.
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  guards:
+    name: BOM und Release-Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # PowerShell 5.1 liest eine BOM-lose Datei als ANSI. Ein BOM-loses Skript mit Umlauten
+      # landet damit als Zeichensalat im Setup-Fenster - zweimal passiert (23.8./26.8.2026).
+      - name: Jede .ps1/.psd1 hat ein UTF-8-BOM
+        run: |
+          fehler=0
+          while IFS= read -r f; do
+            if [ "$(head -c 3 "$f" | od -An -tx1 | tr -dc 0-9a-f)" != "efbbbf" ]; then
+              echo "::error file=$f::kein UTF-8-BOM - PowerShell 5.1 liest die Datei sonst als ANSI"
+              fehler=1
+            fi
+          done < <(git ls-files '*.ps1' '*.psd1')
+          [ "$fehler" = 0 ] && echo "alle .ps1/.psd1 tragen ein BOM"
+          exit $fehler
+
+      # release-please hebt version.txt an. Die Release-Adresse im Manifest muss mitgehen,
+      # sonst zeigt das Setup auf ein Release, das es nicht gibt.
+      - name: models.psd1 zeigt auf die aktuelle Version
+        run: |
+          soll="v$(tr -d ' \r\n' < version.txt)"
+          ist=$(sed -n "s/.*tag='\([^']*\)'.*/\1/p" barra-setup/models.psd1 | head -1)
+          base=$(sed -n "s|.*base='[^']*/\([^'/]*\)'.*|\1|p" barra-setup/models.psd1 | head -1)
+          echo "version.txt=$soll  models.psd1 tag=$ist  base endet auf=$base"
+          if [ "$ist" != "$soll" ] || [ "$base" != "$soll" ]; then
+            echo "::error file=barra-setup/models.psd1::_release passt nicht zu version.txt ($soll) - siehe docs/releasing.md"
+            exit 1
+          fi
+
+  docs:
+    name: Lizenztabelle ist aktuell
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # docs/models.md wird aus models.psd1 erzeugt. Am 26.8.2026 fehlten dort neun
+      # Artefakte, weil nach einer Manifest-Aenderung niemand den Generator lief.
+      - name: mk-model-docs.ps1 -Check
+        shell: pwsh
+        run: |
+          Push-Location barra-setup
+          .\mk-model-docs.ps1 -Check
+          Pop-Location
