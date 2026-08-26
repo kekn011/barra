@@ -58,3 +58,11 @@ Magisk-*.apk
 *.log
 *.tmp
 .DS_Store
+
+# Geraetematerial: Vendor-Bibliotheken und -Firmware verlassen das Telefon nicht.
+# libgxp.so wird zur Laufzeit per dlopen vom Geraet geladen; die DSP-Firmware und ihr
+# Disassemblat sind reine Analyse-Abzuege. NOTICE sagt zu, dass barra so etwas nicht weitergibt.
+src/dsp-kernels/tie/libgxp.so
+src/dsp-kernels/tie/fw_core*.bin
+src/dsp-kernels/tie/inbuilt.dis
+src/dsp-kernels/tie/inbuilt.elf

@@ -138,6 +138,17 @@ get_state(){
 # Queue: /opt/hwbridge/compile/<job>.tflite + <job>.req -> <job>.package + <job>.done (+ <job>.log)
 # EIN Worker, seriell (tpuc1 nutzt feste Pfade /data/local/tmp/out.package + edgetpu-Cache).
 CQ=/data/local/ubuntu/opt/hwbridge/compile
+# libcomp_std.so ist ein GEPATCHTER VENDOR-BLOB und wird NIE mitgeliefert (er darf das Geraet
+# nicht verlassen). Er wird beim ersten Compile-Auftrag aus der Vendor-Bibliothek erzeugt, die
+# ohnehin auf dem Telefon liegt. Danach bleibt er liegen; der Nutzer merkt nur den ersten Lauf.
+ensure_compiler(){
+  T=/data/adb/baseos/tpu
+  [ -s "$T/libcomp_std.so" ] && return 0
+  [ -x "$T/extract-libedgetpu.sh" ] || [ -f "$T/extract-libedgetpu.sh" ] || return 1
+  log "compile: libcomp_std.so fehlt - wird aus der Vendor-Bibliothek erzeugt"
+  sh "$T/extract-libedgetpu.sh" "$T/libcomp_std.so" >>"$T/extract.log" 2>&1
+  [ -s "$T/libcomp_std.so" ]
+}
 compile_worker(){
   T=/data/adb/baseos/tpu
   mkdir -p "$CQ" 2>/dev/null; chmod 777 "$CQ" 2>/dev/null
@@ -147,6 +158,11 @@ compile_worker(){
       [ -f "$r" ] || continue
       j="${r%.req}"; rm -f "$r"
       log "compile: $(basename "$j").tflite"
+      if ! ensure_compiler; then
+        echo "ERR TPU-Compiler nicht verfuegbar (libcomp_std.so liess sich nicht erzeugen; siehe $T/extract.log)" > "$j.done"
+        log "compile: $(basename "$j") -> kein Compiler"
+        continue
+      fi
       rm -f /data/local/tmp/out.package /data/vendor/edgetpu/cache/_0 /data/vendor/edgetpu/cache/_0_checksum 2>/dev/null
       ( cd /data/local/tmp && COMPILER_SO=$T/libcomp_std.so MODEL="$j.tflite" LD_LIBRARY_PATH=/system/lib64:/vendor/lib64 timeout 600 $T/tpuc1 ) > "$j.log" 2>&1
       if [ -s /data/local/tmp/out.package ]; then

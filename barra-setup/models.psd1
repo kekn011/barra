@@ -31,8 +31,8 @@
   '_release' = @{ base=''; tag='' }
 
   # --- Payload: das, was der Flash zwingend braucht ---
-  'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=453599999
-    sha256='5bfcff304cd147a396449df0e8af53f35fe936df061ee1a948a7110ed1e2321b'
+  'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429633604
+    sha256='086096406cec96d4baa877826883cc728a191b07140ba65c2d8e2af4e966dc42'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   'payload-boot' = @{ kit='payload'; file='boot-lz4.img'; origin='barra'; bytes=53477376
     sha256='01938bbe72dc1f282b671673a0d01dd9f10a00f6674c6bef7b8c245e9da42949'
