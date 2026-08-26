@@ -14,15 +14,20 @@ export TTS_SHERPA=$K/sherpa/sherpa-onnx-offline-tts
 export TTS_AUDIO_SOCK=/opt/hwbridge/audio.sock
 export TTS_PORT=${TTS_PORT:-8095}
 mkdir -p /run/barra-tts 2>/dev/null || true
-# GPU-Vokoder-Daemon (nur David braucht ihn; startet auch ohne, Piper geht dann trotzdem).
-# Mini-Supervisor: startet gpudecd bei Absturz neu, sonst faellt die David-Stimme still aus.
-if ! pgrep -f "gpudecd /run/barra-tts/gpudec.sock" >/dev/null; then
+# GPU-Vokoder-Daemons: EIN gpudecd je Stimme mit eigenem Socket.
+# Wichtig: ein gpudecd traegt genau EIN Programm (Gewichte einer Stimme). Wuerden sich
+# zwei Stimmen einen Daemon teilen, bekaeme die zweite still die Gewichte der ersten —
+# es klaenge falsch, ohne dass irgendetwas fehlschlaegt.
+for v in $K/voices/*/; do
+  [ -f "$v/gpukit2/program2.json" ] || continue
+  name=$(basename "${v%/}")
+  sock=/run/barra-tts/gpudec-$name.sock
+  pgrep -f "gpudecd $sock" >/dev/null && continue
+  echo "[launch] GPU-Vokoder fuer $name -> $sock" >>/run/barra-tts/gpudecd.log
   ( while :; do
-      $K/bin/gpudecd /run/barra-tts/gpudec.sock \
-        $K/voices/david/gpukit2/program2.json $K/voices/david/gpukit2 \
-        >>/run/barra-tts/gpudecd.log 2>&1
-      echo "[launch] gpudecd beendet (rc=$?), Neustart in 2s" >>/run/barra-tts/gpudecd.log
+      $K/bin/gpudecd "$sock" "$v/gpukit2/program2.json" "$v/gpukit2"         >>/run/barra-tts/gpudecd.log 2>&1
+      echo "[launch] gpudecd $name beendet (rc=$?), Neustart in 2s" >>/run/barra-tts/gpudecd.log
       sleep 2
     done ) &
-fi
+done
 exec python3.12 $K/bin/ttsd.py

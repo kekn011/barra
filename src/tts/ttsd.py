@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # barra TTS-Worker (Container): HTTP GET/POST /say?voice=<..>&text=<..> -> Synthese -> audiod-Lautsprecher.
-# Stimmen datengetrieben aus $TTS_ROOT/voices/*/voice.json. David = BajFrontend->front-onnx(ort warm)->
-# z->gpudecd(GPU, warm)->wav. Piper = sherpa-onnx-offline-tts. Ausgabe: 48k stereo S16 an audio.sock.
+# Stimmen datengetrieben aus $TTS_ROOT/voices/*/voice.json:
+#   piper-gpu  espeak-ng+tokens -> front-onnx (ort warm) -> z -> gpudecd (GPU, warm) -> wav
+#   coqui-gpu  derselbe Weg, IDs aus dem Coqui-Frontend
+#   piper      sherpa-onnx-offline-tts (Rueckfall ohne GPU). Ausgabe: 48k stereo S16 an audio.sock.
 # Env: TTS_ROOT (Default /opt/barra-tts), TTS_PORT (8095), TTS_GPUDEC_SOCK, TTS_AUDIO_SOCK, TTS_SHERPA.
 import os, sys, json, time, socket, struct, subprocess, tempfile, wave, threading, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,8 +19,9 @@ _lock = threading.Lock()   # eine Synthese zur Zeit (GPU/audiod seriell)
 
 def log(*a): print("[ttsd]", *a, file=sys.stderr, flush=True)
 
-# ---------- David (GPU) ----------
-class David:
+# ---------- Coqui-VITS ueber den GPU-Vokoder ----------
+# (hiess frueher 'David'; diese Stimme ist entfallen, der Weg bleibt fuer eigene Coqui-Modelle)
+class CoquiGpu:
     def __init__(self, d, cfg):
         import onnxruntime as ort
         sys.path.insert(0, cfg["site"])
@@ -37,6 +40,42 @@ class David:
         z = np.asarray(self.sess.run(None, feed)[0], dtype=np.float32)[0]   # [192,T]
         T = z.shape[1]
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(GPUSOCK)
+        s.sendall(struct.pack("i", T)); s.sendall(np.ascontiguousarray(z).tobytes())
+        n = struct.unpack("i", _recvn(s, 4))[0]
+        wav = np.frombuffer(_recvn(s, n * 4), dtype=np.float32); s.close()
+        return wav, self.sr
+
+# ---------- Piper ueber den GPU-Vokoder ----------
+# Gleicher Weg wie David (Front-ONNX -> z -> gpudecd), aber die IDs kommen aus
+# espeak-ng + tokens.txt statt aus dem Coqui-Frontend.
+class PiperGpu:
+    def __init__(self, d, cfg):
+        import onnxruntime as ort
+        sys.path.insert(0, os.path.join(ROOT, "bin"))
+        from piper_ids import load_tokens, to_ids
+        self._to_ids = to_ids
+        self.tokens = load_tokens(os.path.join(d, cfg["tokens"]))
+        self.espeak_voice = cfg.get("espeak_voice", "de")
+        self.espeak = cfg.get("espeak", "espeak-ng")
+        so = ort.SessionOptions(); so.intra_op_num_threads = 1
+        self.sess = ort.InferenceSession(os.path.join(d, cfg["front_onnx"]), sess_options=so,
+                                         providers=["CPUExecutionProvider"])
+        self.inames = [i.name for i in self.sess.get_inputs()]
+        self.scales = np.array(cfg.get("scales", [0.667, 1.0, 0.8]), dtype=np.float32)
+        self.sr = cfg.get("sample_rate", 22050)
+        # eigener Socket je Stimme - siehe launch.sh
+        self.sock = cfg.get("gpu_sock") or GPUSOCK
+    def synth(self, text):
+        ids, unk = self._to_ids(text, self.tokens, voice=self.espeak_voice, espeak=self.espeak)
+        if unk:
+            log("WARNUNG: Phoneme ohne Token uebersprungen:", sorted(set(unk)))
+        ids = np.asarray(ids, dtype=np.int64)[None]
+        feed = {self.inames[0]: ids, self.inames[1]: np.array([ids.shape[1]], dtype=np.int64),
+                self.inames[2]: self.scales}
+        z = np.asarray(self.sess.run(None, feed)[0], dtype=np.float32)
+        while z.ndim > 2: z = z[0]
+        T = z.shape[1]
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(self.sock)
         s.sendall(struct.pack("i", T)); s.sendall(np.ascontiguousarray(z).tobytes())
         n = struct.unpack("i", _recvn(s, 4))[0]
         wav = np.frombuffer(_recvn(s, n * 4), dtype=np.float32); s.close()
@@ -88,7 +127,8 @@ def load_voices():
         if not os.path.isfile(cfgp): continue
         cfg = json.load(open(cfgp))
         try:
-            eng = David(d, cfg) if cfg["engine"] == "david" else Piper(d, cfg)
+            e = cfg["engine"]
+            eng = CoquiGpu(d, cfg) if e == "coqui-gpu" else PiperGpu(d, cfg) if e == "piper-gpu" else Piper(d, cfg)
             VOICES[name] = eng; log("Stimme geladen:", name, f"({cfg['engine']})")
         except Exception as e:
             log("Stimme FEHLER", name, e)

@@ -32,7 +32,7 @@ void main(){
       if(kr < p.Cin*p.Kk){ uint ci=kr/p.Kk, kk=kr%p.Kk; int off=int(kk)*int(p.dil)-int(p.pad);
         uint tbase=bcol+cc*4u;
         [[unroll]] for(int e=0;e<4;e++){ int t=int(tbase+uint(e))+off; uint tg=tbase+uint(e);
-          if(tg<p.Tout && t>=0 && t<int(p.Tin)){ float16_t vv=xin[ci*p.Tin+uint(t)]; if(p.leaky==1u && vv<float16_t(0.0)) vv*=float16_t(0.1); val[e]=vv; } } }
+          if(tg<p.Tout && t>=0 && t<int(p.Tin)){ float16_t vv=xin[ci*p.Tin+uint(t)]; if(vv<float16_t(0.0)){ if(p.leaky==1u) vv*=float16_t(0.1); else if(p.leaky==2u) vv*=float16_t(0.01); } val[e]=vv; } } }
       Bs[r][cc]=val; }
     barrier();
     [[unroll]] for(uint k4=0u;k4<TK/4u;k4++){

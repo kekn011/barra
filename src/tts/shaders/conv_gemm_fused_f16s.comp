@@ -3,10 +3,10 @@
 #extension GL_EXT_control_flow_attributes : require
 // Fusionierter Conv1d (implicit im2col) + Epilog (bias+res+tanh), f16, f32-Akku. Schreibt DIREKT
 // in den Ausgabe-Slot [Cout,Tout] (kein ZC-Scratch, keine Epilog-Stufe).
-#define TM 128
+#define TM 32
 #define TN 128
 #define TK 32
-#define MM 8
+#define MM 2
 #define MNV 2
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(std430, binding=0) readonly buffer P { uint M,N,Kg,Cin,Kk,dil,pad,Tout,leaky,woff,Tin,Cout,boff,flags; } p;

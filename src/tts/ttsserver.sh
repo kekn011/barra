@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# barra TTS-Dienst-Steuerung (David GPU-Vokoder + Piper de/en). Wie llm/stt/pya: manueller Start,
+# barra TTS-Dienst-Steuerung (Piper de/en, Vokoder auf dem Grafikkern). Wie llm/stt/pya: manueller Start,
 # KEIN Boot-Autostart. TTS rechnet im Container (glibc-Python + gpudecd) -> Steuerung ueber den
 # Container-systemd-Dienst barra-tts via enter-systemd. GPU-Pin nur solange der Dienst laeuft.
 #   su -M -c 'sh /data/adb/baseos/bin/ttsserver.sh start'   (start | stop | status | log)
@@ -7,7 +7,8 @@
 ES=/data/adb/baseos/bin/enter-systemd.sh
 U=/data/local/ubuntu
 
-pins_on(){   # TTS nutzt den Grafikkern (David-Vokoder) -> Mali-Mindesttakt anheben
+. /data/adb/baseos/bin/barra-i18n.sh
+pins_on(){   # TTS nutzt den Grafikkern (Vokoder) -> Mali-Mindesttakt anheben
   [ "$TTS_NOPIN" = "1" ] && return
   echo 890000 > /sys/class/misc/mali0/device/scaling_min_freq 2>/dev/null
   echo 890000 > /sys/class/misc/mali0/device/hint_min_freq 2>/dev/null
@@ -26,17 +27,19 @@ case "${1:-status}" in
   start)
     pins_on
     insys "systemctl start barra-tts; sleep 3; systemctl is-active barra-tts"
-    # Hebel 5 (Lazy-Compile-Warmup): der erste David-/say zahlt den ~2,4s Mali-Shader-Compile.
+    # Hebel 5 (Lazy-Compile-Warmup): das erste /say zahlt den ~2,4s Mali-Shader-Compile.
+    # Je GPU-Stimme laeuft ein eigener gpudecd, also jede einmal anstossen. play=0 heisst:
+    # nur rechnen, NICHT abspielen - der Warmup darf nicht hoerbar sein.
     # Jetzt beim Start abfangen statt beim Nutzer. Kurzer Text, play=0, best-effort mit Retries.
-    insys "for i in 1 2 3 4 5; do curl -s -m 30 -o /dev/null 'http://localhost:8095/say?voice=david&play=0&text=warmup' && break; sleep 2; done; echo warmup-done"
-    echo "TTS gestartet (vorgewaermt) -> http://<node>:8095/say?voice=david|piper-de|piper-en&text=...";;
+    insys "for v in piper-de piper-en; do for i in 1 2 3; do curl -s -m 30 -o /dev/null \"http://localhost:8095/say?voice=\$v&play=0&text=warmup\" && break; sleep 2; done; done; echo warmup-done"
+    t tts.started;;
   stop)
     insys "systemctl stop barra-tts"
     pins_off
-    echo "gestoppt";;
+    t tts.stopped;;
   status)
     insys "systemctl is-active barra-tts; systemctl show -p MainPID --value barra-tts";;
   log)
     insys "journalctl -u barra-tts --no-pager 2>/dev/null | tail -40; tail -20 /run/barra-tts/gpudecd.log 2>/dev/null";;
-  *) echo "ttsserver.sh start | stop | status | log";;
+  *) t tts.usage;;
 esac
