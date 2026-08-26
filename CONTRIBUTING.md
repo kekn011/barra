@@ -18,6 +18,52 @@ translations are all welcome.
   images, no vendor blobs, no Magisk APK. Those are downloaded from their
   original sources at setup time. See [NOTICE](NOTICE).
 
+## Commit messages
+
+`main` uses [Conventional Commits](https://www.conventionalcommits.org/). This is not
+bookkeeping for its own sake: `CHANGELOG.md`, the version number and the GitHub release are
+generated from these messages by release-please (see [docs/releasing.md](docs/releasing.md)).
+A commit that does not follow the format simply never shows up in the changelog.
+
+```
+<type>(<optional scope>): <description>
+
+<optional body: what you changed and, for anything measured, how you measured it>
+
+<optional footer: BREAKING CHANGE: ..., Signed-off-by: ...>
+```
+
+| Type | Use it for | Version effect |
+|---|---|---|
+| `feat` | a new capability a user can reach | minor |
+| `fix` | a defect in shipped behavior | patch |
+| `perf` | it does the same thing, faster | patch |
+| `docs` | documentation only | none |
+| `refactor` | structure, no behavior change | none |
+| `test` | tests and measurement harnesses | none |
+| `build` | build scripts, packaging, kit assembly | none |
+| `ci` | workflows | none |
+| `chore` | everything else | none |
+
+A `!` after the type (`feat!:`) or a `BREAKING CHANGE:` footer bumps the major version. Use
+it when an existing node, kit or setup run would break — for instance a base image that needs
+a reflash, or a manifest change that invalidates installed kits.
+
+Scopes are the part of the tree you touched: `tts`, `llm`, `stt`, `pya`, `img`, `wake`,
+`dev`, `base`, `kernel`, `setup`, `tpu`, `gpu`, `i18n`, `docs`.
+
+```
+fix(tts): rebuild gpudecd so the vocoder's pre-conv_post activation runs again
+perf(img): hand-written Mali GEMM cuts a 512x512 image from 117s to 20.6s
+feat(llm)!: kit layout changed - installed kits must be reinstalled
+```
+
+Write the description in English: the changelog it feeds is read by people who do not read
+German. (Commits before v0.1.0 are German prose — that history stays as it is.)
+
+Keep the subject line short and factual, and put the evidence in the body. The project rule
+above applies here too: if you claim a number, say how you measured it.
+
 ## Developer Certificate of Origin (DCO)
 
 We use the [DCO](https://developercertificate.org/) instead of a CLA. It is a
