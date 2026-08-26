@@ -1,4 +1,11 @@
 ﻿#!/system/bin/sh
+
+# ACHTUNG BEIM AUSROLLEN
+# Diese Datei liegt auf dem Geraet ZWEIMAL: unter /data/adb/baseos/bin/ (Ablage) und
+# unter /data/adb/hwbridge/ - und NUR letztere wird von hw-bridges.sh gestartet.
+# Wer hier etwas aendert, muss beide Kopien aktualisieren, sonst laeuft weiter die alte.
+# (26.8. genau so aufgelaufen: der Compiler-Automatismus lag in der falschen Kopie.)
+
 # ============================================================================
 # baseos-cfgd - Android-seitiger Config-Agent fuer pixel-config (im Ubuntu-Container).
 # Der Container (pivot_root) sieht /data/adb + /sys/.../google,charger NICHT. Diese Bruecke
