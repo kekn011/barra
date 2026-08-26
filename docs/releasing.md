@@ -19,10 +19,16 @@ So release-please creates the GitHub release as a **draft** (`draft: true` in
    footer the major.
 2. **release-please opens a release PR** ("chore: release x.y.z") holding the updated
    `CHANGELOG.md`, `version.txt` and `.release-please-manifest.json`.
-3. **Bump the release address in the PR.** `barra-setup/models.psd1` carries
-   `_release.base` and `_release.tag`; both must name the new tag. The `checks` workflow
-   fails the PR until they do — that is deliberate, not a nuisance: a manifest pointing at
-   a release that does not exist breaks every fresh install.
+3. **Check the release address.** `barra-setup/models.psd1` carries `_release.base` and
+   `_release.tag`, and release-please updates both — they sit on their own annotated lines
+   (`x-release-please-version`), one version per line so the generic updater cannot pick the
+   wrong one. It leaves the rest of the file, its UTF-8 BOM included, untouched; that was
+   verified against a real release PR, not assumed.
+
+   Note that **no CI runs on that pull request**: GitHub does not trigger workflows for pull
+   requests opened with the `GITHUB_TOKEN`. The guards below therefore run on `main` after
+   the merge, and `upload-release.ps1` refuses to upload when the manifest and `version.txt`
+   disagree — which is the point where it would actually hurt.
 4. **Merge the PR.** release-please tags the commit and creates the release **as a draft**.
 5. **Attach the assets** from your working copy:
 
@@ -50,7 +56,8 @@ itself and therefore carries no pin of its own.
 
 * **Every `.ps1`/`.psd1` carries a UTF-8 BOM.** PowerShell 5.1 reads a BOM-less file as
   ANSI, which turns German text in the setup wizard into mojibake.
-* **`models.psd1` points at the current version**, matching `version.txt`.
+* **`models.psd1` points at the current version**, matching `version.txt`. release-please
+  keeps these in step on its own; this is the net under it.
 * **`docs/models.md` is up to date** with the manifest (`mk-model-docs.ps1 -Check`). The
   license table silently lagged nine artifacts behind once.
 
