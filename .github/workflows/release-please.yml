@@ -1,0 +1,35 @@
+# Versionierung, CHANGELOG und Release-Entwurf aus den Commit-Nachrichten auf main.
+#
+# WICHTIG: das Release wird bewusst als ENTWURF angelegt (draft in release-please-config.json).
+# Die Release-Dateien dieses Projekts sind rund 13 GB grosse lokale Artefakte - Base-Image,
+# Kernel, Kit-Archive - die NICHT in CI entstehen. Wuerde release-please direkt
+# veroeffentlichen, stuende dort ein Release ohne Dateien, und das Setup faende nichts.
+# Ablauf steht in docs/releasing.md.
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - name: Hinweis auf die Handarbeit
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          echo "::notice title=Release-Entwurf angelegt::Tag ${{ steps.release.outputs.tag_name }}."
+          echo "::notice title=Noch zu tun::Assets hochladen und _release in barra-setup/models.psd1 nachziehen - siehe docs/releasing.md."
