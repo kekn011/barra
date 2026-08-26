@@ -4,6 +4,7 @@
   "packages": {
     ".": {
       "package-name": "barra",
+      "include-component-in-tag": false,
       "changelog-path": "CHANGELOG.md",
       "draft": true,
       "changelog-sections": [
