@@ -38,7 +38,9 @@ Signed-off-by: Your Name <your.email@example.com>
 
 ## Translations
 
-barra's user interface is fully localized from flat catalogs. To add a language:
+barra's setup wizard and `barra-config` are localized from flat catalogs. (The
+dashboard and the kit services are not yet — wiring them up is a welcome
+contribution.) To add a language:
 
 1. Copy `src/i18n/en.properties` to `src/i18n/<code>.properties`
    (e.g. `fr.properties`) and translate the values — keys stay unchanged.

@@ -9,11 +9,12 @@ compute node and makes its Tensor G3 accelerators — the edge **TPU**, the Mali
 **GPU** and the **DSP** — programmable from your own code, the way you'd use
 CUDA on an NVIDIA card.
 
-Flash a phone in about five minutes, `ssh` in, and you have a small ARM64 Linux
-box with `gcc`, `apt`, an on-device TPU compiler, and a driver library
-(`libbarra`) that shares zero-copy buffers across all four compute units. A
-4-billion-parameter LLM runs on it out of the box, served over an
-OpenAI-compatible API, with the attention math offloaded to the TPU.
+Flash a phone in about ten minutes — five of them hands-on — `ssh` in, and you
+have a small ARM64 Linux box with `gcc`, `apt`, an on-device TPU compiler, and a
+driver library (`libbarra`) that shares zero-copy buffers across all four
+compute units. Tick the
+LLM package during setup and a 4-billion-parameter model runs on it, served over
+an OpenAI-compatible API, with the attention math offloaded to the TPU.
 
 > ⚠️ **Early and hardware-specific.** v0.x supports the **Pixel 8a (akita)**
 > only. Flashing unlocks the bootloader, which **erases the phone** and voids
@@ -28,14 +29,14 @@ OpenAI-compatible API, with the attention math offloaded to the TPU.
 | **A real Ubuntu node** | Ubuntu 24.04 userland, systemd, SSH, `apt`, full hardware access, headless. Configure it with `sudo barra-config`. |
 | **The barra SDK** | `libbarra` (the driver API, `#include <barra.h>`), worked examples, and `barra-smi` — an `nvidia-smi`-style status view of the accelerators. |
 | **On-device TPU toolchain** | `barrac model.tflite` compiles your own model into a TPU package, right on the phone. No PC toolchain, no cloud. |
-| **An LLM, ready to serve** | `llama.cpp` with custom Mali GPU kernels **and** a TPU attention-offload path, behind an OpenAI-compatible server on port 8080. |
-| **Localized end to end** | Setup wizard and on-device tools in English and German; adding a language is a one-file pull request. |
+| **An LLM, ready to serve** | `llama.cpp` with custom Mali GPU kernels **and** a TPU attention-offload path, behind an OpenAI-compatible server on port 8080. The engine is in the base image; the model comes as a package you pick during setup and is fetched from its original source. |
+| **Localized** | Setup wizard and `barra-config` in English and German; adding a language is a one-file pull request. The dashboard and the kit services are still German-only. |
 
 ## Quick start
 
 1. **Flash** — on a Windows PC, download a release, run `barra-setup`, fill in
    the form (user, Wi-Fi, SSH key, language), plug in the phone, hit Start.
-   ~5 minutes later the node boots into your Wi-Fi and shows `ssh you@<ip>` on
+   ~10 minutes later the node boots into your Wi-Fi and shows `ssh you@<ip>` on
    its screen. See [docs/flashing.md](docs/flashing.md).
 
 2. **Explore the accelerators**
@@ -109,7 +110,7 @@ node) and summarized in [docs/api-reference.md](docs/api-reference.md).
 | `src/hwbridge/`, `src/gpu-kernels/`, `src/dsp-kernels/`, `src/tpu-runtime/` | the accelerator bridges and kernels |
 | `barra-setup/` | the Windows flashing tool (PowerShell) |
 | `kernel/` | the akita GKI kernel tree (GPLv2), config and patches |
-| `docs/` | guides (CC BY 4.0) |
+| `docs/` | guides (CC BY 4.0), incl. [models and licenses](docs/models.md) |
 
 Large binary artifacts (the base image payload, the LLM kit) are published as
 **GitHub release assets**, not committed to the repo.
@@ -143,6 +144,9 @@ payload from a running node, use `src/boot/barra-bake.sh`.
 ## License
 
 - Code: **Apache-2.0** ([LICENSE](LICENSE), [NOTICE](NOTICE))
+- Models: barra ships **no** third-party model. The setup fetches each one from its own
+  source, revision-pinned and SHA-256 verified — every model and its license is listed in
+  [docs/models.md](docs/models.md).
 - Documentation: **CC BY 4.0**
 - Kernel tree (`kernel/`): **GPLv2**
 - Name & marks: see [TRADEMARKS.md](TRADEMARKS.md)

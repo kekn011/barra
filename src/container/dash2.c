@@ -314,7 +314,7 @@ int main(int argc,char**argv){
       { int on=sockok("gxp.sock"); char pv[32],bv[40],sub[40];
         if(on){ long cf=dfreq("20c00000.callisto","cur_freq");
           snprintf(pv,sizeof pv,"%d %%",(int)(dsp_busy*100+.5f));
-          snprintf(sub,sizeof sub,"Aktivitaet · %ld MHz",cf>0?cf/1000000:0);
+          snprintf(sub,sizeof sub,"Aktivität · %ld MHz",cf>0?cf/1000000:0);
           snprintf(bv,sizeof bv,"6 · Soft-Float");
         } else { snprintf(pv,sizeof pv,"offline"); snprintf(sub,sizeof sub,"nicht aktiv"); snprintf(bv,sizeof bv,"—"); }
         acc_tile(M+2*(aw+gap),y,aw,ah,"DSP","Callisto GXP",A_DSP,on,pv,sub,on?dsp_busy:0,"Kernel",bv); }

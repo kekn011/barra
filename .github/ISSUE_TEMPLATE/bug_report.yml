@@ -11,8 +11,8 @@ body:
     id: build
     attributes:
       label: barra build
-      description: "Payload/image version and, if relevant, commit. From the node: `cat /data/adb/baseos/state` and the release tag you flashed."
-      placeholder: "v0.1.0 (payload v9, sha adc92d9a)"
+      description: "From the node: `cat /etc/barra-release`. Add the commit if you built from source."
+      placeholder: "barra v0.1.0 (image v14, sha 5bfcff30)"
     validations:
       required: true
   - type: dropdown

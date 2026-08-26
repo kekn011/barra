@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question / discussion
-    url: https://github.com/barra/barra/discussions
+    url: https://github.com/kekn011/barra/discussions
     about: For "how do I…" and open-ended questions, use Discussions.
   - name: Add a translation
-    url: https://github.com/barra/barra/blob/main/CONTRIBUTING.md#translations
+    url: https://github.com/kekn011/barra/blob/main/CONTRIBUTING.md#translations
     about: Adding a language is a one-file pull request — no issue needed.
