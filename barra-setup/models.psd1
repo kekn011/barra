@@ -30,6 +30,22 @@
   # Eintragen, sobald das Release steht: 'https://github.com/kekn011/barra/releases/download/<tag>'
   '_release' = @{ base='https://github.com/kekn011/barra/releases/download/v0.1.0-test'; tag='v0.1.0-test' }
 
+  # ---------- Kleinteile, die der Kit-Lauf ebenfalls uebertraegt ----------
+  # Sie sind nicht im Repo (die Kit-Ordner sind ausgeignoriert) und hatten bisher keine
+  # Bezugsquelle - der Kit-Lauf waere daran genauso gescheitert wie am ersten Paket.
+  'pya-eres-params' = @{ kit='pya'; file='eres_params.txt'; origin='barra'; bytes=128
+    sha256='f52abbb7b4b0949d6197ca3ff636615726bf2b358fedd1224bd0933575617837' }
+  'pya-tita-params' = @{ kit='pya'; file='tita_params.txt'; origin='barra'; bytes=503
+    sha256='481a599f3585a762625a60985e30ef0335b1a6265ab9efda9e40b5997f11ab31' }
+  'tts-service' = @{ kit='tts'; file='barra-tts.service'; origin='barra'; bytes=305
+    sha256='1e319014adb83d62511bcc7c6e8b8fc8274705d97fadf6304466433d7948331b' }
+  'tts-server' = @{ kit='tts'; file='ttsserver.sh'; origin='barra'; bytes=2360
+    sha256='a306a2446503cdb4b06c0e6a4b8ec71ade95399bffd1661e410c9f01af827849' }
+  'stt-server' = @{ kit='stt'; file='sttserver.sh'; origin='barra'; bytes=5377
+    sha256='25b6b0c5a448d472d21687bc810475fdd65a9b84f19632dbaecb5210fe6ed1d7' }
+  'dev-kit' = @{ kit='dev'; file='barra-dev-kit.tar.gz'; origin='barra'; bytes=24877591
+    sha256='a7fb69c4e9ec4088c41ae5d9bd90ea74edfcaadc32d74811831778a1d7a2349f' }
+
   # --- Payload: das, was der Flash zwingend braucht ---
   # Die Pruefsummenliste selbst: sie kommt aus dem Release wie die Dateien, die sie beschreibt.
   # Bewusst OHNE eigenen sha256 - sie ist die Referenz, nicht der Prueffall.
