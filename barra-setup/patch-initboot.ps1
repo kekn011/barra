@@ -26,7 +26,17 @@ $apk = Get-ChildItem (Join-Path $Payload 'Magisk-*.apk') | Select-Object -First 
 $out = Join-Path $Payload 'init_boot-magisk.img'
 
 if (-not (Test-Path $src)) { throw "stock init_boot.img missing ($src) — run fetch-stock.ps1 first" }
-if (-not $apk) { throw "Magisk APK missing in $Payload — download it from https://github.com/topjohnwu/Magisk/releases" }
+if (-not $apk) {
+  # Frueher brach das hier ab und schickte den Nutzer von Hand zu GitHub. Die APK ist in
+  # models.psd1 gepinnt (URL + SHA-256), also holen wir sie selbst - barra verteilt sie nicht.
+  $fetch = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'fetch-models.ps1'
+  if (Test-Path $fetch) {
+    Write-Host "Magisk APK fehlt - wird von der Originalquelle geladen (GPL-3.0, topjohnwu/Magisk) ..."
+    & $fetch -Id magisk -Yes
+    $apk = Get-ChildItem (Join-Path $Payload 'Magisk-*.apk') -ErrorAction SilentlyContinue | Select-Object -First 1
+  }
+}
+if (-not $apk) { throw "Magisk APK missing in $Payload - fetch-models.ps1 -Id magisk holt sie; Quelle: https://github.com/topjohnwu/Magisk/releases" }
 
 Write-Host "Patching init_boot.img with $($apk.Name) on the connected device (no root needed) …"
 $sh = @'

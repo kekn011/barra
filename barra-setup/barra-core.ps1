@@ -442,6 +442,19 @@ function Step2_Stock(){
   Ok (T 'core.s2.ok' $kv); Step 2 (T 'setup.steps.stock') 'ok'
 }
 
+# Fehlendes Payload-Artefakt beschaffen. Die grossen Dateien liegen bewusst nicht im Repo
+# (barra-base.tar.gz ist 433 MB); models.psd1 sagt, woher sie kommen. Ohne eingetragene
+# Release-Adresse kann das nichts holen - dann sagt es das, statt stumm zu scheitern.
+function Ensure-PayloadFile($id, $name){
+  $f = Join-Path $script:Payload $name
+  if (Test-Path $f) { return $true }
+  $fetch = Join-Path $script:Kit 'fetch-models.ps1'
+  if (-not (Test-Path $fetch)) { return $false }
+  Info "$name fehlt - wird geladen ..."
+  $r = Run 'powershell.exe' "-NoProfile -ExecutionPolicy Bypass -File `"$fetch`" -Id $id -Yes" $null 1800 'out'
+  Test-Path $f
+}
+
 # F5: Payload-Artefakt gegen payload/SHA256SUMS pruefen, BEVOR es geflasht/installiert wird.
 # -NonFatal: nur warnen (fuer init_boot-magisk.img, das Ensure-InitBoot lokal neu patchen kann).
 function Verify-PayloadFile($name, [switch]$NonFatal){
@@ -479,7 +492,8 @@ function Step3_KernelRoot(){
   if ((FbState) -eq 'bootloader') {
     # Backstop: ohne gepatchtes init_boot nicht flashen — patchen geht nur mit Geraet in Android.
     if (-not (Test-Path (Join-Path $script:Payload 'init_boot-magisk.img'))) { Fail (T 'core.ib.missing_bl') }
-    Verify-PayloadFile 'boot-lz4.img'                     # geshipptes Kernel-Image: fatal bei Mismatch
+    if (-not (Ensure-PayloadFile 'payload-boot' 'boot-lz4.img')) { Fail (T 'core.s4.tar_missing') }
+    Verify-PayloadFile 'boot-lz4.img'                     # Kernel-Image: fatal bei Mismatch
     Verify-PayloadFile 'init_boot-magisk.img' -NonFatal   # kann von Ensure-InitBoot lokal neu gepatcht sein -> nur warnen
     Info (T 'core.s3.flash')
     FbFlash 'boot' (Join-Path $script:Payload 'boot-lz4.img') (T 'core.s3.kernel_lbl')
@@ -539,7 +553,7 @@ function Step4_Base(){
   # Payload = tar.gz; wird UNVERAENDERT aufs Telefon geschoben und dort mit toybox tar -xz entpackt.
   # (Auf dem PC wird nichts entpackt: Ubuntu-Rootfs mit Symlinks/Rechten hat auf NTFS nichts verloren.)
   $tar = Join-Path $script:Payload 'barra-base.tar.gz'
-  if (-not (Test-Path $tar)) { Fail (T 'core.s4.tar_missing') }
+  if (-not (Ensure-PayloadFile 'payload-base' 'barra-base.tar.gz')) { Fail (T 'core.s4.tar_missing') }
   Verify-PayloadFile 'barra-base.tar.gz'   # F5: vor dem Push gegen SHA256SUMS pruefen
   # Pre-Einrichtung als Datei mitgeben
   $pre = Join-Path $env:TEMP 'barra-preconfig.env'
@@ -666,7 +680,44 @@ function Pkg($text,$state='run'){
   Emit 'pkg' @{ text=$text; state=$state }
   Emit 'progress' @{ pct=-1; text=$text }   # zeigt den Text auch in der Statuskachel (In-Flow)
 }
+# Datei -> Manifest-ID, damit eine fehlende Kit-Datei vor dem Push geholt werden kann.
+$script:KitFileIds = $null
+function Get-KitFileIds {
+  if ($null -ne $script:KitFileIds) { return $script:KitFileIds }
+  $map = @{}
+  $mp = Join-Path $script:Kit 'models.psd1'
+  if (Test-Path $mp) {
+    try {
+      $m = Import-PowerShellDataFile -Path $mp
+      $dir = @{ llm='llm-kit'; stt='whisper-kit'; pya='pyannote-kit'; tts='tts-kit'; wake='wake-kit'; img='img-kit'; dev='dev-kit'; payload='payload' }
+      foreach ($k in $m.Keys) {
+        $e = $m[$k]
+        if ($e -is [hashtable] -and $e.kit -and $e.file -and $dir[$e.kit]) {
+          $map[(Join-Path $dir[$e.kit] $e.file)] = $k
+        }
+      }
+    } catch { Log "models.psd1 nicht lesbar: $($_.Exception.Message)" }
+  }
+  $script:KitFileIds = $map
+  return $map
+}
+# Fehlende Kit-Datei beschaffen. Der Wizard bietet ein Paket an, sobald es BESCHAFFBAR ist -
+# hier wird daraus eine Datei auf der Platte, sonst liefe die Auswahl in einen Fehler.
+function Ensure-KitFile($src){
+  if (Test-Path $src) { return $true }
+  $rel = $src
+  if ($src.StartsWith($script:Kit)) { $rel = $src.Substring($script:Kit.Length).TrimStart('') }
+  $id = (Get-KitFileIds)[$rel]
+  if (-not $id) { Log "Ensure-KitFile: keine Manifest-ID fuer $rel"; return $false }
+  $fetch = Join-Path $script:Kit 'fetch-models.ps1'
+  if (-not (Test-Path $fetch)) { return $false }
+  Info "$(Split-Path $rel -Leaf) fehlt - wird geladen ..."
+  [void](Run 'powershell.exe' "-NoProfile -ExecutionPolicy Bypass -File `"$fetch`" -Id $id -Yes" $null 3600 'out')
+  Test-Path $src
+}
+
 function KitPush($src,$dst,$label){
+  if (-not (Ensure-KitFile $src)) { Fail (T 'core.kit.fail' (Split-Path $src -Leaf)) }
   $localSize = (Get-Item $src).Length
   for ($try=1; $try -le 3; $try++) {
     Chk

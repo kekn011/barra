@@ -28,9 +28,14 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $manifestPath = Join-Path $root "models.psd1"
 if (-not (Test-Path $manifestPath)) { throw "models.psd1 nicht gefunden neben diesem Skript." }
 $M = Import-PowerShellDataFile -Path $manifestPath
+# '_release' ist kein Modell, sondern sagt, WOHER unsere eigenen Artefakte kommen.
+$Rel = $M['_release']
+$M.Remove('_release') | Out-Null
+$RelBase = ''
+if ($Rel -and $Rel.base) { $RelBase = $Rel.base.TrimEnd('/') }
 
 # Kit-ID -> Ordnername (historisch gewachsen: stt liegt in whisper-kit, pya in pyannote-kit)
-$KitDir = @{ llm="llm-kit"; stt="whisper-kit"; pya="pyannote-kit"; tts="tts-kit"; wake="wake-kit"; img="img-kit"; dev="dev-kit" }
+$KitDir = @{ llm="llm-kit"; stt="whisper-kit"; pya="pyannote-kit"; tts="tts-kit"; wake="wake-kit"; img="img-kit"; dev="dev-kit"; payload="payload" }
 function Target($e) {
   $d = $KitDir[$e.kit]
   if (-not $d) { throw "Unbekanntes Kit '$($e.kit)' im Manifest - Ordner in $KitDir ergaenzen." }
@@ -38,6 +43,17 @@ function Target($e) {
 }
 
 function ShaOf($p) { (Get-FileHash $p -Algorithm SHA256).Hash.ToLower() }
+
+# Woher kommt die Datei? Fremdmodelle tragen ihre URL selbst; unsere eigenen Artefakte
+# liegen im Release und heissen dort wie die Datei.
+function SourceUrl($e) {
+  if ($e.origin -eq 'barra') {
+    if (-not $RelBase) { return '' }
+    return ($RelBase + '/' + $e.file)
+  }
+  if ($e.url) { return $e.url }
+  return ''
+}
 
 function Status($e) {
   $t = Target $e
@@ -52,13 +68,20 @@ if ($List) {
   "{0,-20} {1,-5} {2,-34} {3,-14} {4}" -f ("-"*20),("-"*5),("-"*34),("-"*14),("-"*30)
   foreach ($k in ($M.Keys | Sort-Object)) {
     $e = $M[$k]
-    $herk = if ($e.origin -eq 'barra') { "barra (Release-Asset)" }
-            elseif ($e.gated)          { "gated -> -Supply" }
-            elseif ($e.url)            { "gepinnt" }
+    $u = SourceUrl $e
+    $herk = if ($e.gated)              { "gated -> -Supply" }
+            elseif ($u)                { if ($e.origin -eq 'barra') { "aus dem Release" } else { "gepinnt" } }
+            elseif ($e.origin -eq 'barra') { "RELEASE FEHLT" }
             else                       { "URL FEHLT" }
     "{0,-20} {1,-5} {2,-34} {3,-14} {4}" -f $k, $e.kit, $e.file, (Status $e), $herk
   }
   ""
+  if (-not $RelBase) {
+    Write-Host "HINWEIS: in models.psd1 ist keine Release-Adresse eingetragen ('_release'.base)." -ForegroundColor Yellow
+    Write-Host "         Solange sie fehlt, laesst sich nichts holen, was barra selbst baut - inklusive"
+    Write-Host "         payload/barra-base.tar.gz, ohne das kein Flash moeglich ist."
+    Write-Host ""
+  }
   $up   = @($M.Values | Where-Object { $_.origin -eq 'upstream' })
   $open = @($up | Where-Object { -not $_.url })
   $nolic= @($up | Where-Object { -not $_.license })
@@ -125,35 +148,51 @@ if ($Kit) { $sel = @($sel | Where-Object { $M[$_].kit -eq $Kit }); if (-not $sel
 $todo = @()
 foreach ($k in $sel) {
   $e = $M[$k]
-  if ($e.origin -ne 'upstream') { continue }          # unsere Artefakte kommen als Release-Asset
-  if ((Status $e) -eq 'da')     { Write-Host "[da]     $k"; continue }
+  if ((Status $e) -eq 'da') { Write-Host "[da]     $k"; continue }
   if ($e.gated) { Write-Host "[gated]  $k : Quelle verlangt Zustimmung/Login - bitte -Supply $k -Path <datei>" -ForegroundColor Yellow; continue }
-  if (-not $e.url) { Write-Host "[offen]  $k : keine URL im Manifest. $($e.urlCandidate)" -ForegroundColor Yellow; continue }
+  $u = SourceUrl $e
+  if (-not $u) {
+    if ($e.origin -eq 'barra') {
+      Write-Host "[offen]  $k : kommt aus dem barra-Release, aber in models.psd1 ist keine Release-Adresse eingetragen ('_release'.base)." -ForegroundColor Yellow
+    } else {
+      Write-Host "[offen]  $k : keine URL im Manifest. $($e.urlCandidate)" -ForegroundColor Yellow
+    }
+    continue
+  }
   $todo += $k
 }
 if (-not $todo.Count) { Write-Host ""; Write-Host "Nichts zu laden."; exit 0 }
 
 # Lizenzhinweis + Zustimmung, wie fetch-stock.ps1 es fuer Googles Bedingungen macht
-Write-Host ""
-Write-Host "Diese Modelle werden von ihren Originalquellen geladen. barra verteilt sie nicht selbst;"
-Write-Host "es gelten die Lizenzen der jeweiligen Anbieter:"
-foreach ($k in $todo) {
-  $e = $M[$k]
-  $lic = if ($e.license) { $e.license } else { "LIZENZ NICHT ANGEGEBEN" }
-  "  {0,-20} {1}" -f $k, $lic
-  if ($e.licenseUrl) { "  {0,-20} {1}" -f "", $e.licenseUrl }
+# Zustimmung braucht es nur fuer FREMDE Lizenzen. Was barra selbst gebaut hat, steht unter
+# Apache-2.0 wie der Rest des Projekts - dafuer den Nutzer zu fragen waere Theater.
+$foreign = @($todo | Where-Object { $M[$_].origin -eq 'upstream' })
+if ($foreign.Count) {
+  Write-Host ""
+  Write-Host "Diese Dateien werden von ihren Originalquellen geladen. barra verteilt sie nicht selbst;"
+  Write-Host "es gelten die Lizenzen der jeweiligen Anbieter:"
+  foreach ($k in $foreign) {
+    $e = $M[$k]
+    $lic = "LIZENZ NICHT ANGEGEBEN"
+    if ($e.license) { $lic = $e.license }
+    "  {0,-20} {1}" -f $k, $lic
+    if ($e.licenseUrl) { "  {0,-20} {1}" -f "", $e.licenseUrl }
+  }
+  Write-Host ""
+  if (-not $Yes) {
+    $a = Read-Host "Mit 'ja' bestaetigen und laden"
+    if ($a -ne 'ja' -and $a -ne 'yes') { Write-Host "Abgebrochen."; exit 1 }
+  }
 }
-Write-Host ""
-if (-not $Yes) {
-  $a = Read-Host "Mit 'ja' bestaetigen und laden"
-  if ($a -ne 'ja' -and $a -ne 'yes') { Write-Host "Abgebrochen."; exit 1 }
-}
+$own = @($todo | Where-Object { $M[$_].origin -eq 'barra' })
+if ($own.Count) { Write-Host "$($own.Count) Datei(en) aus dem barra-Release (Apache-2.0)." }
 
 $fail = 0
 foreach ($k in $todo) {
   $e = $M[$k]; $t = Target $e
-  Write-Host "[lade]   $k <- $($e.url)"
-  Download $e.url $t
+  $u = SourceUrl $e
+  Write-Host "[lade]   $k <- $u"
+  Download $u $t
   $got = ShaOf $t
   if ($got -ne $e.sha256.ToLower()) {
     Remove-Item $t -Force

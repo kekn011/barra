@@ -494,11 +494,46 @@ $script:KitCatalog = @(
   @{ id='dev'; name={T 'setup.pkg.dev_name'}; models=@(
       @{ id='workbench'; name={T 'setup.model.dev_wb'}; desc={T 'setup.model.dev_wb_desc'}; files=@('dev-kit\barra-dev-kit.tar.gz') } ) }
 )
+# --- Beschaffbarkeit statt blosser Anwesenheit -------------------------------------
+# Frueher galt ein Modell nur als da, wenn ALLE Dateien schon lokal lagen. Bei einem frischen
+# Download traf das nie zu -> alle Kit-Karten unsichtbar, und der Nutzer erfuhr nie, dass es
+# ueberhaupt Pakete gibt. Massgeblich ist jetzt, ob wir die Datei BESCHAFFEN koennen:
+# lokal vorhanden, oder in models.psd1 mit Quelle hinterlegt.
+$script:MfFiles = $null
+$script:MfRelBase = ''
+function Get-Mf {
+  if ($null -ne $script:MfFiles) { return $script:MfFiles }
+  $byFile = @{}
+  $mp = Join-Path $Kit 'models.psd1'
+  if (Test-Path $mp) {
+    try {
+      $m = Import-PowerShellDataFile -Path $mp
+      $rel = $m['_release']
+      if ($rel -and $rel.base) { $script:MfRelBase = $rel.base }
+      $dir = @{ llm='llm-kit'; stt='whisper-kit'; pya='pyannote-kit'; tts='tts-kit'; wake='wake-kit'; img='img-kit'; dev='dev-kit'; payload='payload' }
+      foreach ($e in $m.Values) {
+        if ($e -is [hashtable] -and $e.kit -and $e.file -and $dir[$e.kit]) {
+          $byFile[(Join-Path $dir[$e.kit] $e.file)] = $e
+        }
+      }
+    } catch { }
+  }
+  $script:MfFiles = $byFile
+  return $byFile
+}
+function Test-Obtainable($rel){
+  if (Test-Path (Join-Path $Kit $rel)) { return $true }
+  $mf = Get-Mf
+  $e = $mf[$rel]
+  if (-not $e) { return $false }
+  if ($e.origin -eq 'barra') { return [bool]$script:MfRelBase }
+  return [bool]$e.url
+}
 function Get-KitModels($kitId){
   $k = $script:KitCatalog | Where-Object { $_.id -eq $kitId }
   if (-not $k) { return ,@() }
   # ,@(...): PowerShell entrollt Ein-Element-Arrays beim Return — das Komma erhaelt das Array
-  ,@($k.models | Where-Object { $m=$_; -not @($m.files | Where-Object { -not (Test-Path (Join-Path $Kit $_)) }).Count })
+  ,@($k.models | Where-Object { $m=$_; -not @($m.files | Where-Object { -not (Test-Obtainable $_) }).Count })
 }
 function Update-CoexWarn {
   $llm = $ui.ChkLlm.IsEnabled -and $ui.ChkLlm.IsChecked

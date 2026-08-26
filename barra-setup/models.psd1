@@ -24,6 +24,27 @@
 #   SHA-256. Stimmt er, ist die Quelle bewiesen; stimmt er nicht, war es die falsche Datei.
 
 @{
+  # ============================== Auslieferung ==============================
+  # Woher die Dateien kommen, die zu gross fuers Repo sind. base LEER = es gibt noch
+  # keine Quelle; fetch-payload.ps1 sagt dann, was zu tun ist, statt stumm zu scheitern.
+  # Eintragen, sobald das Release steht: 'https://github.com/kekn011/barra/releases/download/<tag>'
+  '_release' = @{ base=''; tag='' }
+
+  # --- Payload: das, was der Flash zwingend braucht ---
+  'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=453599999
+    sha256='5bfcff304cd147a396449df0e8af53f35fe936df061ee1a948a7110ed1e2321b'
+    license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
+  'payload-boot' = @{ kit='payload'; file='boot-lz4.img'; origin='barra'; bytes=53477376
+    sha256='01938bbe72dc1f282b671673a0d01dd9f10a00f6674c6bef7b8c245e9da42949'
+    license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
+  'magisk' = @{
+    kit='payload'; file='Magisk-30.7.apk'; origin='upstream'; bytes=11613864
+    sha256='e0d32d2123532860f97123d927b1bb86c4e08e6fd8a48bfc6b5bee0afae9ebd5'
+    url='https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk'
+    urlSource='26.8. per -Verify bewiesen: geladene Datei SHA-gleich zur lokalen'
+    license='GPL-3.0'; licenseUrl='https://github.com/topjohnwu/Magisk'; gated=$false
+    note='wird beim Ablegen zu Magisk-30.7.apk umbenannt (patch-initboot.ps1 sucht Magisk-*.apk)' }
+
   # ============================== LLM ==============================
   'qwen3-4b' = @{
     kit='llm'; file='qwen3-4b.gguf'; origin='upstream'; bytes=2497281120
