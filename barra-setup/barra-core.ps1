@@ -710,7 +710,10 @@ function Get-KitFileIds {
 function Ensure-KitFile($src){
   if (Test-Path $src) { return $true }
   $rel = $src
-  if ($src.StartsWith($script:Kit)) { $rel = $src.Substring($script:Kit.Length).TrimStart('') }
+  # Fuehrende Trenner weg: die Tabelle kennt 'llm-kit\datei', nicht '\llm-kit\datei'.
+  # Regex statt TrimStart - beim Erzeugen dieser Datei ist ein Backslash-Literal schon einmal
+  # verlorengegangen, und die Kit-Installation brach dann beim ersten Paket ab.
+  if ($src.StartsWith($script:Kit)) { $rel = $src.Substring($script:Kit.Length) -replace '^[\\/]+','' }
   $id = (Get-KitFileIds)[$rel]
   if (-not $id) { Log "Ensure-KitFile: keine Manifest-ID fuer $rel"; return $false }
   $fetch = Join-Path $script:Kit 'fetch-models.ps1'
