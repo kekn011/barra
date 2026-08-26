@@ -31,6 +31,10 @@
   '_release' = @{ base='https://github.com/kekn011/barra/releases/download/v0.1.0-test'; tag='v0.1.0-test' }
 
   # --- Payload: das, was der Flash zwingend braucht ---
+  # Die Pruefsummenliste selbst: sie kommt aus dem Release wie die Dateien, die sie beschreibt.
+  # Bewusst OHNE eigenen sha256 - sie ist die Referenz, nicht der Prueffall.
+  'payload-sums' = @{ kit='payload'; file='SHA256SUMS'; origin='barra'; bytes=332
+    license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429633604
     sha256='086096406cec96d4baa877826883cc728a191b07140ba65c2d8e2af4e966dc42'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
@@ -90,20 +94,28 @@
     license='Apache-2.0'; licenseUrl='https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF'; gated=$false
   }
   'gemma-e2b' = @{
-    kit='llm'; file='gemma-4-e2b-q4_0.gguf'; origin='upstream'; bytes=3349516256
+    kit='llm'; file='gemma-4-e2b-q4_0.gguf'; origin='barra'; bytes=3349516256
     sha256='fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634'
-    url=''; urlCandidate='Google Gemma, offizielle QAT-Quantisierung'
-    license='Apache-2.0'; licenseUrl='https://ai.google.dev/gemma/apache_2'; gated=$false
+    # Gemma 4 steht unter Apache-2.0 (ai.google.dev/gemma/apache_2), wir duerfen die Datei also
+    # selbst weitergeben. Ohne eine Bezugsquelle wuerde der Wizard das Modell gar nicht anbieten.
+    # >2 GB -> geteilt im Release (split -b 1600M -d -a 1 <datei> <datei>.part).
+    parts=@(
+      @{ file='gemma-4-e2b-q4_0.gguf.part0'; bytes=1677721600; sha256='b22610c7e559ace590f93ff98e419a646bc80241ffcc62ab868003708cd16d3e' }
+      @{ file='gemma-4-e2b-q4_0.gguf.part1'; bytes=1671794656; sha256='a0f97bff296bfb6663653819dd348b99ea010661721cb698574d9698f8b81557' }
+    )
   }
     # LIZENZ GEPRUEFT 26.8. (ai.google.dev/gemma/terms): Gemma 1/2/3/3n stehen unter den
     # 'Gemma Terms of Use', GEMMA 4 dagegen unter Apache-2.0 ('For Gemma 4 terms, see the
     # Gemma 4 license'). Die Angabe in der GUI ist also RICHTIG — mein Auditbefund B3 war falsch.
     # gated war ebenfalls nur meine Annahme und ist zurueckgenommen; noch nicht am Upstream geprueft.
   'gemma-e4b' = @{
-    kit='llm'; file='gemma-4-e4b-q3_k_s.gguf'; origin='upstream'; bytes=3862379648
+    kit='llm'; file='gemma-4-e4b-q3_k_s.gguf'; origin='barra'; bytes=3862379648
     sha256='fe6e02cdcd5f3287b4ac146ea68ea2c73363bf935159aa254a9d280a4ffe31aa'
-    url=''; urlCandidate='Google Gemma E4B, q3_k_s'
-    license='Apache-2.0'; licenseUrl='https://ai.google.dev/gemma/apache_2'; gated=$false
+    parts=@(
+      @{ file='gemma-4-e4b-q3_k_s.gguf.part0'; bytes=1677721600; sha256='fb12fd5e2cffa948bce2ce1a9bc1a8586fbd547206f44dc039a584e438178c8c' }
+      @{ file='gemma-4-e4b-q3_k_s.gguf.part1'; bytes=1677721600; sha256='c6d15a6f7be6051931491fd5295ca48a54004d043682c03527fbebc0a2519a52' }
+      @{ file='gemma-4-e4b-q3_k_s.gguf.part2'; bytes=506936448;  sha256='833eeb198cd7a8208cbefc8d98ae1ff83995c0283fc68e0843a78f4247711808' }
+    )
   }
     # LIZENZ GEPRUEFT 26.8. (ai.google.dev/gemma/terms): Gemma 1/2/3/3n stehen unter den
     # 'Gemma Terms of Use', GEMMA 4 dagegen unter Apache-2.0 ('For Gemma 4 terms, see the

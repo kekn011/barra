@@ -74,4 +74,10 @@
     derivedFrom='Qwen3-4B (unveraendert weitergegeben)'; license='Apache-2.0'
     licenseUrl='https://huggingface.co/Qwen/Qwen3-4B'
     obligations='Apache-2.0: Lizenz und Namensnennung weitergeben. Wir liefern die Datei selbst aus, weil der Upstream seit August eine andere Fassung unter derselben Adresse fuehrt und unsere Packages auf diese kalibriert sind.' }
+  'gemma-e2b' = @{
+    derivedFrom='Google Gemma 4 E2B (unveraendert weitergegeben)'; license='Apache-2.0'
+    licenseUrl='https://ai.google.dev/gemma/apache_2' }
+  'gemma-e4b' = @{
+    derivedFrom='Google Gemma 4 E4B (unveraendert weitergegeben)'; license='Apache-2.0'
+    licenseUrl='https://ai.google.dev/gemma/apache_2' }
 }

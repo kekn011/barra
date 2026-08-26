@@ -446,6 +446,7 @@ function Step2_Stock(){
 # (barra-base.tar.gz ist 433 MB); models.psd1 sagt, woher sie kommen. Ohne eingetragene
 # Release-Adresse kann das nichts holen - dann sagt es das, statt stumm zu scheitern.
 function Ensure-PayloadFile($id, $name){
+  New-Item -ItemType Directory -Force -Path $script:Payload | Out-Null
   $f = Join-Path $script:Payload $name
   if (Test-Path $f) { return $true }
   $fetch = Join-Path $script:Kit 'fetch-models.ps1'
@@ -458,6 +459,9 @@ function Ensure-PayloadFile($id, $name){
 # F5: Payload-Artefakt gegen payload/SHA256SUMS pruefen, BEVOR es geflasht/installiert wird.
 # -NonFatal: nur warnen (fuer init_boot-magisk.img, das Ensure-InitBoot lokal neu patchen kann).
 function Verify-PayloadFile($name, [switch]$NonFatal){
+  # Die Pruefsummenliste kommt selbst aus dem Release - bei einem frischen Download ist sie
+  # noch nicht da, und ohne sie liesse sich nichts verifizieren.
+  [void](Ensure-PayloadFile 'payload-sums' 'SHA256SUMS')
   $sums = Join-Path $script:Payload 'SHA256SUMS'
   $file = Join-Path $script:Payload $name
   $bail = { param($m) if ($NonFatal) { Warn $m } else { Fail $m } }

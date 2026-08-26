@@ -22,7 +22,10 @@ $ErrorActionPreference = 'Stop'
 $Kit = Split-Path -Parent $MyInvocation.MyCommand.Path
 $adb = Join-Path $Kit 'tools\adb.exe'
 $src = Join-Path $Stock 'image\init_boot.img'
-$apk = Get-ChildItem (Join-Path $Payload 'Magisk-*.apk') | Select-Object -First 1
+# Bei einem frischen Download gibt es payload/ noch gar nicht - Get-ChildItem wuerde mit
+# ErrorActionPreference='Stop' abbrechen, BEVOR das Nachladen unten greift.
+New-Item -ItemType Directory -Force -Path $Payload | Out-Null
+$apk = Get-ChildItem (Join-Path $Payload 'Magisk-*.apk') -ErrorAction SilentlyContinue | Select-Object -First 1
 $out = Join-Path $Payload 'init_boot-magisk.img'
 
 if (-not (Test-Path $src)) { throw "stock init_boot.img missing ($src) — run fetch-stock.ps1 first" }
