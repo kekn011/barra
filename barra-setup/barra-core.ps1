@@ -812,7 +812,14 @@ function Run-KitsInner(){
         if (-not $mf) { throw (T 'core.kit.fail' "$name (model id $mdl)") }
         # TPU-Encoder-Packages, wo ein Satz existiert (turbo, base); andere Modelle laufen auf der CPU
         $ptar = @{ 'turbo'='whisper-kit-turbo.tar'; 'base'='whisper-kit-base.tar'; 'tiny'='whisper-kit-tiny.tar'; 'small'='whisper-kit-small.tar'; 'medium'='whisper-kit-medium.tar' }[$mdl]
-        if ($ptar -and -not (Test-Path (Join-Path $script:Kit "whisper-kit\$ptar"))) { $ptar = $null }
+        # Fehlt der Package-Satz lokal, wird er GELADEN. Frueher wurde er hier still auf $null
+        # gesetzt: das Kit meldete "installiert", waehrend Whisper ohne TPU-Encoder lief
+        # (4,7x statt 0,93x Echtzeit). Am 27.8. genau so passiert, ohne eine einzige Zeile Hinweis.
+        if ($ptar) {
+          if (-not (Ensure-KitFile (Join-Path $script:Kit "whisper-kit\$ptar"))) {
+            $ptar = $null; Warn (T 'core.kit.no_tpu' $name)
+          }
+        }
         if ($ptar) {
           Pkg (T 'core.kit.push' $name)
           KitPush (Join-Path $script:Kit "whisper-kit\$ptar") '/data/local/tmp/whisper-kit.tar' $name
@@ -827,6 +834,7 @@ function Run-KitsInner(){
         # sttserver.sh aus dem Kit-Ordner (= src/whisper-mali) nachziehen, falls vorhanden: das Base-Image
         # traegt eine eigene Kopie, die zwischen zwei Bakes veralten kann (v13: pins_off-No-op). Wie beim TTS-Kit.
         $ssv = Join-Path $script:Kit 'whisper-kit\sttserver.sh'
+        if (-not (Ensure-KitFile $ssv)) { Warn (T 'core.kit.no_server' $name) }
         if (Test-Path $ssv) {
           KitPush $ssv '/data/local/tmp/sttserver.sh' $name
           $o = AdbSuM ('cp /data/local/tmp/sttserver.sh /data/adb/baseos/bin/sttserver.sh && chmod 755 /data/adb/baseos/bin/sttserver.sh && rm -f /data/local/tmp/sttserver.sh && echo SSV_OK') 60
