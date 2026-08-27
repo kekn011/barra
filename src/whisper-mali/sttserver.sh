@@ -33,7 +33,12 @@ start_tpuds(){
   # $P = Package-Ordner des Modells; Bestand wird gescannt (Layerzahl je Modell verschieden),
   # die REIHENFOLGE (Layer-Tripel, Cross, conv1, conv2) ist das model_id-Mapping von whisper-barra.
   mkdir -p $DM $DC
-  pkill -x tpud_pipe4 2>/dev/null; sleep 0.6; rm -f $DM/tpu.sock $DC/tpu.sock
+  # Nur die EIGENEN beiden tpuds treffen. Ein Kill nach Prozessnamen erschlaegt auch den der
+  # Diarisierung (pyaserver haelt einen eigenen), deren Socket dann als Leiche liegen bleibt
+  # -> "Connection refused" beim naechsten barra-diarize. Am 27.8. genau so aufgelaufen,
+  # als Whisper nach pyaserver gestartet wurde. pyaserver macht es seit jeher ueber den Socket.
+  pkill -f "tpud_pipe4 $DM/tpu.sock" 2>/dev/null; pkill -f "tpud_pipe4 $DC/tpu.sock" 2>/dev/null
+  sleep 0.6; rm -f $DM/tpu.sock $DC/tpu.sock
   MODELS=""
   L=0; while [ -f $P/l${L}_proj.package ]; do MODELS="$MODELS $P/l${L}_proj.package $P/l${L}_woc.package $P/l${L}_ffnresc.package"; L=$((L+1)); done
   X=0; while [ -f $P/l${X}_cross.package ]; do MODELS="$MODELS $P/l${X}_cross.package"; X=$((X+1)); done
@@ -52,12 +57,12 @@ start_tpuds(){
 case "${1:-status}" in
   stop)
     pkill -f "$BIN/whisper-server" 2>/dev/null
-    pkill -x tpud_pipe4 2>/dev/null
+    pkill -f "tpud_pipe4 $DM/tpu.sock" 2>/dev/null; pkill -f "tpud_pipe4 $DC/tpu.sock" 2>/dev/null
     pins_off
     t stt.stopped;;
   status)
     PW=$(pgrep -f "$BIN/whisper-server"|head -1)
-    PT=$(pgrep -x tpud_pipe4|head -1)
+    PT=$(pgrep -f "tpud_pipe4 $DM/tpu.sock"|head -1)
     [ -n "$PW" ] && t stt.running "$PW" || t stt.off
     [ -n "$PT" ] && t stt.tpud_on || t stt.tpud_off
     grep -a "wsp-barra. init ok" $R/sttserver.log 2>/dev/null | tail -1;;
