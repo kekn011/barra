@@ -114,8 +114,33 @@ if ($Supply) {
 function Download($url, $dest) {
   New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
   # BITS zeigt Fortschritt und nimmt abgebrochene Downloads wieder auf; sonst Invoke-WebRequest.
-  try   { Start-BitsTransfer -Source $url -Destination $dest -DisplayName "barra: $(Split-Path $dest -Leaf)" }
-  catch { Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing }
+  # Beide koennen an einem Netz-Schluckauf scheitern - und dann bricht der GANZE Kit-Lauf ab
+  # (27.8.: HF-Verbindung mitten im Lauf abgerissen, 'Kabel pruefen' war die irrefuehrende
+  # Folgemeldung). Deshalb bis zu 3 Anlaeufe. Die Teildatei kommt vor jedem neuen Anlauf weg,
+  # sonst haelt der naechste Versuch einen halben Download fuer fertig.
+  $letzter = $null
+  for ($v = 1; $v -le 3; $v++) {
+    try   { Start-BitsTransfer -Source $url -Destination $dest -DisplayName "barra: $(Split-Path $dest -Leaf)"; return }
+    catch { $letzter = $_ }
+    try   { Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing; return }
+    catch { $letzter = $_ }
+    if (Test-Path $dest) { Remove-Item $dest -Force -ErrorAction SilentlyContinue }
+    # 4xx heisst: die Quelle hat die Datei nicht (falsche URL, Login noetig). Das wird beim
+    # dritten Versuch nicht anders - nur 408/429 sind Zeitprobleme und lohnen einen zweiten Blick.
+    $code = $null
+    if (($letzter.Exception -is [Net.WebException]) -and $letzter.Exception.Response) {
+      $code = [int]$letzter.Exception.Response.StatusCode
+    }
+    if ($code -and $code -ge 400 -and $code -lt 500 -and $code -ne 408 -and $code -ne 429) {
+      throw ("Download abgebrochen, die Quelle liefert HTTP $code (kein neuer Versuch): $url")
+    }
+    if ($v -lt 3) {
+      Write-Host ("[warn]  Versuch $v von 3 fehlgeschlagen: " + $letzter.Exception.Message) -ForegroundColor Yellow
+      Write-Host ("        neuer Versuch in " + (5 * $v) + " s ...")
+      Start-Sleep -Seconds (5 * $v)
+    }
+  }
+  throw ("Download fehlgeschlagen nach 3 Versuchen: $url - " + $letzter.Exception.Message)
 }
 
 # ---------------------------------------------------------------- Verify (Quelle beweisen)
