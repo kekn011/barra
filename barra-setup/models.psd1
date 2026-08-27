@@ -47,8 +47,8 @@
     sha256='1e319014adb83d62511bcc7c6e8b8fc8274705d97fadf6304466433d7948331b' }
   'tts-server' = @{ kit='tts'; file='ttsserver.sh'; origin='barra'; bytes=2360
     sha256='a306a2446503cdb4b06c0e6a4b8ec71ade95399bffd1661e410c9f01af827849' }
-  'stt-server' = @{ kit='stt'; file='sttserver.sh'; origin='barra'; bytes=5377
-    sha256='25b6b0c5a448d472d21687bc810475fdd65a9b84f19632dbaecb5210fe6ed1d7' }
+  'stt-server' = @{ kit='stt'; file='sttserver.sh'; origin='barra'; bytes=5535
+    sha256='261a85987f9680f55ddc97721c08eceb4b4f96f4ad4de6b4e16d5a151d5c511d' }
   'dev-kit' = @{ kit='dev'; file='barra-dev-kit.tar.gz'; origin='barra'; bytes=24877591
     sha256='a7fb69c4e9ec4088c41ae5d9bd90ea74edfcaadc32d74811831778a1d7a2349f' }
 
