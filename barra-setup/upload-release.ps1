@@ -79,6 +79,11 @@ $Kopien = @(
   @{ a='wake-kit\wake-kit.tar.gz';      m='./base/wakeserver.sh';                     q='src\wake\wakeserver.sh' }
   @{ a='payload\barra-base.tar.gz';     m='adb/baseos/bin/sttserver.sh';              q='src\whisper-mali\sttserver.sh' }
   @{ a='payload\barra-base.tar.gz';     m='adb/baseos/bin/llmserver.sh';              q='src\boot\llmserver.sh' }
+  @{ a='payload\barra-base.tar.gz';     m='adb/baseos/bin/wifi-join.sh';              q='src\boot\wifi-join.sh' }
+  # baseos-cfgd.sh liegt im Image ZWEIMAL - und NUR die hwbridge-Kopie wird gestartet.
+  # Beide pruefen, sonst laeuft wieder die alte (26.8. genau so passiert).
+  @{ a='payload\barra-base.tar.gz';     m='adb/hwbridge/baseos-cfgd.sh';              q='src\boot\baseos-cfgd.sh' }
+  @{ a='payload\barra-base.tar.gz';     m='adb/baseos/bin/baseos-cfgd.sh';            q='src\boot\baseos-cfgd.sh' }
   @{ a='payload\barra-base.tar.gz';     m='adb/baseos/i18n/de.properties';            q='src\i18n\de.properties' }
   @{ a='payload\barra-base.tar.gz';     m='adb/baseos/i18n/en.properties';            q='src\i18n\en.properties' }
   @{ a='payload\barra-base.tar.gz';     m='ubuntu/usr/share/barra/i18n/de.properties'; q='src\i18n\de.properties' }

@@ -57,8 +57,8 @@
   # Bewusst OHNE eigenen sha256 - sie ist die Referenz, nicht der Prueffall.
   'payload-sums' = @{ kit='payload'; file='SHA256SUMS'; origin='barra'; bytes=245
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
-  'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429632601
-    sha256='4947fe4f10375a02e62d2929b6bb5267fe39617d87585743192b579c52ce1aa6'
+  'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429630384
+    sha256='834e8901ec2b84435ad0fe01d10ff93782e1466762856a285fc64458b03d22f4'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   'payload-boot' = @{ kit='payload'; file='boot-lz4.img'; origin='barra'; bytes=53477376
     sha256='01938bbe72dc1f282b671673a0d01dd9f10a00f6674c6bef7b8c245e9da42949'
