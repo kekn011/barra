@@ -705,22 +705,69 @@ function Get-KitFileIds {
   $script:KitFileIds = $map
   return $map
 }
+# Datei -> Manifest-Eintrag, damit eine Kit-Datei vor dem Push gegen ihren Pin geprueft
+# werden kann (Get-KitFileIds liefert nur die ID, hier braucht es Groesse und SHA).
+$script:KitFileMeta = $null
+function Get-KitFileMeta {
+  if ($null -ne $script:KitFileMeta) { return $script:KitFileMeta }
+  $map = @{}
+  $mp = Join-Path $script:Kit 'models.psd1'
+  if (Test-Path $mp) {
+    try {
+      $m = Import-PowerShellDataFile -Path $mp
+      $dir = @{ llm='llm-kit'; stt='whisper-kit'; pya='pyannote-kit'; tts='tts-kit'; wake='wake-kit'; img='img-kit'; dev='dev-kit'; payload='payload' }
+      foreach ($k in $m.Keys) {
+        $e = $m[$k]
+        if ($e -is [hashtable] -and $e.kit -and $e.file -and $dir[$e.kit]) {
+          $map[(Join-Path $dir[$e.kit] $e.file)] = $e
+        }
+      }
+    } catch { Log "models.psd1 nicht lesbar: $($_.Exception.Message)" }
+  }
+  $script:KitFileMeta = $map
+  return $map
+}
+
+# 28.8.: Eine Kit-Datei gegen models.psd1 pruefen. OHNE diese Pruefung ist eine abgerissene
+# Datei bis aufs Telefon durchgekommen (qwen38-4b-distill: 521.068.100 statt 2.783.446.304 B;
+# HuggingFace schliesst bei genau dieser Datei reproduzierbar die Verbindung) und fiel erst
+# Stunden spaeter als toter llama-server auf. Ohne Pin gibt es nichts zu pruefen - das
+# betrifft nur SHA256SUMS selbst, die IST die Referenzliste.
+function Test-KitFileSha($file, $rel) {
+  $e = (Get-KitFileMeta)[$rel]
+  if (-not $e -or -not $e.sha256) { return $true }
+  $len = (Get-Item $file).Length
+  if ($e.bytes -and $len -ne $e.bytes) { Log "Kit-Datei $rel : $len B statt $($e.bytes) B laut Manifest"; return $false }
+  $got = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+  if ($got -ne $e.sha256.ToLower()) { Log "Kit-Datei $rel : SHA $got statt $($e.sha256)"; return $false }
+  return $true
+}
+
 # Fehlende Kit-Datei beschaffen. Der Wizard bietet ein Paket an, sobald es BESCHAFFBAR ist -
 # hier wird daraus eine Datei auf der Platte, sonst liefe die Auswahl in einen Fehler.
 function Ensure-KitFile($src){
-  if (Test-Path $src) { return $true }
   $rel = $src
   # Fuehrende Trenner weg: die Tabelle kennt 'llm-kit\datei', nicht '\llm-kit\datei'.
   # Regex statt TrimStart - beim Erzeugen dieser Datei ist ein Backslash-Literal schon einmal
   # verlorengegangen, und die Kit-Installation brach dann beim ersten Paket ab.
   if ($src.StartsWith($script:Kit)) { $rel = $src.Substring($script:Kit.Length) -replace '^[\\/]+','' }
+  # Eine vorhandene Datei zaehlt nur, wenn sie zum Manifest passt: eine halbe Datei ist keine.
+  if (Test-Path $src) {
+    if (Test-KitFileSha $src $rel) { return $true }
+    Info "$(Split-Path $rel -Leaf) passt nicht zum Manifest - wird neu geladen ..."
+    Remove-Item $src -Force -ErrorAction SilentlyContinue
+  }
   $id = (Get-KitFileIds)[$rel]
   if (-not $id) { Log "Ensure-KitFile: keine Manifest-ID fuer $rel"; return $false }
   $fetch = Join-Path $script:Kit 'fetch-models.ps1'
   if (-not (Test-Path $fetch)) { return $false }
   Info "$(Split-Path $rel -Leaf) fehlt - wird geladen ..."
-  [void](Run 'powershell.exe' "-NoProfile -ExecutionPolicy Bypass -File `"$fetch`" -Id $id -Yes" $null 3600 'out')
-  Test-Path $src
+  # Rueckgabewert auswerten: fetch-models loescht bei SHA-Mismatch und meldet rc<>0.
+  # Wer den wegwirft, schiebt hinterher irgendeine Datei aufs Telefon.
+  $r = Run 'powershell.exe' "-NoProfile -ExecutionPolicy Bypass -File `"$fetch`" -Id $id -Yes" $null 3600 'out'
+  if ($r.code -ne 0) { Log "Ensure-KitFile: fetch-models rc=$($r.code) fuer $id"; return $false }
+  if (-not (Test-Path $src)) { return $false }
+  Test-KitFileSha $src $rel
 }
 
 function KitPush($src,$dst,$label){
