@@ -200,7 +200,7 @@
   # ACHTUNG: pyannote-kit.tar enthaelt derzeit das ResNet34-en-Modell UND die
   # pyannote-Segmentierung 3.0 UND das sherpa-onnx-Binary mit. Fuer den Download-Weg
   # muss es aufgetrennt werden (Befund: Fremdmodelle in unserem Kit-Tar).
-  'pya-kit'      = @{ kit='pya'; file='pyannote-kit.tar';    origin='barra'; bytes=73799680; sha256='72f085167eac3a85f36f5eb61332ef54ecb1eab58797878f5a16e806b1ec79f5'; note='buendelt ResNet34-en (wespeaker) + pyannote-Segmentierung 3.0 + das sherpa-onnx-Binary — diese drei brauchen eigene Manifest-Eintraege' }
+  'pya-kit'      = @{ kit='pya'; file='pyannote-kit.tar';    origin='barra'; bytes=73799680; sha256='790790c54409c694354505066185af35c2802815463b5147a71e37e361f10ac4'; note='buendelt ResNet34-en (wespeaker) + pyannote-Segmentierung 3.0 + das sherpa-onnx-Binary — diese drei brauchen eigene Manifest-Eintraege' }
   'eres-body'    = @{ kit='pya'; file='eres_body.package';   origin='barra'; bytes=6335168;  sha256='4ecf086f38bebe41c229b95a0e745bb7c1675b2a5441d7087ac53a8cd1b2a939' }
   'eres-tail'    = @{ kit='pya'; file='eres_tail.onnx';      origin='barra'; bytes=6892052;  sha256='b93082ec06906b96822e918eedff6db427a5919bde9b76f10814da826eb4a22d' }
   'eres-head'    = @{ kit='pya'; file='head_eres.bin';       origin='barra'; bytes=20975644; sha256='4fefde3591409b53020cd5b128daa24fed13ee82230979d7a4b110a7747fb4c0' }
