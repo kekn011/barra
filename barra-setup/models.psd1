@@ -45,8 +45,8 @@
     sha256='481a599f3585a762625a60985e30ef0335b1a6265ab9efda9e40b5997f11ab31' }
   'tts-service' = @{ kit='tts'; file='barra-tts.service'; origin='barra'; bytes=305
     sha256='1e319014adb83d62511bcc7c6e8b8fc8274705d97fadf6304466433d7948331b' }
-  'tts-server' = @{ kit='tts'; file='ttsserver.sh'; origin='barra'; bytes=2360
-    sha256='a306a2446503cdb4b06c0e6a4b8ec71ade95399bffd1661e410c9f01af827849' }
+  'tts-server' = @{ kit='tts'; file='ttsserver.sh'; origin='barra'; bytes=2466
+    sha256='332b320c195caa05d2ed3a2a1e676b70d43fa380b9ba91b985c2f4eefe76379b' }
   'stt-server' = @{ kit='stt'; file='sttserver.sh'; origin='barra'; bytes=5535
     sha256='261a85987f9680f55ddc97721c08eceb4b4f96f4ad4de6b4e16d5a151d5c511d' }
   'dev-kit' = @{ kit='dev'; file='barra-dev-kit.tar.gz'; origin='barra'; bytes=24877591
@@ -57,8 +57,8 @@
   # Bewusst OHNE eigenen sha256 - sie ist die Referenz, nicht der Prueffall.
   'payload-sums' = @{ kit='payload'; file='SHA256SUMS'; origin='barra'; bytes=245
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
-  'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429599937
-    sha256='885066751e42b1891c700f409061f510ecf5d99de09b211bf77a2ee5c5319b58'
+  'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429632601
+    sha256='4947fe4f10375a02e62d2929b6bb5267fe39617d87585743192b579c52ce1aa6'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   'payload-boot' = @{ kit='payload'; file='boot-lz4.img'; origin='barra'; bytes=53477376
     sha256='01938bbe72dc1f282b671673a0d01dd9f10a00f6674c6bef7b8c245e9da42949'
@@ -200,7 +200,7 @@
   # ACHTUNG: pyannote-kit.tar enthaelt derzeit das ResNet34-en-Modell UND die
   # pyannote-Segmentierung 3.0 UND das sherpa-onnx-Binary mit. Fuer den Download-Weg
   # muss es aufgetrennt werden (Befund: Fremdmodelle in unserem Kit-Tar).
-  'pya-kit'      = @{ kit='pya'; file='pyannote-kit.tar';    origin='barra'; bytes=73799680; sha256='790790c54409c694354505066185af35c2802815463b5147a71e37e361f10ac4'; note='buendelt ResNet34-en (wespeaker) + pyannote-Segmentierung 3.0 + das sherpa-onnx-Binary — diese drei brauchen eigene Manifest-Eintraege' }
+  'pya-kit'      = @{ kit='pya'; file='pyannote-kit.tar';    origin='barra'; bytes=73799680; sha256='439b4fa5e1f544b5c29ff643bf5c85a3dc218254638f553df39592c719fe5e89'; note='buendelt ResNet34-en (wespeaker) + pyannote-Segmentierung 3.0 + das sherpa-onnx-Binary — diese drei brauchen eigene Manifest-Eintraege' }
   'eres-body'    = @{ kit='pya'; file='eres_body.package';   origin='barra'; bytes=6335168;  sha256='4ecf086f38bebe41c229b95a0e745bb7c1675b2a5441d7087ac53a8cd1b2a939' }
   'eres-tail'    = @{ kit='pya'; file='eres_tail.onnx';      origin='barra'; bytes=6892052;  sha256='b93082ec06906b96822e918eedff6db427a5919bde9b76f10814da826eb4a22d' }
   'eres-head'    = @{ kit='pya'; file='head_eres.bin';       origin='barra'; bytes=20975644; sha256='4fefde3591409b53020cd5b128daa24fed13ee82230979d7a4b110a7747fb4c0' }
@@ -231,12 +231,12 @@
     url='https://huggingface.co/madebyollin/taesd/resolve/614f76814bbe30edbe2e627ace1c2234c81a2c0e/diffusion_pytorch_model.safetensors'; urlSource='26.8. per -Verify bewiesen (SHA stimmt); Datei wird beim Ablegen zu taesd.safetensors umbenannt'
     license='MIT'; licenseUrl='https://huggingface.co/madebyollin/taesd'; gated=$false
   }
-  'img-kit' = @{ kit='img'; file='img-kit.tar.gz'; origin='barra'; bytes=66540472; sha256='252fe3ab40e1b49f015e248e728c193e9f1d160c0a73191081d6fb66e20f62e6' }
+  'img-kit' = @{ kit='img'; file='img-kit.tar.gz'; origin='barra'; bytes=65459868; sha256='4441279f532d2dbd5b6eea4931836d608dda9a4a6fc6d5141b71a362fb98525f' }
 
   # ============================== TTS / Weckwort ==============================
   # tts-kit.tar.gz enthaelt derzeit die geklonte Stimme "David" (kein Upstream, keine Lizenz)
   # sowie Piper Thorsten/Amy. Entscheidung 26.8.: GPU-Vokoder auf eine Piper-Stimme umziehen,
   # David faellt raus. Danach ist das Kit rein 'barra' + Piper-Downloads.
   'tts-kit'  = @{ kit='tts';  file='tts-kit.tar.gz';  origin='barra'; bytes=332932765; sha256='27495ca3aa318c1953ec805703b15beffae930238d3f68c10d3628f53b36ce60'; note='enthaelt die Piper-Stimmen Thorsten/Amy (MIT) — die gehoeren als Download ins Manifest; die geklonte Stimme David ist am 26.8. entfernt worden; gpudecd am 26.8. abend neu gebaut - die ausgelieferte Binaerdatei war aelter als die leaky-Korrektur und liess die Aktivierung vor conv_post weg (cos 0,971 statt 1,000)' }
-  'wake-kit' = @{ kit='wake'; file='wake-kit.tar.gz'; origin='barra'; bytes=16969662;  sha256='566174871dc58d78ca88aa3a86b4fdf58132d9c30bdadc3f3a8f4865fee25cc2'; note='buendelt das sherpa-onnx-Keyword-Spotter-Modell (int8, 5 MB) — Herkunft und Lizenz noch offen' }
+  'wake-kit' = @{ kit='wake'; file='wake-kit.tar.gz'; origin='barra'; bytes=16921642;  sha256='9c9fe572bfda709574108d245be34625dbd17e3dc4c1b2745bc85df7a1a4e4ff'; note='buendelt das sherpa-onnx-Keyword-Spotter-Modell (int8, 5 MB) — Herkunft und Lizenz noch offen' }
 }

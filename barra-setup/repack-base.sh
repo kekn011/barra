@@ -12,19 +12,39 @@
 # Der Fehler war nur deshalb moeglich, weil der Vorgang nirgends aufgeschrieben war. Also:
 # aufschreiben, als root ausfuehren, und danach pruefen statt hoffen.
 #
-#   sudo bash repack-base.sh <alt.tar.gz> <neu.tar.gz> [<datei-zum-entfernen> ...]
+#   sudo bash repack-base.sh [-a <lokal>=<pfad-im-archiv>]... <alt.tar.gz> <neu.tar.gz> \
+#                            [<datei-zum-entfernen> ...]
+#
+# -a ersetzt eine Datei im Archiv (oder legt sie an) - z.B. den i18n-Katalog:
+#   -a ../src/i18n/de.properties=adb/baseos/i18n/de.properties
+# Ersetzte Dateien werden root:root mit dem Modus der bereits vorhandenen Datei eingetragen
+# (neue Dateien: 644) und am Ende im ERGEBNIS gegen Groesse, Eigentuemer und Modus geprueft.
 #
 # Muss in WSL oder einem Linux laufen (auf NTFS gibt es keine Eigentuemer und keine
 # setuid-Bits) und MUSS als root laufen, sonst bricht es sofort ab.
 set -euo pipefail
 
+ERSETZE=()
+while [ "${1:-}" = "-a" ]; do
+  [ -n "${2:-}" ] || { echo "FEHLER: -a braucht <lokal>=<pfad-im-archiv>"; exit 1; }
+  case "$2" in *=*) ;; *) echo "FEHLER: -a erwartet <lokal>=<pfad-im-archiv>, bekam '$2'"; exit 1;; esac
+  ERSETZE+=("$2"); shift 2
+done
+
 ALT=${1:-}; NEU=${2:-}; shift 2 || true
-[ -n "$ALT" ] && [ -n "$NEU" ] || { sed -n '2,20p' "$0"; exit 1; }
+[ -n "$ALT" ] && [ -n "$NEU" ] || { sed -n '2,25p' "$0"; exit 1; }
 # Die Rechtefrage zuerst: sie ist die Ursache des Fehlers, den dieses Skript verhindern soll.
 # Stuende die Dateipruefung davor, verdeckte eine fehlende Datei den eigentlichen Grund.
 [ "$(id -u)" = "0" ] || { echo "FEHLER: als root ausfuehren - sonst gehen Eigentuemer und setuid-Bits verloren (siehe Kopf dieser Datei)."; exit 1; }
 [ -f "$ALT" ] || { echo "FEHLER: $ALT nicht gefunden"; exit 1; }
 case "$(uname -r)" in *icrosoft*|*WSL*) ;; *) [ -d /proc ] || { echo "FEHLER: Linux noetig"; exit 1; };; esac
+
+# Die Quellen der -a-Dateien muessen VOR dem Auspacken da sein: 20 Minuten Arbeit an einem
+# fehlenden Pfad scheitern zu lassen waere die teuerste Art, einen Tippfehler zu finden.
+for e in ${ERSETZE+"${ERSETZE[@]}"}; do
+  q=${e%%=*}
+  [ -f "$q" ] || { echo "FEHLER: -a Quelle nicht gefunden: $q"; exit 1; }
+done
 
 # Diese Programme muessen in einem Ubuntu 24.04 setuid-root sein. Die Liste stammt aus
 # einem echten Ubuntu 24.04 (find /usr/bin /usr/sbin -perm -4000), nicht aus dem Gedaechtnis.
@@ -33,6 +53,13 @@ usr/bin/chfn usr/bin/chsh usr/bin/gpasswd usr/bin/newgrp usr/bin/fusermount3"
 
 W=$(mktemp -d /tmp/repack-base.XXXX)
 trap 'rm -rf "$W"' EXIT
+# Gearbeitet wird in $W - jeder relativ uebergebene Pfad zeigt danach ins Leere. Also alle
+# Pfade jetzt aufloesen, solange der Aufrufort noch gilt.
+ALT=$(readlink -f "$ALT"); NEU=$(readlink -f "$NEU")
+for i in ${ERSETZE+"${!ERSETZE[@]}"}; do
+  q=${ERSETZE[$i]%%=*}; z=${ERSETZE[$i]#*=}
+  ERSETZE[$i]="$(readlink -f "$q")=$z"
+done
 cd "$W"
 
 echo "== auspacken (Eigentuemer und Modi bleiben erhalten) =="
@@ -46,6 +73,23 @@ for weg in "$@"; do
   else
     echo "== nicht vorhanden, uebersprungen: $weg"
   fi
+done
+
+for e in ${ERSETZE+"${ERSETZE[@]}"}; do
+  q=${e%%=*}; z=${e#*=}
+  case "$z" in ubuntu/*|adb/*) ;; *) echo "FEHLER: -a Ziel muss unter ubuntu/ oder adb/ liegen: $z"; exit 1;; esac
+  if [ -e "$z" ]; then
+    modus=$(stat -c %a "$z")
+    echo "== ersetzen: $z  ($(stat -c %s "$z") -> $(stat -c %s "$q") Bytes, Modus $modus bleibt)"
+  else
+    modus=644
+    echo "== neu anlegen: $z  ($(stat -c %s "$q") Bytes, Modus $modus)"
+    mkdir -p "$(dirname "$z")"
+  fi
+  # cp statt mv/install: die Quelle liegt oft auf NTFS, wo Eigentuemer und Modus nicht
+  # existieren - deshalb beides danach hier setzen, nicht von der Quelle uebernehmen.
+  cp "$q" "$z"
+  chown 0:0 "$z"; chmod "$modus" "$z"
 done
 
 echo "== packen =="
@@ -67,6 +111,25 @@ for f in $PFLICHT_SETUID; do
     fehler=1
   fi
 done
+
+# Die ersetzten Dateien im Ergebnis nachmessen - eine stumm danebengegangene Ersetzung ist
+# genau die Fehlerklasse, die den i18n-Katalog vom 22.8. bis ins Release getragen hat.
+for e in ${ERSETZE+"${ERSETZE[@]}"}; do
+  q=${e%%=*}; z=${e#*=}
+  soll=$(stat -c %s "$q")
+  zeile=$(printf '%s\n' "$LISTE" | grep -E " $z\$" || true)
+  if [ -z "$zeile" ]; then
+    echo "   FEHLER: ersetzte Datei fehlt im Archiv: $z"; fehler=1; continue
+  fi
+  ist=$(printf '%s' "$zeile" | awk '{print $3}')
+  eigner=$(printf '%s' "$zeile" | awk '{print $2}')
+  if [ "$ist" != "$soll" ] || [ "$eigner" != "0/0" ]; then
+    echo "   FEHLER: $z ist $ist Bytes $eigner, erwartet $soll Bytes 0/0"; fehler=1
+  else
+    echo "   ok: $z ($soll Bytes, 0/0)"
+  fi
+done
+
 if [ "$fehler" != "0" ]; then
   echo
   echo "ABBRUCH: das Archiv waere so unbrauchbar - genau der Fehler vom 26.8.2026."

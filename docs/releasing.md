@@ -34,7 +34,7 @@ So release-please creates the GitHub release as a **draft** (`draft: true` in
 
    ```powershell
    cd barra-setup
-   .\upload-release.ps1 -VerifyOnly   # size + SHA-256 of every asset against models.psd1
+   .\upload-release.ps1 -VerifyOnly   # size + SHA-256 against models.psd1, copies against src/
    .\upload-release.ps1               # verifies, then uploads
    ```
 
@@ -69,3 +69,31 @@ rebuilt — otherwise a newly encoded parameter hits no branch in the old shader
 computation step falls out **silently**, at full speed, with no error. That shipped once.
 `src/tts/prebuilt/gpudecd.buildinfo` pins the checksums of every source the binary was
 built from, and `repack-tts-kit.sh` refuses to package a binary that does not match.
+
+## A note on the copies inside the artifacts
+
+The base image and every kit carry their own copy of the device scripts, and the base
+image carries the i18n catalogue as well. A fix in `src/` therefore does **not** reach the
+product on its own — the base image is a snapshot of a dev node, and a kit archive is
+whatever was packed the day it was built.
+
+This has shipped three times. Twice as the pre-i18n copy of a server script, and once as a
+catalogue without the `stt.` and `pya.` keys, which made the device print raw keys like
+`stt.stopped` — the loader answers an unknown key with the key itself, so nothing ever
+reported an error.
+
+`upload-release.ps1` now compares every such copy against `src/` and refuses to upload on a
+difference. Correcting one does not require a re-bake:
+
+```bash
+# a file inside the base image (run in WSL, as root - see the head of the script)
+sudo bash repack-base.sh -a ../src/i18n/de.properties=adb/baseos/i18n/de.properties old.tar.gz new.tar.gz
+
+# a file inside a kit archive
+python tools/replace-in-kit.py pyannote-kit/pyannote-kit.tar base/pyaserver.sh ../src/pyannote/pyaserver.sh
+```
+
+Both keep owner and mode of the entry they replace and verify the result before handing it
+over — `repack-base.sh` re-checks the setuid list of a real Ubuntu 24.04, `replace-in-kit.py`
+insists that exactly one member changed. Afterwards: pins in `models.psd1` (and
+`payload/SHA256SUMS` for the base image), then `mk-model-docs.ps1`.

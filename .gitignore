@@ -52,6 +52,7 @@ barra-setup/tools/*
 !barra-setup/tools/wespeaker_r34_build.py
 !barra-setup/tools/gen-model.sh
 !barra-setup/tools/core-regroup.sh
+!barra-setup/tools/replace-in-kit.py
 Magisk-*.apk
 
 # Local / editor

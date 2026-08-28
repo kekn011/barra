@@ -65,6 +65,61 @@ foreach ($a in $assets) {
 }
 if ($fehler) { $fehler | ForEach-Object { Write-Host "  FEHLER $_" -ForegroundColor Red }; throw "$($fehler.Count) Abweichung(en) - nichts hochgeladen." }
 Write-Host "  alle $($assets.Count) Dateien stimmen mit dem Manifest ueberein." -ForegroundColor Green
+
+# Zweite Pruefung: die Kopien IN den Archiven. Die Kits und das Base-Image tragen eigene
+# Kopien der Geraete-Skripte und der i18n-Kataloge - eine Korrektur in src/ erreicht das
+# Produkt also nicht von selbst. Genau so sind ausgeliefert worden: die Vor-i18n-Fassung
+# von sttserver.sh (27.8.2026) und vier weitere Skripte samt einem Katalog ohne die
+# stt.- und pya.-Schluessel (28.8.2026) - sichtbar erst als rohe Schluessel auf dem Geraet.
+$Kopien = @(
+  @{ a='pyannote-kit\pyannote-kit.tar'; m='base/pyaserver.sh';                        q='src\pyannote\pyaserver.sh' }
+  @{ a='pyannote-kit\pyannote-kit.tar'; m='base/barra-diarize';                       q='src\pyannote\barra-diarize' }
+  @{ a='img-kit\img-kit.tar.gz';        m='base/imgserver.sh';                        q='src\img-kit\imgserver.sh' }
+  @{ a='img-kit\img-kit.tar.gz';        m='base/barra-img';                           q='src\img-kit\barra-img' }
+  @{ a='wake-kit\wake-kit.tar.gz';      m='./base/wakeserver.sh';                     q='src\wake\wakeserver.sh' }
+  @{ a='payload\barra-base.tar.gz';     m='adb/baseos/bin/sttserver.sh';              q='src\whisper-mali\sttserver.sh' }
+  @{ a='payload\barra-base.tar.gz';     m='adb/baseos/bin/llmserver.sh';              q='src\boot\llmserver.sh' }
+  @{ a='payload\barra-base.tar.gz';     m='adb/baseos/i18n/de.properties';            q='src\i18n\de.properties' }
+  @{ a='payload\barra-base.tar.gz';     m='adb/baseos/i18n/en.properties';            q='src\i18n\en.properties' }
+  @{ a='payload\barra-base.tar.gz';     m='ubuntu/usr/share/barra/i18n/de.properties'; q='src\i18n\de.properties' }
+  @{ a='payload\barra-base.tar.gz';     m='ubuntu/usr/share/barra/i18n/en.properties'; q='src\i18n\en.properties' }
+)
+# Freistehende Skript-Assets: dieselbe Frage, ohne Archiv drumherum.
+$Frei = @(
+  @{ f='tts-kit\ttsserver.sh';     q='src\tts\ttsserver.sh' }
+  @{ f='whisper-kit\sttserver.sh'; q='src\whisper-mali\sttserver.sh' }
+)
+Write-Host "== Kopien in den Archiven gegen src/ =="
+$src = Split-Path $root
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("barra-relcheck-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+try {
+  foreach ($e in $Frei) {
+    $f = Join-Path $root $e.f; $q = Join-Path $src $e.q
+    if (-not (Test-Path $f)) { $fehler += "$($e.f): fehlt lokal"; continue }
+    if ((Get-FileHash $f -Algorithm SHA256).Hash -ne (Get-FileHash $q -Algorithm SHA256).Hash) {
+      $fehler += "$($e.f) weicht von $($e.q) ab"
+    }
+  }
+  foreach ($g in ($Kopien | Group-Object { $_.a })) {
+    $arch = Join-Path $root $g.Name
+    if (-not (Test-Path $arch)) { $fehler += "$($g.Name): fehlt lokal"; continue }
+    $glieder = @($g.Group | ForEach-Object { $_.m })
+    & tar.exe -xf $arch -C $tmp @glieder
+    if ($LASTEXITCODE -ne 0) { $fehler += "$($g.Name): Glieder nicht auslesbar ($($glieder -join ', '))"; continue }
+    foreach ($e in $g.Group) {
+      $ist  = Join-Path $tmp ($e.m -replace '/', '\')
+      $soll = Join-Path $src $e.q
+      if (-not (Test-Path $ist)) { $fehler += "$($g.Name): $($e.m) fehlt im Archiv"; continue }
+      if ((Get-FileHash $ist -Algorithm SHA256).Hash -ne (Get-FileHash $soll -Algorithm SHA256).Hash) {
+        $fehler += "$($g.Name): $($e.m) weicht von $($e.q) ab (auch Zeilenenden pruefen - CRLF im Arbeitsbaum?)"
+      }
+    }
+  }
+} finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+if ($fehler) { $fehler | ForEach-Object { Write-Host "  FEHLER $_" -ForegroundColor Red }; throw "$($fehler.Count) Abweichung(en) - nichts hochgeladen." }
+Write-Host "  alle $($Kopien.Count + $Frei.Count) Kopien stimmen mit src/ ueberein." -ForegroundColor Green
+
 if ($VerifyOnly) { return }
 
 Write-Host "== hochladen (kleinste zuerst, damit Fehler frueh auffallen) =="
