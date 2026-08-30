@@ -74,6 +74,13 @@ if [ -f "$PRE" ]; then
     $CH "pkill -u ubuntu 2>/dev/null; sleep 1; usermod -l '$P_USER' ubuntu && usermod -d '/home/$P_USER' -m '$P_USER' && (groupmod -n '$P_USER' ubuntu 2>/dev/null || true); for s in /etc/sudoers.d/*; do [ -f \"\$s\" ] && sed -i 's/\bubuntu\b/$P_USER/g' \"\$s\"; done" && echo "user: ubuntu -> $P_USER"
   fi
   [ -z "$P_USER" ] && P_USER=ubuntu
+  # sudo ohne Passwort fuer den eingestellten Systemuser (Kevins Entwurf, 30.8.). Die alte
+  # Laborregel 'knews-nopasswd' (steckt im v14-Image) fliegt raus — hier, damit auch das schon
+  # ausgelieferte Image den Fix bekommt. Syntax per visudo pruefen: eine kaputte Datei in
+  # sudoers.d sperrt sudo komplett.
+  rm -f $U/etc/sudoers.d/knews-nopasswd
+  printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$P_USER" > $U/etc/sudoers.d/barra-user; chmod 0440 $U/etc/sudoers.d/barra-user
+  if $CH "visudo -cf /etc/sudoers.d/barra-user >/dev/null 2>&1"; then echo "sudo: $P_USER ohne passwort"; else rm -f $U/etc/sudoers.d/barra-user; echo "WARNUNG: sudo-Regel fuer $P_USER ungueltig - nicht gesetzt"; fi
   if [ -n "$P_PASS" ]; then printf '%s:%s\n' "$P_USER" "$P_PASS" | $CH 'chpasswd' && echo "passwort gesetzt"; fi
   $CH "chage -d -1 '$P_USER' 2>/dev/null; chage -E -1 '$P_USER' 2>/dev/null" || true
   # SSH-Key(s): Werte per ENV in den chroot geben (NICHT in den bash -c-Text interpolieren) —

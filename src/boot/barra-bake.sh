@@ -42,6 +42,13 @@ if [ -n "$CUR" ] && [ "$CUR" != ubuntu ]; then
   [ -d $R/home/$CUR ] && mv $R/home/$CUR $R/home/ubuntu
   echo "Benutzer $CUR -> ubuntu"
 fi
+# sudo-Regel: der eingestellte Systemuser (im Image ubuntu; der Setup benennt ihn beim Flash um,
+# spaeter barra-config — beide schreiben sudoers.d mit) bekommt passwortloses sudo. Alles andere
+# in sudoers.d ist Laborschmutz: v14 trug 'knews-nopasswd' aus dem knews-Cluster mit
+# (30.8. auf drei frischen Nodes gefunden).
+for s in $R/etc/sudoers.d/*; do [ -f "$s" ] && [ "$(basename "$s")" != README ] && rm -f "$s"; done
+printf 'ubuntu ALL=(ALL) NOPASSWD: ALL\n' > $R/etc/sudoers.d/barra-user; chmod 0440 $R/etc/sudoers.d/barra-user
+echo "sudoers.d: nur README + barra-user"
 # Passwort ubuntu setzen, Home aufraeumen
 sed -i "s#^ubuntu:[^:]*:#ubuntu:$UBUNTU_HASH:#" $R/etc/shadow
 rm -rf $R/home/ubuntu/.cache $R/home/ubuntu/.ssh/authorized_keys $R/home/ubuntu/*.log 2>/dev/null || true
