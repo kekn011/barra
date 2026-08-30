@@ -61,13 +61,13 @@
     sha256='834e8901ec2b84435ad0fe01d10ff93782e1466762856a285fc64458b03d22f4'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   'payload-boot' = @{ kit='payload'; file='boot-lz4.img'; origin='barra'; bytes=53477376
-    sha256='8659acb59c6a274dd5d2a17032aa8af906dca130e35ba76df80f4b025e95a782'
+    sha256='adb51190ffa908a12dd78e16e48a1478488f4d228dd32a8fc894ffd11145a667'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   # rfkill.ko ist mit dem Signaturschluessel DIESES Kernel-Builds signiert (GKI 'protected exports'):
   # es gehoert zum Kernel, nicht zum Base-Image. Ein rfkill.ko aus einem anderen Build wird vom
   # Kernel abgelehnt -> bcmdhd laedt nicht -> Node ohne WLAN (30.8. erlebt).
   'payload-rfkill' = @{ kit='payload'; file='wifi-rfkill.ko'; origin='barra'; bytes=63817
-    sha256='2da7b948cc830545b94224a62a4af9ab085ed26d4e29bcb8f28379ad692c76b2'
+    sha256='31af0598543616971e5a9e77395705e6c4fd0249dcb3595db14d7c00ecc267c6'
     license='GPL-2.0'; licenseUrl='https://github.com/kekn011/barra/tree/main/kernel' }
   'magisk' = @{
     kit='payload'; file='Magisk-30.7.apk'; origin='upstream'; bytes=11613864

@@ -114,3 +114,23 @@ index 59c426e0e0b9..bce141f7b46e 100644
  };
  
  /**
+diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
+index c6d5e7b2cf78..d46768819cd6 100644
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -6819,6 +6819,15 @@ static int __init cgroup_disable(char *str)
+ 		if (!*token)
+ 			continue;
+ 
++		/* barra: the Pixel vendor cmdline (vendor_boot) carries
++		 * cgroup_disable=memory. We keep the memory controller: the
++		 * Ubuntu userland and its container runtime need memory
++		 * accounting (kubelet/cadvisor, metrics). Everything else in
++		 * cgroup_disable= is honoured as before. */
++		if (!strcmp(token, "memory")) {
++			pr_info("barra: ignoring cgroup_disable=memory\n");
++			continue;
++		}
+ 		for_each_subsys(ss, i) {
+ 			if (strcmp(token, ss->name) &&
+ 			    strcmp(token, ss->legacy_name))

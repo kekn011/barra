@@ -32,6 +32,13 @@ change is `patches/aosp.patch`.
   attach (any OTG device, e.g. a USB-C ethernet adapter) ended in a kernel
   NULL-pointer panic in `xhci_exynos_early_stop_set`. The member itself is
   kept — only its position changes, so the LTS fix stays in.
+- `kernel/cgroup/cgroup.c`: ignore `cgroup_disable=memory` from the kernel
+  command line. The Pixel's stock `vendor_boot` (which barra does not
+  touch) disables the memory cgroup controller for the whole system; the
+  Ubuntu userland and its container runtime need memory accounting
+  (kubelet/cadvisor, metrics-server, `kubectl top`). Everything else in
+  `cgroup_disable=` is honoured as before. Measured on a node: no visible
+  cost in idle memory (MemAvailable 5975 MB vs 5794 MB before, same load).
 
 `gki_defconfig` here is the full resulting defconfig, for reference.
 `build-gki-157-usbnet.sh` is the original build script that produced the
@@ -70,12 +77,20 @@ other build, and without it the Wi-Fi driver `bcmdhd` cannot load). The
 setups; the installer prefers the copy from the kernel payload.
 
 Provenance of the shipped binaries: the `boot-lz4.img` in the setup payload has
-SHA-256 `8659acb59c6a274dd5d2a17032aa8af906dca130e35ba76df80f4b025e95a782`
-(`wifi-rfkill.ko`: `2da7b948cc830545b94224a62a4af9ab085ed26d4e29bcb8f28379ad692c76b2`)
+SHA-256 `adb51190ffa908a12dd78e16e48a1478488f4d228dd32a8fc894ffd11145a667`
+(`wifi-rfkill.ko`: `31af0598543616971e5a9e77395705e6c4fd0249dcb3595db14d7c00ecc267c6`)
 and was built on 2026-08-30 from exactly the source state this directory pins
-(base `aosp @ bde5fd109bd8` + `patches/aosp.patch`). The previous image
-(`01938bbe…`, 2026-08-11, same base, patch without the `hub.h` change) panics
-on USB host attach.
+(base `aosp @ bde5fd109bd8` + `patches/aosp.patch`). Earlier images of the
+same day: `8659acb5…` (hub.h fix, memory cgroup still disabled) and
+`01938bbe…` (2026-08-11, panics on USB host attach).
+
+**Kernel and modules are a set.** Every build signs its modules with a
+build-time key and the GKI kernel refuses a foreign `rfkill.ko` (protected
+exports). Ship `boot-lz4.img` together with the `wifi-rfkill.ko` (and, for
+MicroK8s, the ipset/xt_set/xt_addrtype/vxlan `.ko`) of the *same* build.
+`src/boot/barra-kernel-update.sh` applies such a set to a running node
+without a cable. Pinning `CONFIG_MODULE_SIG_KEY` in the defconfig does not
+survive the Kleaf build (open: pass `module_signing_key` to `kernel_build`).
 
 ## License
 
