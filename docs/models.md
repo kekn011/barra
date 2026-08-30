@@ -54,7 +54,7 @@ Fetch them with `barra-setup\fetch-models.ps1`; `-List` shows what is present.
 
 ## barra's own artifacts
 
-These 37 files are our build output — TPU packages, kit archives and derived
+These 38 files are our build output — TPU packages, kit archives and derived
 float tails — and they ship as GitHub release assets, not as downloads from third parties.
 
 **They are not automatically Apache-2.0.** A TPU package is not an original work: it is a
@@ -77,6 +77,7 @@ every file; only our own code and shaders are Apache-2.0.
 | `img-kit.tar.gz` | Bildgenerator | stable-diffusion.cpp (MIT) + Mali-Kernel von barra | [Apache-2.0 + MIT](https://github.com/leejet/stable-diffusion.cpp) |
 | `barra-base.tar.gz` |  | barra + Ubuntu 24.04 Userland | [Apache-2.0 + Ubuntu-Paketlizenzen](https://github.com/kekn011/barra/blob/main/LICENSE) |
 | `boot-lz4.img` |  | Android GKI 6.1 (modifiziert) | [GPLv2](https://github.com/kekn011/barra/tree/main/kernel) |
+| `wifi-rfkill.ko` |  | Linux-Kernelmodul rfkill (Android GKI 6.1), mit dem Schluessel unseres Kernel-Builds signiert | [GPLv2](https://github.com/kekn011/barra/tree/main/kernel) |
 | `SHA256SUMS` |  | barra (eigener Code) | Apache-2.0 |
 | `eres_params.txt` | Sprecher-Trennung | barra (eigener Code) | Apache-2.0 |
 | `pyannote-kit.tar` | Sprecher-Trennung | wespeaker ResNet34 + pyannote/segmentation-3.0 + sherpa-onnx | [Apache-2.0 + MIT](https://huggingface.co/pyannote/segmentation-3.0) |
@@ -107,6 +108,7 @@ every file; only our own code and shaders are Apache-2.0.
 - `llm-attn-glm-edge-4b-chat.tar` — Lizenztext beilegen (docs/licenses/GLM-Edge-LICENSE.txt); "Built with GLM-Edge" nennen; abgeleitete Modellnamen mit "GLM-Edge" praefixen; keine militaerische oder rechtswidrige Nutzung; kommerzielle Nutzung erfordert Registrierung beim Anbieter.
 - `barra-base.tar.gz` — Enthaelt ein vollstaendiges Ubuntu-Userland; die Lizenztexte der Pakete liegen im Image unter /usr/share/doc. KEINE Vendor-Firmware (seit 26.8. ausgeschlossen und im Bake geprueft).
 - `boot-lz4.img` — GPLv2 verlangt die Quellen: sie liegen im Repo unter kernel/.
+- `wifi-rfkill.ko` — GPLv2 verlangt die Quellen: sie liegen im Repo unter kernel/ (gleicher Build wie boot-lz4.img).
 - `pyannote-kit.tar` — Buendelt Fremdmodelle; deren Lizenztexte liegen im Kit. pyannote/segmentation-3.0 ist MIT (der Download-Gate auf HuggingFace ist eine Formalie, keine Weitergabebeschraenkung).
 - `qwen3-4b.gguf` — Apache-2.0: Lizenz und Namensnennung weitergeben. Wir liefern die Datei selbst aus, weil der Upstream seit August eine andere Fassung unter derselben Adresse fuehrt und unsere Packages auf diese kalibriert sind.
 - `tita_glue.bin` — Namensnennung erforderlich.

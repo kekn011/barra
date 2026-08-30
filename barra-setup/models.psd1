@@ -55,14 +55,20 @@
   # --- Payload: das, was der Flash zwingend braucht ---
   # Die Pruefsummenliste selbst: sie kommt aus dem Release wie die Dateien, die sie beschreibt.
   # Bewusst OHNE eigenen sha256 - sie ist die Referenz, nicht der Prueffall.
-  'payload-sums' = @{ kit='payload'; file='SHA256SUMS'; origin='barra'; bytes=245
+  'payload-sums' = @{ kit='payload'; file='SHA256SUMS'; origin='barra'; bytes=326
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429630384
     sha256='834e8901ec2b84435ad0fe01d10ff93782e1466762856a285fc64458b03d22f4'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   'payload-boot' = @{ kit='payload'; file='boot-lz4.img'; origin='barra'; bytes=53477376
-    sha256='01938bbe72dc1f282b671673a0d01dd9f10a00f6674c6bef7b8c245e9da42949'
+    sha256='8659acb59c6a274dd5d2a17032aa8af906dca130e35ba76df80f4b025e95a782'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
+  # rfkill.ko ist mit dem Signaturschluessel DIESES Kernel-Builds signiert (GKI 'protected exports'):
+  # es gehoert zum Kernel, nicht zum Base-Image. Ein rfkill.ko aus einem anderen Build wird vom
+  # Kernel abgelehnt -> bcmdhd laedt nicht -> Node ohne WLAN (30.8. erlebt).
+  'payload-rfkill' = @{ kit='payload'; file='wifi-rfkill.ko'; origin='barra'; bytes=63817
+    sha256='2da7b948cc830545b94224a62a4af9ab085ed26d4e29bcb8f28379ad692c76b2'
+    license='GPL-2.0'; licenseUrl='https://github.com/kekn011/barra/tree/main/kernel' }
   'magisk' = @{
     kit='payload'; file='Magisk-30.7.apk'; origin='upstream'; bytes=11613864
     sha256='e0d32d2123532860f97123d927b1bb86c4e08e6fd8a48bfc6b5bee0afae9ebd5'

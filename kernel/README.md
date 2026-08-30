@@ -24,6 +24,14 @@ change is `patches/aosp.patch`.
   and adds the new ipset/vxlan modules, so the Bazel GKI build stays consistent.
 - `build.config.gki`: disables `check_defconfig` (the defconfig deliberately
   deviates from stock GKI).
+- `drivers/usb/core/hub.h`: moves the `post_resume_work` member (added by the
+  6.1.147 LTS merge) to the **end** of the private `struct usb_hub`. The stock
+  Pixel vendor module `xhci_exynos` (built against 6.1.145) reads `hub->ports`
+  at a fixed offset; `struct usb_hub` is not part of the KMI, so the LTS insert
+  shifted that offset by `sizeof(struct delayed_work)` and every USB host
+  attach (any OTG device, e.g. a USB-C ethernet adapter) ended in a kernel
+  NULL-pointer panic in `xhci_exynos_early_stop_set`. The member itself is
+  kept — only its position changes, so the LTS fix stays in.
 
 `gki_defconfig` here is the full resulting defconfig, for reference.
 `build-gki-157-usbnet.sh` is the original build script that produced the
@@ -53,12 +61,21 @@ cd aosp && git apply ../path/to/patches/aosp.patch && cd ..
 tools/bazel run //aosp:kernel_aarch64_dist -- --dist_dir=out/dist
 ```
 
-`out/dist/boot-lz4.img` is the single file `barra-setup` flashes in the kernel
-step (see `docs/flashing.md`). Provenance of the shipped binary: the
-`boot-lz4.img` in the setup payload has SHA-256
-`01938bbe72dc1f282b671673a0d01dd9f10a00f6674c6bef7b8c245e9da42949` and was
-built on 2026-08-11 from exactly the source state this directory pins
-(base `aosp @ bde5fd109bd8` + `patches/aosp.patch`).
+`out/dist/boot-lz4.img` is the file `barra-setup` flashes in the kernel step
+(see `docs/flashing.md`). Ship `out/dist/rfkill.ko` next to it as
+`wifi-rfkill.ko`: it is signed with the module signing key of *this* kernel
+build (GKI "protected exports" — the kernel refuses an `rfkill.ko` from any
+other build, and without it the Wi-Fi driver `bcmdhd` cannot load). The
+`wifi-rfkill.ko` inside `barra-base.tar.gz` is only a fallback for older
+setups; the installer prefers the copy from the kernel payload.
+
+Provenance of the shipped binaries: the `boot-lz4.img` in the setup payload has
+SHA-256 `8659acb59c6a274dd5d2a17032aa8af906dca130e35ba76df80f4b025e95a782`
+(`wifi-rfkill.ko`: `2da7b948cc830545b94224a62a4af9ab085ed26d4e29bcb8f28379ad692c76b2`)
+and was built on 2026-08-30 from exactly the source state this directory pins
+(base `aosp @ bde5fd109bd8` + `patches/aosp.patch`). The previous image
+(`01938bbe…`, 2026-08-11, same base, patch without the `hub.h` change) panics
+on USB host attach.
 
 ## License
 

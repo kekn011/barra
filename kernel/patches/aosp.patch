@@ -93,3 +93,24 @@ index 4b931d9eb333..42d78c0b5198 100644
  DEFCONFIG=gki_defconfig
 -POST_DEFCONFIG_CMDS="check_defconfig"
 +POST_DEFCONFIG_CMDS="true"
+diff --git a/drivers/usb/core/hub.h b/drivers/usb/core/hub.h
+index 59c426e0e0b9..bce141f7b46e 100644
+--- a/drivers/usb/core/hub.h
++++ b/drivers/usb/core/hub.h
+@@ -69,12 +69,15 @@ struct usb_hub {
+ 	u8			indicator[USB_MAXCHILDREN];
+ 	struct delayed_work	leds;
+ 	struct delayed_work	init_work;
+-	struct delayed_work	post_resume_work;
+ 	struct work_struct      events;
+ 	spinlock_t		irq_urb_lock;
+ 	struct timer_list	irq_urb_retry;
+ 	struct usb_port		**ports;
+ 	struct list_head        onboard_hub_devs;
++	/* barra: keep the pre-6.1.147 layout of this private struct intact for the
++	 * stock Pixel vendor module xhci_exynos (built against 6.1.145), which reads
++	 * hub->ports at a fixed offset. New members go AFTER ports. */
++	struct delayed_work	post_resume_work;
+ };
+ 
+ /**

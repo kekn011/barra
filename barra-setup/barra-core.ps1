@@ -573,6 +573,13 @@ function Step4_Base(){
   }
   if (-not $pushed) { Remove-Item $pre -Force -ErrorAction SilentlyContinue; Fail (T 'core.s4.push_fail') }   # keine Klartext-env in %TEMP% zuruecklassen
   [void](Run $script:ADB "push `"$(Join-Path $script:Kit 'device-install.sh')`" /data/local/tmp/barra-kit/" $null 60)
+  # wifi-rfkill.ko gehoert zum KERNEL-Build (mit dessen Schluessel signiert, GKI 'protected exports'):
+  # es reist im Kernel-Payload neben boot-lz4.img und schlaegt die Kopie im Base-Tarball. Fehlt es,
+  # laeuft device-install.sh mit der Tarball-Kopie weiter (aeltere Payloads) - dann nur warnen.
+  if (Ensure-PayloadFile 'payload-rfkill' 'wifi-rfkill.ko') {
+    Verify-PayloadFile 'wifi-rfkill.ko' -NonFatal
+    [void](Run $script:ADB "push `"$(Join-Path $script:Payload 'wifi-rfkill.ko')`" /data/local/tmp/barra-kit/" $null 60)
+  } else { Warn (T 'core.s4.rfkill_missing') }
   if (Test-Path $pre) { [void](Run $script:ADB "push `"$pre`" /data/local/tmp/barra-kit/preconfig.env" $null 60); [void](AdbSh 'chmod 600 /data/local/tmp/barra-kit/preconfig.env 2>/dev/null' 10); Remove-Item $pre -Force -ErrorAction SilentlyContinue }
   Info (T 'core.s4.install'); Progress -1 (T 'core.s4.install_prog')
   $r = Run $script:ADB "shell su -c 'sh /data/local/tmp/barra-kit/device-install.sh'" $null 900

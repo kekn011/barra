@@ -42,7 +42,11 @@ if [ -d /data/local/barra-stage/adb/modules/barra-bootanim ]; then
   cp -a /data/local/barra-stage/adb/modules/barra-bootanim /data/adb/modules/
 fi
 cp /data/local/barra-stage/adb/nsprep /data/adb/nsprep; chmod 755 /data/adb/nsprep
-cp /data/local/barra-stage/adb/wifi-rfkill.ko /data/adb/wifi-rfkill.ko
+# rfkill.ko ist mit dem Schluessel des KERNEL-Builds signiert (GKI 'protected exports'): die Kopie
+# aus dem Kernel-Payload (neben boot-lz4.img, vom Setup nach $K gelegt) gewinnt gegen die Kopie im
+# Base-Tarball. Sonst: Kernel und Base aus verschiedenen Builds -> bcmdhd laedt nicht -> kein WLAN.
+if [ -f "$K/wifi-rfkill.ko" ]; then cp "$K/wifi-rfkill.ko" /data/adb/wifi-rfkill.ko; echo "wifi-rfkill.ko aus dem Kernel-Payload"; else cp /data/local/barra-stage/adb/wifi-rfkill.ko /data/adb/wifi-rfkill.ko; fi
+chmod 644 /data/adb/wifi-rfkill.ko
 chmod 755 /data/adb/service.d/*.sh /data/adb/post-fs-data.d/*.sh /data/adb/baseos/bin/* /data/adb/hwbridge/*.sh 2>/dev/null || true
 chmod 600 /data/adb/baseos/config; chown 0:0 /data/adb/baseos/config
 mkdir -p /data/adb/baseos/run; chmod 700 /data/adb/baseos/run

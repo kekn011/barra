@@ -70,6 +70,10 @@
     derivedFrom='Android GKI 6.1 (modifiziert)'
     license='GPLv2'; licenseUrl='https://github.com/kekn011/barra/tree/main/kernel'
     obligations='GPLv2 verlangt die Quellen: sie liegen im Repo unter kernel/.' }
+  'payload-rfkill' = @{
+    derivedFrom='Linux-Kernelmodul rfkill (Android GKI 6.1), mit dem Schluessel unseres Kernel-Builds signiert'
+    license='GPLv2'; licenseUrl='https://github.com/kekn011/barra/tree/main/kernel'
+    obligations='GPLv2 verlangt die Quellen: sie liegen im Repo unter kernel/ (gleicher Build wie boot-lz4.img).' }
   'qwen3-4b' = @{
     derivedFrom='Qwen3-4B (unveraendert weitergegeben)'; license='Apache-2.0'
     licenseUrl='https://huggingface.co/Qwen/Qwen3-4B'

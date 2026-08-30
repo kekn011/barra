@@ -1,6 +1,7 @@
 # Exact source pins for the shipped barra kernel (see README.md).
 # Workspace: repo init -u https://android.googlesource.com/kernel/manifest -b android-gs-akita-android16
-# Only aosp/ carries a local change (patches/aosp.patch); all other projects are clean at their pin.
+# Only aosp/ carries a local change (patches/aosp.patch: defconfig/BUILD/build.config + drivers/usb/core/hub.h);
+# all other projects are clean at their pin. Shipped boot-lz4.img sha256 8659acb5... (2026-08-30), wifi-rfkill.ko 2da7b948...
 
 aosp                                HEAD=bde5fd109bd869563dfac689f1eed0c40aff28ff  (+ patches/aosp.patch)
 private/devices/google/akita        HEAD=b40eeb239b427c31762bcb1fcd0ac74ad54bd625
