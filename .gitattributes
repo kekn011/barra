@@ -37,6 +37,7 @@ src/boot/barra-prepare-image  text eol=lf
 src/boot/barra-power          text eol=lf
 src/boot/barra-power.conf     text eol=lf
 src/boot/barra-k8s-install.sh text eol=lf
+src/boot/barra-kernel-update.sh text eol=lf
 src/img-kit/barra-img         text eol=lf
 src/perf/barra-perf           text eol=lf
 src/pyannote/barra-diarize    text eol=lf
