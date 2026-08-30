@@ -1,5 +1,16 @@
+diff --git a/ggml/src/ggml-vulkan/CMakeLists.txt b/ggml/src/ggml-vulkan/CMakeLists.txt
+index 1dc6a14..4187e31 100644
+--- a/ggml/src/ggml-vulkan/CMakeLists.txt
++++ b/ggml/src/ggml-vulkan/CMakeLists.txt
+@@ -246,3 +246,6 @@ if (Vulkan_FOUND)
+ else()
+     message(WARNING "Vulkan not found")
+ endif()
++
++# ggml-barra v2 (Attention-Offload)
++target_sources(ggml-vulkan PRIVATE barra.c)
 diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-index 45fa97f..2fe034f 100644
+index 45fa97f..73abfa4 100644
 --- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
 +++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
 @@ -183,9 +183,15 @@ static bool is_pow2(uint32_t x) { return x > 1 && (x & (x-1)) == 0; }
@@ -156,10 +167,11 @@ index 45fa97f..2fe034f 100644
  
      size_t misalign_bytes = offset & (ctx->device->properties.limits.minStorageBufferOffsetAlignment - 1);
      // The shader must support misaligned offsets when indexing into the buffer
-@@ -8762,6 +8811,15 @@ static vk_pipeline ggml_vk_guess_matmul_pipeline(ggml_backend_vk_context * ctx,
+@@ -8762,7 +8811,26 @@ static vk_pipeline ggml_vk_guess_matmul_pipeline(ggml_backend_vk_context * ctx,
          return aligned ? mmp->a_s : mmp->s;
      }
  
+-    if ((mm_s && (m <= 32 || n <= 32)) || (!mm_m && !mm_l)) {
 +    // EXPERIMENT: env-Override Tile-Variante (GGML_VK_FORCE_MM_TILE=s|m|l), 108=l 109=m 115=s
 +    {
 +        const char* ft = getenv("GGML_VK_FORCE_MM_TILE");
@@ -169,10 +181,40 @@ index 45fa97f..2fe034f 100644
 +            if (ft[0]==115 && mm_s) return aligned ? mmp->a_s : mmp->s;
 +        }
 +    }
-     if ((mm_s && (m <= 32 || n <= 32)) || (!mm_m && !mm_l)) {
++    // BARRA-Fix (29.8.2026): auf Mali-G715 rechnet die KLEINE Kachelvariante bei schmalen
++    // Matrizen mit vielen Spalten FALSCH - mit test-backend-ops gegen die CPU-Referenz
++    // gemessen (Faelle m=1): automatisch 5/34, erzwungen 's' 9/34, erzwungen 'm' 34/34,
++    // 'l' 29/34. Der Fehler schwankt je Lauf (uninitialisierter Speicher) und tritt auch
++    // mit UNGEPATCHTEM Backend auf - llama.cpp/Treiber, nicht unser Mali-Kernel.
++    // Wirkung im Produkt: qwen38-distill (Gated-DeltaNet-Torsteuerung = [2560x32]) gab beim
++    // Prefill ab ~24 Token nur noch "@@@@" aus, waehrend n=1 (Erzeugen) sauber blieb.
++    // GGML_VK_ARM_ALLOW_S=1 stellt das alte Verhalten fuer Vergleichsmessungen her.
++    const bool arm_skip_s = ctx->device->vendor_id == VK_VENDOR_ID_ARM && n > 16 &&
++                            !getenv("GGML_VK_ARM_ALLOW_S");
++    if ((mm_s && (m <= 32 || n <= 32) && !arm_skip_s) || (!mm_m && !mm_l)) {
          return aligned ? mmp->a_s : mmp->s;
      }
-@@ -9211,7 +9269,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+     if ((mm_m && (m <= 64 || n <= 64)) || !mm_l) {
+@@ -8849,7 +8917,17 @@ static vk_pipeline ggml_vk_guess_matmul_id_pipeline(ggml_backend_vk_context * ct
+         return aligned ? mmp->a_s : mmp->s;
+     }
+ 
+-    if ((mm_s && (m <= 32 || n <= 32)) || (!mm_m && !mm_l)) {
++    // BARRA-Fix (29.8.2026): auf Mali-G715 rechnet die KLEINE Kachelvariante bei schmalen
++    // Matrizen mit vielen Spalten FALSCH - mit test-backend-ops gegen die CPU-Referenz
++    // gemessen (Faelle m=1): automatisch 5/34, erzwungen 's' 9/34, erzwungen 'm' 34/34,
++    // 'l' 29/34. Der Fehler schwankt je Lauf (uninitialisierter Speicher) und tritt auch
++    // mit UNGEPATCHTEM Backend auf - llama.cpp/Treiber, nicht unser Mali-Kernel.
++    // Wirkung im Produkt: qwen38-distill (Gated-DeltaNet-Torsteuerung = [2560x32]) gab beim
++    // Prefill ab ~24 Token nur noch "@@@@" aus, waehrend n=1 (Erzeugen) sauber blieb.
++    // GGML_VK_ARM_ALLOW_S=1 stellt das alte Verhalten fuer Vergleichsmessungen her.
++    const bool arm_skip_s = ctx->device->vendor_id == VK_VENDOR_ID_ARM && n > 16 &&
++                            !getenv("GGML_VK_ARM_ALLOW_S");
++    if ((mm_s && (m <= 32 || n <= 32) && !arm_skip_s) || (!mm_m && !mm_l)) {
+         return aligned ? mmp->a_s : mmp->s;
+     }
+     if ((mm_m && (m <= 64 || n <= 64)) || !mm_l) {
+@@ -9211,7 +9289,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
  
      const uint32_t split_k = ggml_vk_guess_split_k(ctx, ne01, ne11, ne10, disable_split_k, pipeline);
  
@@ -181,7 +223,7 @@ index 45fa97f..2fe034f 100644
      const uint64_t qy_sz = ggml_type_size(src1->type) * y_ne / ggml_blck_size(src1->type);
      const uint64_t x_sz = !qx_needs_dequant ? qx_sz : sizeof(ggml_fp16_t) * x_ne;
      const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) : (y_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
-@@ -9275,7 +9333,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+@@ -9275,7 +9353,7 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
      }
  
      vk_buffer d_D = dst_buf_ctx->dev_buffer;
@@ -190,7 +232,7 @@ index 45fa97f..2fe034f 100644
      GGML_ASSERT(d_D != nullptr);
      GGML_ASSERT(d_D->size >= d_buf_offset + d_sz);
      vk_buffer d_X;
-@@ -9284,12 +9342,12 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
+@@ -9284,12 +9362,12 @@ static void ggml_vk_mul_mat_q_f16(ggml_backend_vk_context * ctx, vk_context& sub
      uint64_t y_buf_offset = 0;
      if (!src0_uma) {
          d_Qx = src0_buf_ctx->dev_buffer;
@@ -205,7 +247,7 @@ index 45fa97f..2fe034f 100644
          GGML_ASSERT(d_Qy != nullptr);
      }
      if (qx_needs_dequant) {
-@@ -9389,6 +9447,11 @@ static bool ggml_vk_should_use_mmvq(const vk_device& device, uint32_t m, uint32_
+@@ -9389,6 +9467,11 @@ static bool ggml_vk_should_use_mmvq(const vk_device& device, uint32_t m, uint32_
          return false;
      }
  
@@ -217,7 +259,7 @@ index 45fa97f..2fe034f 100644
      // q6_k only has 2-byte alignment which makes it somewhat problematic,
      // using MMVQ is only a win on Intel.
      bool mmvq_q6 = device->vendor_id == VK_VENDOR_ID_INTEL;
-@@ -9546,7 +9609,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
+@@ -9546,7 +9629,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
      const uint64_t x_ne = ggml_nelements(src0);
      const uint64_t y_ne = ggml_nelements(src1);
  
@@ -226,7 +268,7 @@ index 45fa97f..2fe034f 100644
      const uint64_t x_sz = x_non_contig ? ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment) : qx_sz;
      const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) :
                           (f16_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
-@@ -10143,7 +10206,7 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
+@@ -10143,7 +10226,7 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
      const uint64_t y_ne = (uint64_t)y_staged_row_stride * padded_n * ne12 * ne13;
      const uint64_t d_ne = ggml_nelements(dst);
  
@@ -235,7 +277,7 @@ index 45fa97f..2fe034f 100644
      const uint64_t qy_sz = ggml_type_size(src1->type) * ggml_nelements(src1) / ggml_blck_size(src1->type);
      const uint64_t x_sz = !qx_needs_dequant ? qx_sz : sizeof(ggml_fp16_t) * x_ne;
      const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) : (y_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
-@@ -10225,7 +10288,7 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
+@@ -10225,7 +10308,7 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
      }
  
      vk_buffer d_D = dst_buf_ctx->dev_buffer;
@@ -244,7 +286,7 @@ index 45fa97f..2fe034f 100644
      GGML_ASSERT(d_D != nullptr);
      vk_buffer d_X;
      uint64_t x_buf_offset = 0;
-@@ -10233,17 +10296,17 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
+@@ -10233,17 +10316,17 @@ static void ggml_vk_mul_mat_id_q_f16(ggml_backend_vk_context * ctx, vk_context&
      uint64_t y_buf_offset = 0;
      if (!src0_uma) {
          d_Qx = src0_buf_ctx->dev_buffer;
@@ -265,7 +307,7 @@ index 45fa97f..2fe034f 100644
          GGML_ASSERT(d_ids != nullptr);
      }
      if (qx_needs_dequant) {
-@@ -10444,7 +10507,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
+@@ -10444,7 +10527,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
      const uint64_t x_ne = ggml_nelements(src0);
      const uint64_t y_ne = ggml_nelements(src1);
  
@@ -274,7 +316,7 @@ index 45fa97f..2fe034f 100644
      const uint64_t x_sz = x_non_contig ? ggml_vk_align_size(ggml_type_size(src0->type) * x_ne, ctx->device->properties.limits.minStorageBufferOffsetAlignment) : qx_sz;
      const uint64_t y_sz = quantize_y ? (ggml_vk_align_size(y_ne, 128) * ggml_type_size(GGML_TYPE_Q8_1) / ggml_blck_size(GGML_TYPE_Q8_1)) :
                                         (f16_f32_kernel ? sizeof(float) * y_ne : sizeof(ggml_fp16_t) * y_ne);
-@@ -12371,7 +12434,7 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
+@@ -12371,7 +12454,7 @@ static void ggml_vk_multi_add(ggml_backend_vk_context * ctx, vk_context& subctx,
          }
          if (!uma[i]) {
              buf[i] = buf_ctx[i]->dev_buffer;
@@ -283,7 +325,7 @@ index 45fa97f..2fe034f 100644
          }
          GGML_ASSERT(buf[i] != nullptr);
      }
-@@ -13014,6 +13077,16 @@ static void ggml_vk_repeat_back(ggml_backend_vk_context * ctx, vk_context& subct
+@@ -13014,6 +13097,16 @@ static void ggml_vk_repeat_back(ggml_backend_vk_context * ctx, vk_context& subct
  }
  
  static void ggml_vk_cpy(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
@@ -300,7 +342,7 @@ index 45fa97f..2fe034f 100644
      uint32_t ne = (uint32_t)ggml_nelements(src0);
      if (ggml_is_quantized(src0->type) && ggml_is_quantized(dst->type)) {
          // Convert from number of logical elements to 2- or 4-byte units.
-@@ -13219,7 +13292,7 @@ static void ggml_vk_rms_norm(ggml_backend_vk_context * ctx, vk_context& subctx,
+@@ -13219,7 +13312,7 @@ static void ggml_vk_rms_norm(ggml_backend_vk_context * ctx, vk_context& subctx,
              }
              if (!uma[i]) {
                  buf[i] = buf_ctx[i]->dev_buffer;
@@ -309,7 +351,7 @@ index 45fa97f..2fe034f 100644
              }
              GGML_ASSERT(buf[i] != nullptr);
          }
-@@ -13850,7 +13923,7 @@ static void ggml_vk_im2col(ggml_backend_vk_context * ctx, vk_context& subctx, co
+@@ -13850,7 +13943,7 @@ static void ggml_vk_im2col(ggml_backend_vk_context * ctx, vk_context& subctx, co
      const ggml_backend_vk_buffer_context * d_buf_ctx = (ggml_backend_vk_buffer_context *)dst->buffer->context;
      const vk_buffer d_buf = d_buf_ctx->dev_buffer;
  
@@ -318,7 +360,7 @@ index 45fa97f..2fe034f 100644
  
      ggml_vk_op_f32<vk_op_im2col_push_constants>(ctx, subctx, src0, src1, nullptr, nullptr, dst, GGML_OP_IM2COL, {
          dst_addr,
-@@ -13892,7 +13965,7 @@ static void ggml_vk_im2col_3d(ggml_backend_vk_context * ctx, vk_context& subctx,
+@@ -13892,7 +13985,7 @@ static void ggml_vk_im2col_3d(ggml_backend_vk_context * ctx, vk_context& subctx,
      const ggml_backend_vk_buffer_context * d_buf_ctx = (ggml_backend_vk_buffer_context *)dst->buffer->context;
      const vk_buffer d_buf = d_buf_ctx->dev_buffer;
  
@@ -327,7 +369,7 @@ index 45fa97f..2fe034f 100644
  
      vk_op_im2col_3d_push_constants pc {};
  
-@@ -15199,16 +15272,16 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+@@ -15199,16 +15292,16 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
              if (unsynced_nodes.size() == 0) {
                  return false;
              }
@@ -348,7 +390,7 @@ index 45fa97f..2fe034f 100644
  
                      if ((o_base <= n_base && n_base < o_base + o_size) ||
                          (n_base <= o_base && o_base < n_base + n_size)) {
-@@ -15863,6 +15936,46 @@ static enum ggml_status ggml_backend_vk_buffer_init_tensor(ggml_backend_buffer_t
+@@ -15863,6 +15956,46 @@ static enum ggml_status ggml_backend_vk_buffer_init_tensor(ggml_backend_buffer_t
      return GGML_STATUS_SUCCESS;
  }
  
@@ -395,7 +437,7 @@ index 45fa97f..2fe034f 100644
  static void ggml_backend_vk_buffer_memset_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, uint8_t value, size_t offset, size_t size) {
      VK_LOG_DEBUG("ggml_backend_vk_buffer_memset_tensor(" << buffer << ", " << tensor << ", " << value << ", " << offset << ", " << size << ")");
      ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)buffer->context;
-@@ -15873,7 +15986,11 @@ static void ggml_backend_vk_buffer_memset_tensor(ggml_backend_buffer_t buffer, g
+@@ -15873,7 +16006,11 @@ static void ggml_backend_vk_buffer_memset_tensor(ggml_backend_buffer_t buffer, g
      }
  
      uint32_t val32 = (uint32_t)value * 0x01010101;
@@ -408,7 +450,7 @@ index 45fa97f..2fe034f 100644
  }
  
  static void ggml_backend_vk_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-@@ -15885,7 +16002,11 @@ static void ggml_backend_vk_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml
+@@ -15885,7 +16022,11 @@ static void ggml_backend_vk_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml
          return;
      }
  
@@ -421,7 +463,7 @@ index 45fa97f..2fe034f 100644
  }
  
  static void ggml_backend_vk_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset,
-@@ -15899,7 +16020,13 @@ static void ggml_backend_vk_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, g
+@@ -15899,7 +16040,13 @@ static void ggml_backend_vk_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, g
          return;
      }
  
@@ -436,7 +478,7 @@ index 45fa97f..2fe034f 100644
  }
  
  static void ggml_backend_vk_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
-@@ -15912,7 +16039,11 @@ static void ggml_backend_vk_buffer_get_tensor(ggml_backend_buffer_t buffer, cons
+@@ -15912,7 +16059,11 @@ static void ggml_backend_vk_buffer_get_tensor(ggml_backend_buffer_t buffer, cons
  
      vk_buffer buf = buf_ctx->dev_buffer;
  
@@ -449,7 +491,7 @@ index 45fa97f..2fe034f 100644
  }
  
  static void ggml_backend_vk_buffer_get_tensor_2d(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset,
-@@ -15927,7 +16058,13 @@ static void ggml_backend_vk_buffer_get_tensor_2d(ggml_backend_buffer_t buffer, c
+@@ -15927,7 +16078,13 @@ static void ggml_backend_vk_buffer_get_tensor_2d(ggml_backend_buffer_t buffer, c
  
      vk_buffer buf = buf_ctx->dev_buffer;
  
@@ -464,7 +506,7 @@ index 45fa97f..2fe034f 100644
  }
  
  static bool ggml_backend_vk_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * src, ggml_tensor * dst) {
-@@ -15942,7 +16079,8 @@ static bool ggml_backend_vk_buffer_cpy_tensor(ggml_backend_buffer_t buffer, cons
+@@ -15942,7 +16099,8 @@ static bool ggml_backend_vk_buffer_cpy_tensor(ggml_backend_buffer_t buffer, cons
          vk_buffer src_buf = src_buf_ctx->dev_buffer;
          vk_buffer dst_buf = dst_buf_ctx->dev_buffer;
  
@@ -474,7 +516,7 @@ index 45fa97f..2fe034f 100644
  
          return true;
      }
-@@ -16005,7 +16143,8 @@ static size_t ggml_backend_vk_buffer_type_get_max_size(ggml_backend_buffer_type_
+@@ -16005,7 +16163,8 @@ static size_t ggml_backend_vk_buffer_type_get_max_size(ggml_backend_buffer_type_
  }
  
  static size_t ggml_backend_vk_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const ggml_tensor * tensor) {
@@ -484,7 +526,7 @@ index 45fa97f..2fe034f 100644
  
      UNUSED(buft);
  }
-@@ -16127,6 +16266,15 @@ static void ggml_backend_vk_set_tensor_2d_async(ggml_backend_t backend, ggml_ten
+@@ -16127,6 +16286,15 @@ static void ggml_backend_vk_set_tensor_2d_async(ggml_backend_t backend, ggml_ten
  
      ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
  
@@ -500,7 +542,7 @@ index 45fa97f..2fe034f 100644
      vk_context cpy_ctx;
  
      if (ctx->device->async_use_transfer_queue) {
-@@ -16137,7 +16285,7 @@ static void ggml_backend_vk_set_tensor_2d_async(ggml_backend_t backend, ggml_ten
+@@ -16137,7 +16305,7 @@ static void ggml_backend_vk_set_tensor_2d_async(ggml_backend_t backend, ggml_ten
  
      vk_buffer buf = buf_ctx->dev_buffer;
  
@@ -509,7 +551,7 @@ index 45fa97f..2fe034f 100644
  
      bool ret = ggml_vk_buffer_write_2d_async(cpy_ctx, buf, dst_offset, data, stride_data, stride_tensor, size, n_copies);
  
-@@ -16190,11 +16338,21 @@ static void ggml_backend_vk_get_tensor_2d_async(ggml_backend_t backend, const gg
+@@ -16190,11 +16358,21 @@ static void ggml_backend_vk_get_tensor_2d_async(ggml_backend_t backend, const gg
  
      ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
  
@@ -532,7 +574,7 @@ index 45fa97f..2fe034f 100644
      bool ret = ggml_vk_buffer_read_2d_async(compute_ctx, buf, src_offset, data, stride_tensor, stride_data, size, n_copies);
  
      if (!ret) {
-@@ -16258,14 +16416,24 @@ static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend_src, ggml_ba
+@@ -16258,14 +16436,24 @@ static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend_src, ggml_ba
              return false;
          }
  
@@ -560,7 +602,7 @@ index 45fa97f..2fe034f 100644
      if (ggml_backend_buffer_is_host(src->buffer)) {
          vk_buffer pinned_buf = nullptr;
          size_t pinned_offset = 0;
-@@ -16282,7 +16450,7 @@ static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend_src, ggml_ba
+@@ -16282,7 +16470,7 @@ static bool ggml_backend_vk_cpy_tensor_async(ggml_backend_t backend_src, ggml_ba
          }
  
          return ggml_vk_buffer_write_async(cpy_ctx, dst_buf,
@@ -569,7 +611,7 @@ index 45fa97f..2fe034f 100644
                                            src->data, ggml_nbytes(src));
      }
  
-@@ -16798,10 +16966,10 @@ static bool ggml_vk_tensors_overlap(const ggml_tensor * a, const ggml_tensor * b
+@@ -16798,10 +16986,10 @@ static bool ggml_vk_tensors_overlap(const ggml_tensor * a, const ggml_tensor * b
      ggml_backend_vk_buffer_context * b_buf_ctx = (ggml_backend_vk_buffer_context *)b->buffer->context;
      vk_buffer b_buf = b_buf_ctx->dev_buffer;
      if (a_buf == b_buf) {
@@ -584,7 +626,37 @@ index 45fa97f..2fe034f 100644
  
          if (elementwise && a_base == b_base && a_size == b_size) {
              return false;
-@@ -18931,7 +19099,7 @@ static void ggml_vk_print_tensor(const ggml_tensor * tensor, const char * name)
+@@ -16913,7 +17101,7 @@ static int32_t find_first_set(uint32_t x) {
+     return ret;
+ }
+ 
+-static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
++static ggml_status ggml_backend_vk_graph_compute_impl(ggml_backend_t backend, ggml_cgraph * cgraph) {
+     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
+     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+ 
+@@ -17378,9 +17566,11 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+ }
+ 
+ // Sort the graph for improved parallelism.
++static bool ggml_vk_battn_env_on(void);
+ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph)
+ {
+     VK_LOG_DEBUG("ggml_vk_graph_optimize(" << graph->n_nodes << " nodes)");
++    if (ggml_vk_battn_env_on()) { return; }
+     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+ 
+     if (ctx->device->disable_graph_optimize) {
+@@ -17696,6 +17886,8 @@ static void ggml_backend_vk_event_wait(ggml_backend_t backend, ggml_backend_even
+ }
+ 
+ // TODO: enable async and synchronize
++#include "ggml-vulkan-barra.inc"
++
+ static ggml_backend_i ggml_backend_vk_interface = {
+     /* .get_name                = */ ggml_backend_vk_name,
+     /* .free                    = */ ggml_backend_vk_free,
+@@ -18931,7 +19123,7 @@ static void ggml_vk_print_tensor(const ggml_tensor * tensor, const char * name)
          ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
  
          vk_buffer buffer_gpu = buf_ctx->dev_buffer;
@@ -593,7 +665,7 @@ index 45fa97f..2fe034f 100644
      }
  
      std::cerr << "TENSOR CHECK " << name << " (" << tensor->name << "): " << ggml_op_name(tensor->op) << std::endl;
-@@ -19013,7 +19181,7 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
+@@ -19013,7 +19205,7 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
              } else if (ggml_backend_buffer_is_vk(srci->buffer)) {
                  ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)srci->buffer->context;
                  vk_buffer& buffer_gpu = buf_ctx->dev_buffer;
@@ -602,7 +674,7 @@ index 45fa97f..2fe034f 100644
                  if (!ggml_is_contiguous(srci) && ggml_vk_dim01_contiguous(srci)) {
                      for (int i3 = 0; i3 < srci->ne[3]; i3++) {
                          for (int i2 = 0; i2 < srci->ne[2]; i2++) {
-@@ -19462,7 +19630,7 @@ static void ggml_vk_check_results_1(ggml_backend_vk_context * ctx, ggml_cgraph *
+@@ -19462,7 +19654,7 @@ static void ggml_vk_check_results_1(ggml_backend_vk_context * ctx, ggml_cgraph *
          ggml_backend_vk_buffer_context * buf_ctx = (ggml_backend_vk_buffer_context *)tensor->buffer->context;
  
          vk_buffer& buffer_gpu = buf_ctx->dev_buffer;
