@@ -263,6 +263,94 @@ int barra_gpu_dispatch(barra_gpu* g, const uint8_t* spirv, uint32_t slen, uint32
   return barra_gpu_batch(g,&st,1);
 }
 
+/* ================= Zero-Copy (GPU) — Session v3 GPZ3 fuer ggml-gpud =================
+ * Protokoll: siehe gpud-zc.c (C). Shader werden einmal geladen (Handle), Stufen tragen
+ * Bindings mit Offset/Range und Push-Constants; alles in EINEM Roundtrip je Batch. */
+#define GPZ3_MAGIC 0x47505A33u
+static int gpu3_dead(barra_gpu3* g){ if(g&&g->sock>=0){ close(g->sock); g->sock=-1; } return -1; }
+int barra_gpu3_open(barra_gpu3* g){
+  if(!g) return -1;
+  g->sock=dial("gpuzc.sock"); g->nimported=0;
+  if(g->sock<0){ fprintf(stderr,"barra: gpuzc.sock nicht erreichbar\n"); return -1; }
+  return 0;
+}
+void barra_gpu3_close(barra_gpu3* g){ if(g&&g->sock>=0){ close(g->sock); g->sock=-1; } }
+int barra_gpu3_import(barra_gpu3* g, barra_zbuf** bufs, int n){
+  if(!g||g->sock<0||n<=0||n>ZC_MAXBUF) return -1;
+  int fds[ZC_MAXBUF]; uint32_t sizes[ZC_MAXBUF], hd[ZC_MAXBUF];
+  for(int i=0;i<n;i++){ fds[i]=bufs[i]->fd; sizes[i]=bufs[i]->size; }
+  uint32_t hdr[6]={GPZ3_MAGIC,1,(uint32_t)n,0,0,0}; uint32_t status=1;
+  if(send_hdr_fds(g->sock,hdr,fds,n)||wn(g->sock,sizes,n*4)||rn(g->sock,&status,4)) return gpu3_dead(g);
+  if(status!=0){ fprintf(stderr,"barra: GPU3-Import status=%u\n",status); return -1; }
+  if(rn(g->sock,hd,n*4)) return gpu3_dead(g);
+  for(int i=0;i<n;i++) bufs[i]->gpu_h=(int)hd[i];
+  g->nimported+=n; return 0;
+}
+int barra_gpu3_release(barra_gpu3* g, barra_zbuf** bufs, int n){
+  if(!g||g->sock<0||n<=0||n>ZC_MAXBUF) return -1;
+  uint32_t hd[ZC_MAXBUF]; int k=0;
+  for(int i=0;i<n;i++) if(bufs[i]->gpu_h>=0) hd[k++]=(uint32_t)bufs[i]->gpu_h;
+  if(k==0) return 0;
+  uint32_t hdr[6]={GPZ3_MAGIC,3,(uint32_t)k,0,0,0}; uint32_t status=1;
+  if(send_hdr_fds(g->sock,hdr,0,0)||wn(g->sock,hd,k*4)||rn(g->sock,&status,4)) return gpu3_dead(g);
+  if(status!=0) return -1;
+  for(int i=0;i<n;i++) bufs[i]->gpu_h=-1;
+  g->nimported-=k; return 0;
+}
+int barra_gpu3_load(barra_gpu3* g, const uint8_t* spirv, uint32_t slen, uint32_t nbind, uint32_t pcsize){
+  if(!g||g->sock<0||!spirv||!slen||(slen&3)||nbind>ZC_MAXBUF||pcsize>BARRA_GPU3_MAXPC||(pcsize&3)) return -1;
+  uint32_t hdr[6]={GPZ3_MAGIC,4,slen,nbind,pcsize,0}; uint32_t status=1, sh=0;
+  if(send_hdr_fds(g->sock,hdr,0,0)||wn(g->sock,spirv,slen)||rn(g->sock,&status,4)) return gpu3_dead(g);
+  if(status!=0){ fprintf(stderr,"barra: GPU3-Load status=%u\n",status); return -1; }
+  if(rn(g->sock,&sh,4)) return gpu3_dead(g);
+  return (int)sh;
+}
+int barra_gpu3_unload(barra_gpu3* g, int sh){
+  if(!g||g->sock<0||sh<0) return -1;
+  uint32_t hdr[6]={GPZ3_MAGIC,6,(uint32_t)sh,0,0,0}; uint32_t status=1;
+  if(send_hdr_fds(g->sock,hdr,0,0)||rn(g->sock,&status,4)) return gpu3_dead(g);
+  return status?-1:0;
+}
+int barra_gpu3_flags(barra_gpu3* g, uint32_t flags){
+  if(!g||g->sock<0) return -1;
+  uint32_t hdr[6]={GPZ3_MAGIC,8,flags,0,0,0}; uint32_t status=1;
+  if(send_hdr_fds(g->sock,hdr,0,0)||rn(g->sock,&status,4)) return gpu3_dead(g);
+  return status?-1:0;
+}
+int barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* st, int nstage){
+  if(!g||g->sock<0||nstage<=0||nstage>BARRA_GPU3_MAXSTAGE) return -1;
+  /* 1) Unimportierte Puffer importieren (einmalig) */
+  for(int s=0;s<nstage;s++){
+    if(st[s].sh<0||st[s].nbind<0||st[s].nbind>ZC_MAXBUF||st[s].pcsize>BARRA_GPU3_MAXPC||(st[s].pcsize&&!st[s].pc)) return -1;
+    barra_zbuf* need[ZC_MAXBUF]; int k=0;
+    for(int i=0;i<st[s].nbind;i++){ barra_zbuf* z=st[s].binds[i].buf; if(!z) return -1; if(z->gpu_h<0){ int dup_=0; for(int j=0;j<k;j++) if(need[j]==z) dup_=1; if(!dup_) need[k++]=z; } }
+    if(k&&barra_gpu3_import(g,need,k)) return -1;
+  }
+  /* 2) CPU-Zugriff schliessen — EINMAL je verschiedenem Puffer (der DMA_BUF_SYNC-ioctl flusht den
+   *    ganzen Puffer, ~60 us; je Binding je Stufe gerufen waren das bei 1024 Stufen ~190 ms) */
+  barra_zbuf** uniq=malloc(sizeof(barra_zbuf*)*(size_t)nstage*ZC_MAXBUF); int nu=0;
+  if(!uniq) return -1;
+  for(int s=0;s<nstage;s++) for(int i=0;i<st[s].nbind;i++){ barra_zbuf* z=st[s].binds[i].buf; int d=0; for(int j=0;j<nu;j++) if(uniq[j]==z){ d=1; break; } if(!d) uniq[nu++]=z; }
+  for(int j=0;j<nu;j++) barra_zc_cpu_end(uniq[j]);
+  uint32_t hdr[6]={GPZ3_MAGIC,5,(uint32_t)nstage,0,0,0}; int rc=-1,desync=0; uint32_t status=1;
+  if(send_hdr_fds(g->sock,hdr,0,0)==0){
+    rc=0;
+    for(int s=0;s<nstage&&rc==0;s++){
+      unsigned char pkt[24+ZC_MAXBUF*16+BARRA_GPU3_MAXPC]; uint32_t* w=(uint32_t*)pkt; size_t n=0;
+      w[0]=(uint32_t)st[s].sh; w[1]=st[s].gx; w[2]=st[s].gy; w[3]=st[s].gz; w[4]=(uint32_t)st[s].nbind; w[5]=st[s].pcsize; n=24;
+      for(int i=0;i<st[s].nbind;i++){ uint32_t* b=(uint32_t*)(pkt+n); b[0]=(uint32_t)st[s].binds[i].buf->gpu_h; b[1]=(uint32_t)(st[s].binds[i].off&0xffffffffu); b[2]=(uint32_t)(st[s].binds[i].off>>32); b[3]=st[s].binds[i].range; n+=16; }
+      if(st[s].pcsize){ memcpy(pkt+n,st[s].pc,st[s].pcsize); n+=st[s].pcsize; }
+      if(wn(g->sock,pkt,n)){ rc=-1; desync=1; }
+    }
+    if(rc==0){ if(rn(g->sock,&status,4)){ rc=-1; desync=1; } else if(status!=0) rc=-1; }
+  } else desync=1;
+  for(int j=0;j<nu;j++) barra_zc_cpu_begin(uniq[j]);
+  free(uniq);
+  if(rc) fprintf(stderr,"barra: GPU3-Batch fehlgeschlagen (status=%u)\n",status);
+  if(desync) gpu3_dead(g);
+  return rc;
+}
+
 /* ================= Zero-Copy (TPU) — Session TPZ2 ================= */
 #define TPZ2_MAGIC 0x54505A32u
 int barra_tpu_open(barra_tpu* t){

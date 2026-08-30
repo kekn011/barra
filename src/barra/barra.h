@@ -90,6 +90,29 @@ int  barra_gpu_dispatch(barra_gpu* g, const uint8_t* spirv, uint32_t slen,
                         uint32_t gx, uint32_t gy, uint32_t gz,
                         barra_zbuf** bufs, int nbuf);                              /* = batch mit 1 Stufe */
 
+/* --- Session v3 (GPZ3) fuer ggml-gpud: Shader EINMAL laden (Handle), Bindings mit
+ *     Offset/Range in grosse Puffer (Tensor-Sichten), Push-Constants je Stufe, bis zu
+ *     BARRA_GPU3_MAXSTAGE Stufen je Roundtrip. Eigene Session (barra_gpu3_open). --- */
+#define BARRA_GPU3_MAXSTAGE 4096
+#define BARRA_GPU3_MAXPC    128
+typedef struct { int sock; int nimported; } barra_gpu3;
+int  barra_gpu3_open(barra_gpu3* g);                                /* 0=ok */
+void barra_gpu3_close(barra_gpu3* g);                               /* gibt Handles + Shader frei */
+int  barra_gpu3_import(barra_gpu3* g, barra_zbuf** bufs, int n);    /* setzt bufs[i]->gpu_h */
+int  barra_gpu3_release(barra_gpu3* g, barra_zbuf** bufs, int n);
+int  barra_gpu3_load(barra_gpu3* g, const uint8_t* spirv, uint32_t slen,
+                     uint32_t nbind, uint32_t pcsize);              /* >=0 Shader-Handle, <0 Fehler */
+int  barra_gpu3_unload(barra_gpu3* g, int sh);
+int  barra_gpu3_flags(barra_gpu3* g, uint32_t flags);              /* Messung: 1 = keine Zwischen-Barrieren (Ergebnisse dann undefiniert) */
+typedef struct { barra_zbuf* buf; uint64_t off; uint32_t range; } barra_gpu3_bind;   /* range 0 = bis Pufferende */
+typedef struct {
+  int sh;                                   /* Shader-Handle aus barra_gpu3_load */
+  uint32_t gx, gy, gz;                      /* Dispatch-Dimensionen */
+  const barra_gpu3_bind* binds; int nbind;  /* Storage-Bindings 0..nbind-1 (nbind == beim Laden) */
+  const void* pc; uint32_t pcsize;          /* Push-Constants (pcsize == beim Laden) */
+} barra_gpu3_stage;
+int  barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* stages, int nstage);   /* 0=ok; ein Roundtrip */
+
 /* ================= Zero-Copy (TPU) =================
  * Dieselben dmabufs als TPU-Tensor-Puffer: tpud importiert sie einmal (ImportBufferByFd,
  * fd_type dmabuf), die TPU rechnet die Inferenz DIREKT hinein/heraus - keine Tensordaten
