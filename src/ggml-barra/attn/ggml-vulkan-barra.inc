@@ -26,7 +26,8 @@ extern "C" {
 static double now_ms_battn() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
 struct battn_qgrp { float isc, osc; int izp, ozp; };
-struct battn_layerq { battn_qgrp q, q2, k, v, o; };   // q2 nur bei gechunktem q (meta v4) belegt
+struct battn_layerq { battn_qgrp q, q2, k, v, o, g, g2; };   // q2 nur bei gechunktem q (meta v4);
+                                                              // g/g2 nur bei gegateter Attention (qwen3.5)
 struct battn_kern { VkPipeline pipe; VkPipelineLayout pll; VkDescriptorSetLayout dsl; VkDescriptorSet ds; };
 struct battn_state {
     int env = -1;
@@ -40,6 +41,12 @@ struct battn_state {
     bool gemma=false; int HDS=0;                       // meta v8 (Gemma-4): 2 Layer-Typen (full HD / swa HDS), KV-Sharing, V-Norm
     std::vector<uint8_t> ltype;                        // je Layer: 0=swa+kv 1=full+kv 2=swa-shared 3=full-shared
     std::vector<uint32_t> midq, midkv, mido;           // Praefixsummen-Modell-IDs (variable Paketzahl je Layer)
+    // Paket-IDs sind POSITIONEN in pkglist.txt. Die feste Arithmetik (4*L o.ae.) stimmt nur,
+    // wenn jede Schicht Pakete hat. Hybride Modelle (qwen3.5: 8 Attention-Schichten von 33)
+    // brechen das. Ist pkglist.txt lesbar, wird daraus eine Tabelle gebaut; sonst bleibt es
+    // bei der Arithmetik (Altkits). (29.8.2026)
+    std::vector<uint32_t> pq, pq2, pg, pg2, pkv, pv, po;
+    bool haspkgmap = false;
     barra_zbuf bKs{},bVs{},bKf{},bVf{};                // persistente f16-Typ-Puffer (KV-Sharing)
     VkBuffer vbKs{},vbVs{},vbKf{},vbVf{};
     VkDeviceMemory vmKs{},vmVs{},vmKf{},vmVf{};
@@ -48,6 +55,9 @@ struct battn_state {
     std::vector<uint8_t> layer_on;
     barra_tpu tpu{};
     barra_zbuf bX{},bQ{},bQ2{},bK{},bV{},bQK{},bSc{},bAoF{},bAo{},bO{},bAux{},bSrow{};
+    barra_zbuf bG{},bG2{};   // Gate-Projektion (qwen3.5): sigmoid(gate) wird NACH der
+                             // Attention und VOR der o-Projektion multipliziert.
+    bool hasgate = false;
     VkInstance inst{}; VkPhysicalDevice phys{}; VkDevice dev{}; VkQueue queue{}; uint32_t qfam=0;
     VkCommandPool pool{}; VkDescriptorPool dp{}; VkFence fen{}; VkCommandBuffer cb{};
     battn_kern krp{},kqk{},ksm{},kav{};
@@ -192,6 +202,7 @@ static void battn_parse_layers(const char * s) {
         if (*s == ',') s++;
     }
 }
+static void battn_pkgmap(const char * dir);   // Definition weiter unten (vor battn_scan)
 static bool battn_init(void) {
     battn_state & st = g_battn;
     if (st.init_done) return st.ready;
@@ -256,7 +267,10 @@ static bool battn_init(void) {
     fclose(f);
     const bool geom_ok = st.gemma
         ? (st.HD == 512 && st.HDS == 256 && st.H == 8 && st.NKV == 1 && st.S == 512)
-        : (st.HD == 128 && st.S == 512 &&
+        // HD=256 fuer den generischen Zweig aufgemacht (qwen3.5): die Kernel bekommen HD als
+        // Spezialisierungskonstante. OB sie 256 tragen, wird am Geraet gegen die reine
+        // GPU-Ausgabe geprueft - nicht angenommen. (29.8.2026)
+        : ((st.HD == 128 || (st.gen && st.HD == 256)) && st.S == 512 &&
            (st.gen ? (st.NKV > 0 && st.H % st.NKV == 0 && st.H <= 32)
                    : ((!st.glm && st.H == 32 && st.NKV == 8) || (st.glm && st.H == 24 && st.NKV == 6))));
     if (!geom_ok) { BALOG("barra-attn: Geometrie %d/%d/%d/%d nicht unterstuetzt\n", st.H, st.NKV, st.HD, st.S); return false; }
@@ -289,8 +303,37 @@ static bool battn_init(void) {
     if (const char * e = getenv("BARRA_ATTN_DIR")) dir = e;
     else { dir = mp; size_t sl = dir.rfind('/'); dir = sl == std::string::npos ? "." : dir.substr(0, sl); }
     if (barra_tpu_open(&st.tpu)) { BALOG("barra-attn: tpud nicht erreichbar (BARRA_SOCK_DIR?) - Offload aus\n"); return false; }
-    const int total_pkg = st.gemma ? (int) (st.mido[st.NL - 1] + 1)
-                                   : (st.gen ? (st.qchunk ? 4 : 3) : (st.glm ? 3 : (st.kvmerge ? 4 : (st.qchunk ? 5 : 4)))) * st.NL;
+    battn_pkgmap(dir.c_str());
+    {   // gate.meta (qwen3.5): je aktiver Schicht die Quantisierung der beiden Gate-Pakete.
+        // Fehlt die Datei, bleibt alles wie bisher - Altkits sind nicht betroffen.
+        char gp[512]; snprintf(gp, sizeof(gp), "%s/gate.meta", dir.c_str());
+        FILE * gf = fopen(gp, "r");
+        if (gf) {
+            char ln[512]; int n_gate = 0;
+            while (fgets(ln, sizeof(ln), gf)) {
+                if (ln[0] == '#') continue;
+                int L = -1; float i1, o1_, i2, o2_; int z1, zo1, z2, zo2;
+                if (sscanf(ln, "%d %f %d %f %d %f %d %f %d", &L, &i1, &z1, &o1_, &zo1, &i2, &z2, &o2_, &zo2) != 9) continue;
+                if (L < 0 || L >= st.NL) continue;
+                st.q[L].g.isc = i1; st.q[L].g.izp = z1; st.q[L].g.osc = o1_; st.q[L].g.ozp = zo1;
+                st.q[L].g2.isc = i2; st.q[L].g2.izp = z2; st.q[L].g2.osc = o2_; st.q[L].g2.ozp = zo2;
+                n_gate++;
+            }
+            fclose(gf);
+            st.hasgate = n_gate > 0;
+            if (st.hasgate) BALOG("barra-attn: gate.meta gelesen, %d Schichten mit Gate\n", n_gate);
+        }
+    }
+    int total_pkg_map = 0;
+    if (st.haspkgmap) {   // gezaehlt statt gerechnet: Teilmengen-Kits haben nicht NL*ppl Pakete
+        const uint32_t NONE = 0xffffffffu;
+        for (int i = 0; i < st.NL; i++)
+            for (uint32_t v : { st.pq[i], st.pq2[i], st.pg[i], st.pg2[i], st.pkv[i], st.pv[i], st.po[i] })
+                if (v != NONE) total_pkg_map++;
+    }
+    const int total_pkg = st.haspkgmap ? total_pkg_map
+                        : (st.gemma ? (int) (st.mido[st.NL - 1] + 1)
+                                    : (st.gen ? (st.qchunk ? 4 : 3) : (st.glm ? 3 : (st.kvmerge ? 4 : (st.qchunk ? 5 : 4)))) * st.NL);
     uint32_t isz = 0, osz = 0, nm = 0;
     if (barra_tpu_info(&st.tpu, 0, &isz, &osz, &nm) || (int) nm < total_pkg) { BALOG("barra-attn: tpud hat %u Modelle, erwartet %d - Offload aus\n", nm, total_pkg); return false; }
     const uint32_t bpe = st.bits / 8;
@@ -309,7 +352,8 @@ static bool battn_init(void) {
     const uint32_t szAux = st.gemma ? (uint32_t) ((2 * st.NL * st.HD + 2 * st.S * st.HDS / 2 + 2 * st.S * st.HD / 2) * 4)
                                     : (2 * st.NL * st.HD + 2 * st.S * st.HD / 2) * 4;
     const uint32_t szSrow = st.S * 4;
-    if (barra_zc_alloc(&st.bX, szX) || barra_zc_alloc(&st.bQ, szQ) || barra_zc_alloc(&st.bK, szK) || (!st.kvmerge && barra_zc_alloc(&st.bV, szKV)) ||
+    if ((st.hasgate && (barra_zc_alloc(&st.bG, szQ) || barra_zc_alloc(&st.bG2, szQ))) ||
+        barra_zc_alloc(&st.bX, szX) || barra_zc_alloc(&st.bQ, szQ) || barra_zc_alloc(&st.bK, szK) || (!st.kvmerge && barra_zc_alloc(&st.bV, szKV)) ||
         barra_zc_alloc(&st.bQK, szQK) || barra_zc_alloc(&st.bSc, szSc) || barra_zc_alloc(&st.bAoF, szAoF) ||
         barra_zc_alloc(&st.bAo, szAo) || barra_zc_alloc(&st.bO, szO) || barra_zc_alloc(&st.bAux, szAux) || barra_zc_alloc(&st.bSrow, szSrow) ||
         (st.qchunk && barra_zc_alloc(&st.bQ2, szQ))) {
@@ -433,6 +477,37 @@ static void * battn_host_ptr(const ggml_tensor * t) {
         !(vb->memory_property_flags & vk::MemoryPropertyFlagBits::eHostCoherent)) return nullptr;
     return (uint8_t *) vb->ptr + vk_tensor_dev_offset(t);
 }
+// pkglist.txt lesen und Name -> Position abbilden. Namensschema des Generators:
+//   q_L<i> / q1_L<i> / q2_L<i> / g1_L<i> / g2_L<i> / kv_L<i> / k_L<i> / v_L<i> / o_L<i>
+static void battn_pkgmap(const char * dir) {
+    battn_state & st = g_battn;
+    st.haspkgmap = false;
+    if (!dir) return;
+    char path[512]; snprintf(path, sizeof(path), "%s/pkglist.txt", dir);
+    FILE * f = fopen(path, "r"); if (!f) return;
+    const uint32_t NONE = 0xffffffffu;
+    st.pq.assign(st.NL, NONE); st.pq2.assign(st.NL, NONE); st.pg.assign(st.NL, NONE);
+    st.pg2.assign(st.NL, NONE); st.pkv.assign(st.NL, NONE); st.pv.assign(st.NL, NONE);
+    st.po.assign(st.NL, NONE);
+    char line[256]; uint32_t pos = 0; int n = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char kind[8] = {0}; int L = -1;
+        if (sscanf(line, "%7[a-z0-9]_L%d", kind, &L) != 2) continue;
+        if (L < 0 || L >= st.NL) { fclose(f); st.haspkgmap = false; return; }
+        if      (!strcmp(kind, "q") || !strcmp(kind, "q1")) st.pq[L]  = pos;
+        else if (!strcmp(kind, "q2"))                       st.pq2[L] = pos;
+        else if (!strcmp(kind, "g") || !strcmp(kind, "g1")) st.pg[L]  = pos;
+        else if (!strcmp(kind, "g2"))                       st.pg2[L] = pos;
+        else if (!strcmp(kind, "kv") || !strcmp(kind, "k")) st.pkv[L] = pos;
+        else if (!strcmp(kind, "v"))                        st.pv[L]  = pos;
+        else if (!strcmp(kind, "o"))                        st.po[L]  = pos;
+        else { continue; }
+        pos++; n++;
+    }
+    fclose(f);
+    st.haspkgmap = n > 0;
+    if (st.haspkgmap) BALOG("barra-attn: pkglist gelesen, %d Pakete zugeordnet\n", n);
+}
 static void battn_scan(ggml_cgraph * cg, std::vector<battn_range> & out) {
     battn_state & st = g_battn;
     std::map<ggml_tensor *, int> idx;
@@ -465,6 +540,19 @@ static void battn_scan(ggml_cgraph * cg, std::vector<battn_range> & out) {
         // src[4] (sinks) nicht unterstuetzt; src[3] (Maske) MUSS vorhanden sein — der
         // Offload wendet feste kausale Maskierung an, eine Null-Maske (bidirektional)
         // waere nicht-kausal. ALiBi/logit-softcap werden weiter unten (fap[1]/fap[2]) abgelehnt.
+        // qwen3.5: gegatete Attention - zwischen FA und o-Projektion steht
+        // ggml_mul(attn, sigmoid(gate)). Nur ueberspringen reicht NICHT: beide Knoten
+        // muessen in den Bereich beansprucht werden, sonst gilt er als "nicht sauber"
+        // und der Offload faellt still auf den Vulkan-Pfad zurueck. Das Gate selbst
+        // rechnet die Laufzeit aus den g-Paketen (st.hasgate), deshalb nur dann.
+        if (st.hasgate && fa && fa->op == GGML_OP_MUL) {
+            ggml_tensor * a0 = battn_skipv(fa->src[0], nullptr);
+            ggml_tensor * s0 = battn_skipv(fa->src[1], nullptr);
+            if (a0 && a0->op == GGML_OP_FLASH_ATTN_EXT && s0) {
+                claim.insert(fa); claim.insert(s0);
+                fa = a0;
+            }
+        }
         if (!fa || fa->op != GGML_OP_FLASH_ATTN_EXT || fa->src[4] || !fa->src[3]) continue;
         claim.insert(fa);
         ggml_tensor * rq = battn_skipv(fa->src[0], &claim);
@@ -664,12 +752,39 @@ static bool battn_exec_gemma(const battn_range & r) {
     vkWaitForFences(st.dev, 1, &st.fen, VK_TRUE, UINT64_MAX);
     double t3 = now_ms_battn();
     barra_zc_cpu_begin(&st.bAoF); barra_zc_cpu_begin(&st.bAo);
+    if (st.hasgate) { barra_zc_cpu_begin(&st.bG); barra_zc_cpu_begin(&st.bG2); }
 #if defined(__aarch64__)
     { const __fp16 * af = (const __fp16 *) st.bAoF.map;
       int16_t * zao = (int16_t *) st.bAo.map;
       memset(zao + (size_t) T * qw, 0, (size_t) (S - T) * qw * 2);
+      // Gegatete Attention (qwen3.5): a * sigmoid(gate) MUSS vor Maximumsuche und
+      // Zeilenskala passieren - das o-Paket ist auf den GEGATETEN Tensor kalibriert
+      // (der Kalibrier-Dump nimmt genau diesen ab). Die beiden Gate-Haelften liegen
+      // wie q1/q2 als Kopf-Haelften vor, je Zeile HH = qw/2 Werte.
+      const int HH = qw / 2;
+      const int16_t * g1 = st.hasgate ? (const int16_t *) st.bG.map : nullptr;
+      const int16_t * g2 = st.hasgate ? (const int16_t *) st.bG2.map : nullptr;
+      const float gs1 = Q.g.osc, gs2 = Q.g2.osc;
+      const int gz1 = Q.g.ozp, gz2 = Q.g2.ozp;
       battn_par(T, [&](int t) {
           const __fp16 * ar = af + (size_t) t * qw; int16_t * zr = zao + (size_t) t * qw;
+          if (g1) {
+              static thread_local std::vector<float> gt;
+              if ((int) gt.size() < qw) gt.resize(qw);
+              const int16_t * gr1 = g1 + (size_t) t * HH;
+              const int16_t * gr2 = g2 + (size_t) t * HH;
+              float mxg = 0;
+              for (int d = 0; d < qw; d++) {
+                  const float g = d < HH ? ((float) gr1[d] - gz1) * gs1 : ((float) gr2[d - HH] - gz2) * gs2;
+                  const float a = (float) ar[d] / (1.0f + expf(-g));
+                  gt[d] = a; const float aa = fabsf(a); if (aa > mxg) mxg = aa;
+              }
+              const float srg = std::max(1.0f, mxg / (32767.0f * Q.o.isc));
+              st.srow_c[t] = srg;
+              const float kg = 1.0f / (srg * Q.o.isc);
+              for (int d = 0; d < qw; d++) { int v = (int) lrintf(gt[d] * kg); zr[d] = (int16_t) (v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
+              return;
+          }
           float mx = 0; for (int d = 0; d < qw; d++) { float a = fabsf((float) ar[d]); if (a > mx) mx = a; }
           const float sr = std::max(1.0f, mx / (32767.0f * Q.o.isc));
           st.srow_c[t] = sr;
@@ -767,31 +882,45 @@ static bool battn_exec(const battn_range & r) {
     barra_zc_cpu_end(&st.bX); barra_zc_cpu_end(&st.bSrow);
     (void) QMAXA;
     double t1 = now_ms_battn();
+    // Paket-IDs: aus pkglist.txt, wenn vorhanden (Teilmengen-Kits), sonst die alte Arithmetik.
+    const uint32_t PNONE = 0xffffffffu;
+    auto PID = [&](const std::vector<uint32_t> & tab, uint32_t fb) -> uint32_t {
+        if (!st.haspkgmap) return fb;
+        const uint32_t v = tab[r.L];
+        return v;
+    };
     // TPU q(/q2)/k/v. k/v-Pakete erwarten dieselbe Eingangsquantisierung (gleiche Kalibrierdaten).
     if (st.gen && st.qchunk) {
-        if (barra_tpu_infer(&st.tpu, (uint32_t) (4 * r.L), &st.bX, &st.bQ, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (4 * r.L + 1), &st.bX, &st.bQ2, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (4 * r.L + 2), &st.bX, &st.bK, 0)) {
+        if (barra_tpu_infer(&st.tpu, PID(st.pq, (uint32_t) (4 * r.L)), &st.bX, &st.bQ, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pq2, (uint32_t) (4 * r.L + 1)), &st.bX, &st.bQ2, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pkv, (uint32_t) (4 * r.L + 2)), &st.bX, &st.bK, 0)) {
             BALOG("barra-attn: L%d TPU q1/q2/kv fehlgeschlagen\n", r.L); return false; }
+        if (st.hasgate) {   // Gate-Projektion aus demselben Eingang (gleiche Kalibrierdaten wie q)
+            if (st.pg[r.L] == PNONE || st.pg2[r.L] == PNONE) {
+                BALOG("barra-attn: L%d Gate-Pakete fehlen\n", r.L); return false; }
+            if (barra_tpu_infer(&st.tpu, st.pg[r.L], &st.bX, &st.bG, 0) ||
+                barra_tpu_infer(&st.tpu, st.pg2[r.L], &st.bX, &st.bG2, 0)) {
+                BALOG("barra-attn: L%d TPU gate fehlgeschlagen\n", r.L); return false; }
+        }
     } else if (st.glm || st.gen) {
-        if (barra_tpu_infer(&st.tpu, (uint32_t) (3 * r.L), &st.bX, &st.bQ, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (3 * r.L + 1), &st.bX, &st.bK, 0)) {
+        if (barra_tpu_infer(&st.tpu, PID(st.pq, (uint32_t) (3 * r.L)), &st.bX, &st.bQ, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pkv, (uint32_t) (3 * r.L + 1)), &st.bX, &st.bK, 0)) {
             BALOG("barra-attn: L%d TPU q/kv fehlgeschlagen\n", r.L); return false; }
     } else if (st.kvmerge) {
-        if (barra_tpu_infer(&st.tpu, (uint32_t) (4 * r.L), &st.bX, &st.bQ, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (4 * r.L + 1), &st.bX, &st.bQ2, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (4 * r.L + 2), &st.bX, &st.bK, 0)) {
+        if (barra_tpu_infer(&st.tpu, PID(st.pq, (uint32_t) (4 * r.L)), &st.bX, &st.bQ, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pq2, (uint32_t) (4 * r.L + 1)), &st.bX, &st.bQ2, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pkv, (uint32_t) (4 * r.L + 2)), &st.bX, &st.bK, 0)) {
             BALOG("barra-attn: L%d TPU q1/q2/kv fehlgeschlagen\n", r.L); return false; }
     } else if (st.qchunk) {
-        if (barra_tpu_infer(&st.tpu, (uint32_t) (5 * r.L), &st.bX, &st.bQ, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (5 * r.L + 1), &st.bX, &st.bQ2, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (5 * r.L + 2), &st.bX, &st.bK, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (5 * r.L + 3), &st.bX, &st.bV, 0)) {
+        if (barra_tpu_infer(&st.tpu, PID(st.pq, (uint32_t) (5 * r.L)), &st.bX, &st.bQ, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pq2, (uint32_t) (5 * r.L + 1)), &st.bX, &st.bQ2, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pkv, (uint32_t) (5 * r.L + 2)), &st.bX, &st.bK, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pv, (uint32_t) (5 * r.L + 3)), &st.bX, &st.bV, 0)) {
             BALOG("barra-attn: L%d TPU q1/q2/k/v fehlgeschlagen\n", r.L); return false; }
     } else {
-        if (barra_tpu_infer(&st.tpu, (uint32_t) (4 * r.L), &st.bX, &st.bQ, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (4 * r.L + 1), &st.bX, &st.bK, 0) ||
-            barra_tpu_infer(&st.tpu, (uint32_t) (4 * r.L + 2), &st.bX, &st.bV, 0)) {
+        if (barra_tpu_infer(&st.tpu, PID(st.pq, (uint32_t) (4 * r.L)), &st.bX, &st.bQ, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pkv, (uint32_t) (4 * r.L + 1)), &st.bX, &st.bK, 0) ||
+            barra_tpu_infer(&st.tpu, PID(st.pv, (uint32_t) (4 * r.L + 2)), &st.bX, &st.bV, 0)) {
             BALOG("barra-attn: L%d TPU q/k/v fehlgeschlagen\n", r.L); return false; }
     }
     double t2 = now_ms_battn();
@@ -871,8 +1000,9 @@ static bool battn_exec(const battn_range & r) {
 #error "battn: aarch64 only"
 #endif
     barra_zc_cpu_end(&st.bAoF); barra_zc_cpu_end(&st.bAo);
+    if (st.hasgate) { barra_zc_cpu_end(&st.bG); barra_zc_cpu_end(&st.bG2); }
     // TPU o (letztes Modell des Layers)
-    const uint32_t omid = (st.gen && st.qchunk) ? (uint32_t) (4 * r.L + 3) : ((st.glm || st.gen) ? (uint32_t) (3 * r.L + 2) : (st.kvmerge ? (uint32_t) (4 * r.L + 3) : (st.qchunk ? (uint32_t) (5 * r.L + 4) : (uint32_t) (4 * r.L + 3))));
+    const uint32_t omid = st.haspkgmap ? st.po[r.L] : (st.gen && st.qchunk) ? (uint32_t) (4 * r.L + 3) : ((st.glm || st.gen) ? (uint32_t) (3 * r.L + 2) : (st.kvmerge ? (uint32_t) (4 * r.L + 3) : (st.qchunk ? (uint32_t) (5 * r.L + 4) : (uint32_t) (4 * r.L + 3))));
     if (barra_tpu_infer(&st.tpu, omid, &st.bAo, &st.bO, 0)) { BALOG("barra-attn: L%d TPU o fehlgeschlagen\n", r.L); return false; }
     double t4 = now_ms_battn();
     // o zurueckschreiben (per-Zeilen-Skala), KV-Handoff
@@ -969,18 +1099,38 @@ static void battn_cal_scan(ggml_cgraph * cg, std::vector<battn_calrange> & out) 
         if (wo->op != GGML_OP_MUL_MAT) continue;
         int L = battn_wname(wo->src[0], "output");
         if (L < 0) continue;
+        const bool caldbg = getenv("BARRA_CAL_DBG") != nullptr;
         ggml_tensor * fa = battn_skipv(wo->src[1], nullptr);
-        if (!fa || fa->op != GGML_OP_FLASH_ATTN_EXT || fa->type != GGML_TYPE_F32) continue;
+        if (caldbg) BALOG("cal-scan: L%d o-proj, src1 op=%d name=%s\n", L, fa ? (int) fa->op : -1, fa ? fa->name : "(null)");
+        // Gegatete Attention (qwen3.5/arch qwen35, src/models/qwen35.cpp): zwischen
+        // FLASH_ATTN_EXT und der o-Projektion steht ggml_mul(attn, sigmoid(gate)).
+        // Ohne diesen Schritt bricht die Kette und der Scanner findet NIE einen
+        // FA-Knoten - am 29.8.2026 an qwen38-4b-distill gemessen: 0 Dump-Dateien
+        // statt 8, waehrend qwen3-4b (ungegatet) 72 lieferte.
+        // ctx_t bleibt der GEGATETE Tensor: genau der ist der Eingang der
+        // o-Projektion, also das, worauf das o-Package kalibriert werden muss.
+        ggml_tensor * ctx_t = fa;
+        if (fa && fa->op == GGML_OP_MUL) {
+            ggml_tensor * a0 = battn_skipv(fa->src[0], nullptr);
+            if (a0 && a0->op == GGML_OP_FLASH_ATTN_EXT) fa = a0;
+        }
+        if (!fa || fa->op != GGML_OP_FLASH_ATTN_EXT || fa->type != GGML_TYPE_F32) {
+            if (caldbg) BALOG("cal-scan: L%d KEIN FA (op=%d typ=%d)\n", L, fa ? (int) fa->op : -1, fa ? (int) fa->type : -1);
+            continue;
+        }
         ggml_tensor * t = battn_skipv(fa->src[0], nullptr);
         int guard = 0;
         while (t && t->op != GGML_OP_MUL_MAT && guard++ < 8 &&
                (t->op == GGML_OP_ROPE || t->op == GGML_OP_ADD || t->op == GGML_OP_MUL || t->op == GGML_OP_RMS_NORM))
             t = battn_skipv(t->src[0], nullptr);
-        if (!t || t->op != GGML_OP_MUL_MAT || battn_wname(t->src[0], "q") != L) continue;
+        if (!t || t->op != GGML_OP_MUL_MAT || battn_wname(t->src[0], "q") != L) {
+            if (caldbg) BALOG("cal-scan: L%d q-Weg bricht (op=%d name=%s)\n", L, t ? (int) t->op : -1, t ? t->name : "(null)");
+            continue;
+        }
         if (t->src[1]->type != GGML_TYPE_F32 || !ggml_is_contiguous(t->src[1])) continue;
-        auto iw = idx.find(t); auto ifa = idx.find(fa);
+        auto iw = idx.find(t); auto ifa = idx.find(ctx_t);   // Ende = GEGATETER Tensor
         if (iw == idx.end() || ifa == idx.end() || ifa->second < iw->second) continue;
-        battn_calrange r; r.start = iw->second; r.end = ifa->second; r.L = L; r.hnorm = t->src[1]; r.fa = fa;
+        battn_calrange r; r.start = iw->second; r.end = ifa->second; r.L = L; r.hnorm = t->src[1]; r.fa = ctx_t;
         out.push_back(r);
         // KEIN Index-Ruecksetzer: fa liegt VOR wo — ein Ruecksprung war die Endlosschleife,
         // die am 23.8. ZWEI OOM-Kernel-Panics ausgeloest hat. Die wo-Schleife laeuft einfach weiter.
@@ -1014,19 +1164,32 @@ static ggml_status battn_caldump_run(const char * cdir, ggml_backend_t backend, 
           if (stt != GGML_STATUS_SUCCESS) return stt; }
         ggml_vk_synchronize(ctx);
         if (want && !h.empty()) {
-            const int HD_ = (int) r.fa->ne[0], H_ = (int) r.fa->ne[1];
+            // Zwei Geometrien: ohne Gate zeigt r.fa auf den FLASH_ATTN_EXT-Knoten [HD,H,T];
+            // bei gegateter Attention (qwen3.5) auf den gegateten Tensor, den build_attn
+            // schon als 2D [D,T] zurueckgibt. Beide liefern dieselben D Werte je Token -
+            // genau das, worauf das o-Package kalibriert wird. Die 2D-Form fehlte, deshalb
+            // wurde am 29.8.2026 trotz gefundener Ranges nichts geschrieben.
+            const bool three_d = (int) r.fa->ne[2] == T;
+            const int HD_ = three_d ? (int) r.fa->ne[0] : 0;
+            const int H_  = three_d ? (int) r.fa->ne[1] : 0;
+            const int D2  = three_d ? HD_ * H_ : (int) r.fa->ne[0];
             const char * fp = (const char *) battn_host_ptr(r.fa);
-            if (fp && (int) r.fa->ne[2] == T) {
-                std::vector<float> cx((size_t) T * H_ * HD_);
-                for (int t = 0; t < T; t++) for (int hh = 0; hh < H_; hh++)
-                    memcpy(&cx[((size_t) t * H_ + hh) * HD_], fp + t * r.fa->nb[2] + hh * r.fa->nb[1], (size_t) HD_ * 4);
+            if (fp && (three_d || ((int) r.fa->ne[1] == T && r.fa->ne[2] == 1))) {
+                std::vector<float> cx((size_t) T * D2);
+                if (three_d) {
+                    for (int t = 0; t < T; t++) for (int hh = 0; hh < H_; hh++)
+                        memcpy(&cx[((size_t) t * H_ + hh) * HD_], fp + t * r.fa->nb[2] + hh * r.fa->nb[1], (size_t) HD_ * 4);
+                } else {
+                    for (int t = 0; t < T; t++)
+                        memcpy(&cx[(size_t) t * D2], fp + (size_t) t * r.fa->nb[1], (size_t) D2 * 4);
+                }
                 char pa[512];
                 snprintf(pa, 512, "%s/cal_h_L%d.bin", cdir, r.L);
                 FILE * f = fopen(pa, "wb"); if (f) { fwrite(h.data(), 4, h.size(), f); fclose(f); }
                 snprintf(pa, 512, "%s/cal_ctx_L%d.bin", cdir, r.L);
                 f = fopen(pa, "wb"); if (f) { fwrite(cx.data(), 4, cx.size(), f); fclose(f); }
                 done.insert(r.L);
-                BALOG("barra-attn: CALDUMP L%d T=%d D=%d H=%d HD=%d -> %s\n", r.L, T, D, H_, HD_, cdir);
+                BALOG("barra-attn: CALDUMP L%d T=%d D=%d H=%d HD=%d D2=%d -> %s\n", r.L, T, D, H_, HD_, D2, cdir);
             }
         }
         cur = r.end + 1;
@@ -1038,8 +1201,337 @@ static ggml_status battn_caldump_run(const char * cdir, ggml_backend_t backend, 
     return GGML_STATUS_SUCCESS;
 }
 
+// ---------- FFN-Offload: Bereichs-Scanner ----------
+// Der Ablaufplaner kann uns die FFN nicht geben, wenn die Gewichte in Vulkan-Puffern liegen
+// (29.8.2026 gemessen: separates ggml-Backend bekommt 0 Aufrufe bei -ngl 99). Also derselbe
+// Weg wie bei der Attention: den Bereich im Graphen erkennen und selbst rechnen.
+// Form je Layer:  up = MUL_MAT(ffn_up, h) ; gate = MUL_MAT(ffn_gate, h)
+//                 act = GLU(gate, up) oder SILU(gate)*up ; down = MUL_MAT(ffn_down, act)
+struct bffn_range { int start, end, L, T; ggml_tensor * h; ggml_tensor * down; };
+static int bffn_kind(const ggml_tensor * w, int * layer) {   // 0=up 1=gate 2=down
+    if (!w) return -1;
+    int L = -1; char k[24] = { 0 };
+    if (sscanf(w->name, "blk.%d.ffn_%23[a-z_].weight", &L, k) != 2) return -1;
+    if (layer) *layer = L;
+    if (!strcmp(k, "up")) return 0;
+    if (!strcmp(k, "gate")) return 1;
+    if (!strcmp(k, "down")) return 2;
+    return -1;
+}
+static void bffn_scan(ggml_cgraph * cg, std::vector<bffn_range> & out) {
+    const bool dbg = getenv("BARRA_FFN_SCAN_DBG") != nullptr;
+    std::map<ggml_tensor *, int> idx;
+    for (int i = 0; i < cg->n_nodes; i++) idx[cg->nodes[i]] = i;
+    for (int i = 0; i < cg->n_nodes; i++) {
+        ggml_tensor * dn = cg->nodes[i];
+        if (dn->op != GGML_OP_MUL_MAT) continue;
+        int L = -1;
+        if (bffn_kind(dn->src[0], &L) != 2) continue;   // an der down-Projektion aufhaengen
+        std::set<ggml_tensor *> claim; claim.insert(dn);
+        ggml_tensor * act = battn_skipv(dn->src[1], &claim);
+        if (!act) continue;
+        ggml_tensor * g = nullptr, * u = nullptr;
+        if (act->op == GGML_OP_GLU) { claim.insert(act);
+            g = battn_skipv(act->src[0], &claim); u = act->src[1] ? battn_skipv(act->src[1], &claim) : nullptr; }
+        else if (act->op == GGML_OP_MUL) { claim.insert(act);
+            ggml_tensor * a0 = battn_skipv(act->src[0], &claim);
+            ggml_tensor * a1 = battn_skipv(act->src[1], &claim);
+            if (a0 && a0->op == GGML_OP_UNARY) { claim.insert(a0); g = battn_skipv(a0->src[0], &claim); u = a1; }
+            else if (a1 && a1->op == GGML_OP_UNARY) { claim.insert(a1); g = battn_skipv(a1->src[0], &claim); u = a0; }
+        }
+        if (!g || !u) { if (dbg) BALOG("bffn: L%d act-Form unbekannt (op=%d)\n", L, (int) act->op); continue; }
+        int Lg = -1, Lu = -1;
+        if (g->op != GGML_OP_MUL_MAT || bffn_kind(g->src[0], &Lg) != 1 || Lg != L) { if (dbg) BALOG("bffn: L%d gate passt nicht\n", L); continue; }
+        if (u->op != GGML_OP_MUL_MAT || bffn_kind(u->src[0], &Lu) != 0 || Lu != L) { if (dbg) BALOG("bffn: L%d up passt nicht\n", L); continue; }
+        claim.insert(g); claim.insert(u);
+        if (g->src[1] != u->src[1]) { if (dbg) BALOG("bffn: L%d gate/up haben verschiedene Eingaenge\n", L); continue; }
+        ggml_tensor * h = g->src[1];
+        if (h->type != GGML_TYPE_F32 || !ggml_is_contiguous(h) || h->ne[2] != 1) continue;
+        const int T = (int) h->ne[1];
+        int lo = INT32_MAX, hi = -1;
+        for (ggml_tensor * t : claim) { auto it = idx.find(t); if (it != idx.end()) { lo = std::min(lo, it->second); hi = std::max(hi, it->second); } }
+        if (hi < 0) continue;
+        bool clean = true;
+        for (int j = lo; j <= hi && clean; j++) {
+            ggml_tensor * n = cg->nodes[j];
+            if ((n->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) continue;
+            if (n->op == GGML_OP_NONE || n->op == GGML_OP_RESHAPE || n->op == GGML_OP_VIEW || n->op == GGML_OP_PERMUTE || n->op == GGML_OP_TRANSPOSE) continue;
+            if (!claim.count(n)) clean = false;
+        }
+        if (!clean) { if (dbg) BALOG("bffn: L%d Bereich %d..%d nicht sauber\n", L, lo, hi); continue; }
+        bffn_range r; r.start = lo; r.end = hi; r.L = L; r.T = T; r.h = h; r.down = dn;
+        out.push_back(r);
+        if (dbg) BALOG("bffn: L%d Bereich %d..%d T=%d OK\n", L, lo, hi, T);
+        i = hi;
+    }
+}
+
+// FFN-Eingaenge abnehmen (BARRA_FFN_CALDUMP=<dir>): je Layer der Tensor, der in
+// blk.N.ffn_gate.weight hineingeht - also das, worauf ein FFN-Package kalibriert werden
+// muss. Der alte Weg (numpy-Nachbau des ganzen Modells in gen_ffn_pkgs.py) scheitert bei
+// hybriden Modellen, weil er die DeltaNet-Schichten nachbauen muesste. (29.8.2026)
+static void battn_ffn_caldump(const char * cdir, ggml_backend_t backend, ggml_cgraph * cgraph) {
+    static std::set<int> done;
+    ggml_backend_vk_context * ctx = (ggml_backend_vk_context *) backend->context;
+    ggml_vk_synchronize(ctx);
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        ggml_tensor * n = cgraph->nodes[i];
+        if (n->op != GGML_OP_MUL_MAT || !n->src[0] || !n->src[1]) continue;
+        int L = -1; char kind[24] = { 0 };
+        if (sscanf(n->src[0]->name, "blk.%d.ffn_%23[a-z_].weight", &L, kind) != 2) continue;
+        if (strcmp(kind, "gate") != 0 || done.count(L)) continue;
+        ggml_tensor * h = n->src[1];
+        if (h->type != GGML_TYPE_F32 || h->ne[2] != 1) continue;
+        const int T = (int) h->ne[1], D = (int) h->ne[0];
+        if (T < 32) continue;
+        const char * hp = (const char *) battn_host_ptr(h);
+        if (!hp) continue;
+        std::vector<float> buf((size_t) T * D);
+        for (int t = 0; t < T; t++) memcpy(&buf[(size_t) t * D], hp + (size_t) t * h->nb[1], (size_t) D * 4);
+        char pa[512]; snprintf(pa, sizeof(pa), "%s/cal_ffn_L%d.bin", cdir, L);
+        FILE * f = fopen(pa, "wb"); if (f) { fwrite(buf.data(), 4, buf.size(), f); fclose(f); done.insert(L);
+            BALOG("barra-attn: FFN-CALDUMP L%d T=%d D=%d -> %s\n", L, T, D, cdir); }
+    }
+}
+
+// ---------- FFN-Offload: Zustand und Ausfuehrung ----------
+// Ein Paket je Layer rechnet f(h) = Wd(silu(Wg h) * (Wu h)) fuer B Zeilen. Der Prefill wird
+// in Kacheln zu B Zeilen zerlegt. Quantisierung mit der festen Kalibrierskala aus ffn.meta.
+struct bffn_state {
+    int env = -1; bool ready = false, open = false;
+    int D = 0, FF = 0, B = 0, bits = 0, NL = 0;
+    std::vector<battn_qgrp> q;
+    barra_tpu tpu{}; barra_zbuf bH{}, bY{}, bH2{}, bY2{};   // zwei Saetze: waehrend die TPU
+                                                            // Kachel i rechnet, bereitet die CPU i+1 vor
+    long long tiles = 0; double ms_tpu = 0, ms_glue = 0;
+};
+static bffn_state g_bffn;
+static bool bffn_init() {
+    bffn_state & s = g_bffn;
+    if (s.env >= 0) return s.ready;
+    s.env = 0;
+    const char * mp = getenv("BARRA_FFN_META"); if (!mp) return false;
+    FILE * f = fopen(mp, "r"); if (!f) { BALOG("bffn: meta %s nicht lesbar\n", mp); return false; }
+    // ZEILENWEISE lesen: der Parser im alten Backend liest den Kopfrest mit fgets und frisst
+    // dabei die erste Datenzeile, wenn die optionalen Felder fehlen (29.8.2026 getreten).
+    char line[512];
+    if (!fgets(line, sizeof line, f) || sscanf(line, "%d %d %d %d %d", &s.D, &s.FF, &s.B, &s.bits, &s.NL) != 5) {
+        fclose(f); BALOG("bffn: meta-Kopf ungueltig\n"); return false; }
+    if (s.D < 1 || s.D > 65536 || s.FF < 1 || s.FF > 262144 || s.B < 1 || s.B > 4096 || s.NL < 1 || s.NL > 512 || s.bits != 16) {
+        fclose(f); BALOG("bffn: meta-Kopf unplausibel (D=%d FF=%d B=%d bits=%d NL=%d)\n", s.D, s.FF, s.B, s.bits, s.NL); return false; }
+    s.q.resize(s.NL);
+    for (int i = 0; i < s.NL; i++) {
+        if (!fgets(line, sizeof line, f) || sscanf(line, "%f %d %f %d", &s.q[i].isc, &s.q[i].izp, &s.q[i].osc, &s.q[i].ozp) != 4) {
+            fclose(f); BALOG("bffn: meta Layer %d ungueltig\n", i); return false; } }
+    fclose(f);
+    if (barra_tpu_open(&s.tpu)) { BALOG("bffn: tpud nicht erreichbar (BARRA_SOCK_DIR?)\n"); return false; }
+    s.open = true;
+    const uint32_t sz = (uint32_t) s.B * (uint32_t) s.D * 2;
+    if (barra_zc_alloc(&s.bH, sz) || barra_zc_alloc(&s.bY, sz) ||
+        barra_zc_alloc(&s.bH2, sz) || barra_zc_alloc(&s.bY2, sz)) { BALOG("bffn: Puffer fehlgeschlagen\n"); return false; }
+    s.ready = true;
+    BALOG("bffn: AKTIV D=%d FF=%d B=%d bits=%d NL=%d\n", s.D, s.FF, s.B, s.bits, s.NL);
+    return true;
+}
+// Fliessband: submit(i) -> waehrenddessen Kachel i+1 quantisieren -> wait(i) -> dequantisieren.
+// barra erlaubt genau EINE offene Abgabe je Verbindung, und zwischen submit und wait duerfen
+// die uebergebenen Puffer nicht angefasst werden - daher zwei Puffersaetze im Wechsel.
+// hsrc/ydst: private Puffer (Zeilen dicht, Schrittweite D). Werden sie uebergeben, fasst
+// diese Funktion die Vulkan-Tensoren NICHT an - noetig bei Zeilenaufteilung, weil der
+// Allocator Ein- und Ausgang versetzt uebereinanderlegen darf (29.8.2026 gemessen).
+static bool bffn_exec(const bffn_range & r, int row0 = 0, int row1 = -1,
+                      const float * hsrc = nullptr, float * ydst = nullptr) {
+    bffn_state & s = g_bffn;
+    if (!s.ready || r.L < 0 || r.L >= s.NL) return false;
+    const int D = s.D, B = s.B;
+    if (row1 < 0) row1 = r.T;
+    const int T = row1 - row0;   // nur dieser Zeilenausschnitt geht ueber die TPU
+    if (T <= 0) return true;
+    if ((int) r.h->ne[0] != D || (int) r.down->ne[0] != D) return false;
+    const char * hp = hsrc ? nullptr : (const char *) battn_host_ptr(r.h);
+    char * yp = ydst ? nullptr : (char *) battn_host_ptr(r.down);
+    if ((!hsrc && !hp) || (!ydst && !yp)) return false;
+    const size_t hstride = hsrc ? (size_t) D * 4 : r.h->nb[1];
+    const size_t ystride = ydst ? (size_t) D * 4 : r.down->nb[1];
+    const char * hbase = hsrc ? (const char *) hsrc : hp;
+    char * ybase = ydst ? (char *) ydst : yp;
+    const int hoff = hsrc ? 0 : row0;   // private Puffer beginnen bei Zeile 0
+    const int yoff = ydst ? 0 : row0;
+    const battn_qgrp & Qz = s.q[r.L];
+    const float ki = 1.0f / Qz.isc;
+    barra_zbuf * IN[2] = { &s.bH, &s.bH2 };
+    barra_zbuf * OUT[2] = { &s.bY, &s.bY2 };
+    auto fill = [&](int slot, int t0, int nrow) {
+        barra_zc_cpu_begin(IN[slot]);
+        int16_t * zi = (int16_t *) IN[slot]->map;
+        battn_par(nrow, [&](int t) {
+            const float * hr = (const float *) (hbase + (size_t) (hoff + t0 + t) * hstride);
+            int16_t * zr = zi + (size_t) t * D;
+            for (int d = 0; d < D; d++) { int v = (int) lrintf(hr[d] * ki) + Qz.izp;
+                zr[d] = (int16_t) (v > 32767 ? 32767 : v < -32768 ? -32768 : v); } });
+        if (nrow < B) memset(zi + (size_t) nrow * D, 0, (size_t) (B - nrow) * D * 2);
+        barra_zc_cpu_end(IN[slot]);
+    };
+    auto drain = [&](int slot, int t0, int nrow) {
+        barra_zc_cpu_begin(OUT[slot]);
+        const int16_t * zo = (const int16_t *) OUT[slot]->map;
+        battn_par(nrow, [&](int t) {
+            const int16_t * zr = zo + (size_t) t * D;
+            float * yr = (float *) (ybase + (size_t) (yoff + t0 + t) * ystride);
+            for (int d = 0; d < D; d++) yr[d] = ((float) zr[d] - Qz.ozp) * Qz.osc; });
+        barra_zc_cpu_end(OUT[slot]);
+    };
+    const int ntile = (T + B - 1) / B;
+    int slot = 0;
+    double t_start = now_ms_battn();
+    fill(slot, 0, (B <= T) ? B : T);
+    if (barra_tpu_submit(&s.tpu, (uint32_t) r.L, IN[slot], OUT[slot])) {
+        BALOG("bffn: L%d submit fehlgeschlagen\n", r.L); return false; }
+    for (int i = 0; i < ntile; i++) {
+        const int t0 = i * B, nrow = (t0 + B <= T) ? B : (T - t0);
+        const int nxt = (slot + 1) & 1;
+        const int t0n = (i + 1) * B, nrown = (t0n + B <= T) ? B : (T - t0n);
+        if (i + 1 < ntile) fill(nxt, t0n, nrown);   // CPU-Arbeit WAEHREND die TPU rechnet
+        uint32_t us = 0;
+        if (barra_tpu_wait(&s.tpu, IN[slot], OUT[slot], &us)) {
+            BALOG("bffn: L%d wait fehlgeschlagen\n", r.L); return false; }
+        if (i + 1 < ntile && barra_tpu_submit(&s.tpu, (uint32_t) r.L, IN[nxt], OUT[nxt])) {
+            BALOG("bffn: L%d submit(%d) fehlgeschlagen\n", r.L, i + 1); return false; }
+        drain(slot, t0, nrow);
+        s.tiles++; s.ms_tpu += us / 1000.0;
+        slot = nxt;
+    }
+    s.ms_glue += (now_ms_battn() - t_start) - 0.0;
+    return true;
+}
+
 // ---------- Wrapper um graph_compute ----------
 static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
+    // Diagnoselauf des FFN-Scanners: nur schauen, nichts rechnen (BARRA_FFN_SCAN_DBG=1).
+    if (getenv("BARRA_FFN_SCAN_DBG")) {
+        static int shown = 0;
+        if (shown < 2) { shown++;
+            std::vector<bffn_range> fr; bffn_scan(cgraph, fr);
+            BALOG("bffn: Graph mit %d Knoten -> %d FFN-Bereiche\n", cgraph->n_nodes, (int) fr.size());
+        }
+    }
+    static const char * fdir = getenv("BARRA_FFN_CALDUMP");
+    if (fdir) {   // erst rechnen lassen, dann die FFN-Eingaenge abnehmen
+        ggml_status st_ = ggml_backend_vk_graph_compute_impl(backend, cgraph);
+        if (st_ == GGML_STATUS_SUCCESS) battn_ffn_caldump(fdir, backend, cgraph);
+        return st_;
+    }
+    // FFN-Offload: Bereiche selbst rechnen, den Rest des Graphen wie gehabt. Rueckfall
+    // je Bereich, falls etwas nicht passt - dann rechnet Vulkan ihn normal.
+    if (bffn_init()) {
+        static int fmin = -1;
+        if (fmin < 0) { const char * e = getenv("BARRA_FFN_MIN_BATCH"); fmin = e ? atoi(e) : g_bffn.B; }
+        std::vector<bffn_range> fr; bffn_scan(cgraph, fr);
+        std::vector<bffn_range> use;
+        for (const bffn_range & r : fr) if (r.T >= fmin && r.L < g_bffn.NL) use.push_back(r);
+        if (!use.empty()) {
+            ggml_backend_vk_context * vctx = (ggml_backend_vk_context *) backend->context;
+            int cur = 0;
+            for (const bffn_range & r : use) {
+                if (r.start > cur) {
+                    ggml_cgraph sub = *cgraph; sub.nodes = cgraph->nodes + cur; sub.n_nodes = r.start - cur;
+                    ggml_status st_ = ggml_backend_vk_graph_compute_impl(backend, &sub);
+                    if (st_ != GGML_STATUS_SUCCESS) return st_;
+                }
+                ggml_vk_synchronize(vctx);
+                // Zeilenaufteilung: die FFN ist zeilenweise unabhaengig, also koennen GPU und TPU
+                // DIESELBE Schicht gleichzeitig rechnen - verschiedene Token. Innerhalb eines
+                // Graphen ist das die einzige echte Ueberlappung: die naechste Schicht haengt an
+                // dieser FFN, es gibt sonst nichts Unabhaengiges. Vulkans graph_compute blockiert,
+                // deshalb laeuft die TPU-Haelfte in einem eigenen Thread.
+                // BARRA_FFN_SPLIT = Prozent der Zeilen fuer die TPU (Default 100 = alles TPU).
+                static int spct = -1;
+                if (spct < 0) { const char * e = getenv("BARRA_FFN_SPLIT"); spct = e ? atoi(e) : 100;
+                    if (spct < 0) spct = 0; if (spct > 100) spct = 100; }
+                bool done_ok = false;
+                if (spct >= 100) {
+                    done_ok = bffn_exec(r);
+                } else {
+                    int rows_tpu = (r.T * spct) / 100;
+                    rows_tpu = (rows_tpu / g_bffn.B) * g_bffn.B;   // ganze Kacheln
+                    const int rows_gpu = r.T - rows_tpu;
+                    // Der Allocator darf den Ausgang auf den Eingang legen (dieselbe Warnung
+                    // steht im CHECK-Pfad der Attention). Bei Zeilenaufteilung waere das fatal:
+                    // die GPU wuerde beim Rechnen ihrer Haelfte die Eingaenge ueberschreiben,
+                    // die der TPU-Thread parallel noch liest. Dann KEIN Split.
+                    const char * hb = (const char *) battn_host_ptr(r.h);
+                    const char * yb = (const char *) battn_host_ptr(r.down);
+                    const size_t hsz = (size_t) r.T * r.h->nb[1], ysz = (size_t) r.T * r.down->nb[1];
+                    const bool alias = hb && yb && (hb < yb + ysz) && (yb < hb + hsz);
+                    if (alias && g_battn.log) BALOG("bffn: L%d Ein- und Ausgang ueberlappen - kein Split\n", r.L);
+                    // Seit die TPU-Haelfte auf PRIVATEN Puffern rechnet, ist eine Ueberlappung
+                    // von Ein- und Ausgang harmlos - die Pruefung von vorhin ist damit hinfaellig.
+                    (void) alias;
+                    if (rows_tpu <= 0 || rows_gpu <= 0) { done_ok = bffn_exec(r); }
+                    else {
+                        // Diagnose (BARRA_FFN_SPLIT_NOTPU=1): Zeilen kuerzen, TPU-Haelfte NICHT
+                        // rechnen. Greift die Kuerzung, bleibt die zweite Haelfte stehen und die
+                        // Perplexitaet muss kaputt sein. Kommt ein normales Ergebnis heraus, hat
+                        // die GPU trotz gekuerztem ne[1] ALLE Zeilen gerechnet.
+                        static int notpu = -1;
+                        if (notpu < 0) notpu = getenv("BARRA_FFN_SPLIT_NOTPU") ? 1 : 0;
+                        // Diagnose (BARRA_FFN_SPLIT_SERIAL=1): dieselbe Aufteilung, aber die
+                        // TPU-Haelfte ERST NACH der GPU. Ist das Ergebnis dann richtig, war es
+                        // ein Rennen um den Puffer, kein Rechenfehler.
+                        // Eingangszeilen der TPU-Haelfte VOR jeder GPU-Arbeit wegkopieren und
+                        // das Ergebnis erst NACH der GPU zurueckschreiben. Der Allocator darf
+                        // Ein- und Ausgang versetzt uebereinanderlegen; gemessen am 29.8.2026:
+                        // ohne diese Kopien verwarf die GPU die TPU-Zeilen komplett (PPL 533
+                        // = derselbe Wert wie ganz ohne TPU) bzw. verfaelschte deren Eingang.
+                        const int nrow_tpu = r.T - rows_gpu;
+                        std::vector<float> hcopy((size_t) nrow_tpu * g_bffn.D);
+                        std::vector<float> ycopy((size_t) nrow_tpu * g_bffn.D);
+                        { const char * hb2 = (const char *) battn_host_ptr(r.h);
+                          if (!hb2) { done_ok = false; }
+                          else { for (int t = 0; t < nrow_tpu; t++)
+                                   memcpy(&hcopy[(size_t) t * g_bffn.D], hb2 + (size_t) (rows_gpu + t) * r.h->nb[1], (size_t) g_bffn.D * 4); } }
+                        std::atomic<int> tpu_ok{0};
+                        std::thread th([&] { tpu_ok = bffn_exec(r, 0, nrow_tpu, hcopy.data(), ycopy.data()) ? 1 : -1; });
+                        std::vector<std::pair<ggml_tensor *, int64_t>> saved;
+                        for (int j2 = r.start; j2 <= r.end; j2++) {
+                            ggml_tensor * n = cgraph->nodes[j2];
+                            if (n->ne[1] == r.T) { saved.push_back({ n, n->ne[1] }); n->ne[1] = rows_gpu; }
+                            for (int sx = 0; sx < GGML_MAX_SRC; sx++) {
+                                ggml_tensor * sv = n->src[sx];
+                                if (sv && sv->ne[1] == r.T && sv->op != GGML_OP_NONE) {
+                                    bool have = false; for (auto & pr : saved) if (pr.first == sv) have = true;
+                                    if (!have) { saved.push_back({ sv, sv->ne[1] }); sv->ne[1] = rows_gpu; } } }
+                        }
+                        ggml_cgraph sub = *cgraph; sub.nodes = cgraph->nodes + r.start; sub.n_nodes = r.end - r.start + 1;
+                        ggml_status st_ = ggml_backend_vk_graph_compute_impl(backend, &sub);
+                        ggml_vk_synchronize(vctx);
+                        for (auto & pr : saved) pr.first->ne[1] = pr.second;
+                        th.join();
+                        if (st_ != GGML_STATUS_SUCCESS) return st_;
+                        done_ok = tpu_ok.load() == 1;
+                        if (done_ok) {   // TPU-Zeilen jetzt an ihren Platz
+                            char * yb2 = (char *) battn_host_ptr(r.down);
+                            if (!yb2) done_ok = false;
+                            else for (int t = 0; t < nrow_tpu; t++)
+                                memcpy(yb2 + (size_t) (rows_gpu + t) * r.down->nb[1], &ycopy[(size_t) t * g_bffn.D], (size_t) g_bffn.D * 4);
+                        }
+                        if (done_ok) { cur = r.end + 1; continue; }   // beide Haelften fertig
+                    }
+                }
+                if (!done_ok) {
+                    ggml_cgraph sub = *cgraph; sub.nodes = cgraph->nodes + r.start; sub.n_nodes = r.end - r.start + 1;
+                    ggml_status st_ = ggml_backend_vk_graph_compute_impl(backend, &sub);
+                    if (st_ != GGML_STATUS_SUCCESS) return st_;
+                }
+                cur = r.end + 1;
+            }
+            if (cur < cgraph->n_nodes) {
+                ggml_cgraph sub = *cgraph; sub.nodes = cgraph->nodes + cur; sub.n_nodes = cgraph->n_nodes - cur;
+                return ggml_backend_vk_graph_compute_impl(backend, &sub);
+            }
+            return GGML_STATUS_SUCCESS;
+        }
+    }
     static const char * cdir = getenv("BARRA_ATTN_CALDUMP");
     if (cdir) return battn_caldump_run(cdir, backend, cgraph);
     if (!ggml_vk_battn_env_on() || !battn_init()) return ggml_backend_vk_graph_compute_impl(backend, cgraph);

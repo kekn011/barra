@@ -25,8 +25,12 @@ base=float(fld(f"{arch}.rope.freq_base",1e4)); HD=fld(f"{arch}.attention.key_len
 RMAP={"qwen2":2,"qwen3":2,"chatglm":0,"llama":0}
 rmode=int(os.environ.get("RMODE", RMAP.get(arch,2)))
 TENS={t.name:t for t in r.tensors}
-has_bias = "blk.0.attn_q.bias" in TENS
-has_qknorm = "blk.0.attn_q_norm.weight" in TENS
+# NICHT blk.0 fragen: in hybriden Modellen (qwen3.5) ist Schicht 0 eine DeltaNet-Schicht
+# OHNE Attention - die Abfrage lieferte dort faelschlich bias=0/qknorm=0, obwohl das Modell
+# q/k-RMSNorm hat. Die erste Schicht MIT Attention ist massgeblich. (29.8.2026)
+ATT0 = next((i for i in range(NL) if f"blk.{i}.attn_q.weight" in TENS), 0)
+has_bias = f"blk.{ATT0}.attn_q.bias" in TENS
+has_qknorm = f"blk.{ATT0}.attn_q_norm.weight" in TENS
 # q-Ausgang >3072 int16 kompiliert nicht auf dem Geraet (Qwen3-4B-Falle) -> 2 Chunks (Kopf-Haelften)
 qchunk = 1 if H*HD > 3072 else 0
 print(f"arch={arch} NL={NL} D={D} H={H} NKV={NKV} HD={HD} base={base} rmode={rmode} bias={int(has_bias)} qknorm={int(has_qknorm)} qchunk={qchunk}", flush=True)
@@ -124,9 +128,19 @@ if arch=="gemma4":
     print(f"fertig: {OUT} ({NL} Layer, {len(pkglist)} Packages, meta v8 gemma, freq_factors={'ja' if ff_name else 'nein'})", flush=True)
     sys.exit(0)
 
-meta=[]
+# Hybride Modelle (qwen3.5: 9 Attention-Bloecke unter 33, davon 8 nutzbar) haben nicht in
+# jeder Schicht Attention. Portiert werden nur Schichten mit BEIDEM: Attention-Gewichte im
+# GGUF UND Kalibrier-Dump. Die Meta behaelt NL Zeilen, damit Zeilenindex == Layerindex
+# bleibt; welche aktiv sind, steht in layers.txt.
+import re
+LAYERS=sorted(int(m.group(1)) for m in (re.match(r'cal_ctx_L([0-9]+)\.bin$',f) for f in os.listdir(CAL)) if m)
+LAYERS=[i for i in LAYERS if f'blk.{i}.attn_q.weight' in TENS]
+if not LAYERS: sys.exit('keine Schicht mit Dump UND Attention-Gewichten gefunden')
+print(f'Layer mit Attention+Dump: {LAYERS} ({len(LAYERS)} von {NL})', flush=True)
+meta=[[0]*(16 if qchunk else 12) for _ in range(NL)]
+GATE=[None]*NL
 GQ=np.ones((NL,HD),np.float32); GK=np.ones((NL,HD),np.float32)
-for i in range(NL):
+for i in LAYERS:
     p=f"blk.{i}."
     h=np.fromfile(os.path.join(CAL,f"cal_h_L{i}.bin"),dtype=np.float32).reshape(S,D)
     ctx=np.fromfile(os.path.join(CAL,f"cal_ctx_L{i}.bin"),dtype=np.float32).reshape(S,H*HD)
@@ -136,18 +150,37 @@ for i in range(NL):
     bo=ten(p+"attn_output.bias") if (p+"attn_output.bias") in TENS else None
     if has_qknorm:
         GQ[i]=ten(p+"attn_q_norm.weight").reshape(HD); GK[i]=ten(p+"attn_k_norm.weight").reshape(HD)
+    # qwen3.5: q und GATE stecken FUSIONIERT in attn_q.weight ([(HD*2)*H, D]) - je Kopf
+    # erst HD q-Zeilen, dann HD Gate-Zeilen. Der Modellcode trennt sie als ggml_view_3d
+    # mit Stride HD*2 (src/models/qwen35.cpp, Qcur bei Offset 0, gate bei Offset HD).
+    # Wir ziehen beides auseinander: q geht den bekannten Weg, das Gate bekommt eigene
+    # Pakete (die Laufzeit braucht es, weil sigmoid(gate) NACH der Attention multipliziert
+    # wird - genau darauf ist auch der ctx-Dump kalibriert).
+    Wg=None; bg=None
+    if Wq.shape[0] == 2*H*HD:
+        iq=np.concatenate([np.arange(hh*2*HD, hh*2*HD+HD) for hh in range(H)])
+        ig=iq+HD
+        Wg=Wq[ig]; Wq=Wq[iq]
+        if bq is not None: bg=bq[ig]; bq=bq[iq]
     if qchunk:
         HH=H*HD//2
         q1=conv_pkg(f"q1_L{i}",Wq[:HH],bq[:HH] if bq is not None else None,D,HH,h)
         q2=conv_pkg(f"q2_L{i}",Wq[HH:],bq[HH:] if bq is not None else None,D,HH,h)
+        if Wg is not None:
+            g1=conv_pkg(f"g1_L{i}",Wg[:HH],bg[:HH] if bg is not None else None,D,HH,h)
+            g2=conv_pkg(f"g2_L{i}",Wg[HH:],bg[HH:] if bg is not None else None,D,HH,h)
+            GATE[i]=[g1[0][0],int(g1[0][1]),g1[1][0],int(g1[1][1]),g2[0][0],int(g2[0][1]),g2[1][0],int(g2[1][1])]
     else:
         q1=conv_pkg(f"q_L{i}",Wq,bq,D,H*HD,h); q2=None
+        if Wg is not None:
+            g1=conv_pkg(f"g_L{i}",Wg,bg,D,H*HD,h)
+            GATE[i]=[g1[0][0],int(g1[0][1]),g1[1][0],int(g1[1][1])]
     kv=conv_pkg(f"kv_L{i}",np.concatenate([Wk,Wv],axis=0),bkv,D,2*NKV*HD,h)
     o_=conv_pkg(f"o_L{i}",Wo,bo,H*HD,D,ctx)
     m=[]
     grp=(q1,q2,kv,o_) if qchunk else (q1,kv,o_)
     for qz in grp: m += [qz[0][0],int(qz[0][1]),qz[1][0],int(qz[1][1])]
-    meta.append(m)
+    meta[i]=m
     print(f"L{i}: q isc={q1[0][0]:.3e} osc={q1[1][0]:.3e} | kv osc={kv[1][0]:.3e} | o osc={o_[1][0]:.3e}", flush=True)
 
 with open(os.path.join(OUT,"attn_gen.meta"),"w") as f:
@@ -160,4 +193,17 @@ t_=np.arange(S,dtype=np.float64)[:,None]
 COS=np.cos(t_*inv).astype(np.float32); SIN=np.sin(t_*inv).astype(np.float32)
 aux=np.concatenate([GQ.reshape(-1),GK.reshape(-1),COS.reshape(-1),SIN.reshape(-1)]).astype(np.float32)
 aux.tofile(os.path.join(OUT,"aux_attn.bin"))
-print(f"fertig: {OUT} ({NL} Layer, meta v7, qknorm={int(has_qknorm)} qchunk={qchunk})", flush=True)
+open(os.path.join(OUT,'layers.txt'),'w').write(','.join(str(i) for i in LAYERS)+chr(10))
+if any(GATE[i] is not None for i in LAYERS):
+    with open(os.path.join(OUT,'gate.meta'),'w') as f:
+        f.write('# je aktive Schicht: L dann isc izp osc ozp je Gate-Paket (gechunkt: g1,g2)'+chr(10))
+        for i in LAYERS:
+            if GATE[i] is not None:
+                f.write(str(i)+' '+' '.join(f'{v:.8e}' if isinstance(v,float) else str(v) for v in GATE[i])+chr(10))
+pk=[]
+for i in LAYERS:
+    pk += ([f'q1_L{i}',f'q2_L{i}'] if qchunk else [f'q_L{i}'])
+    if GATE[i] is not None: pk += ([f'g1_L{i}',f'g2_L{i}'] if qchunk else [f'g_L{i}'])
+    pk += [f'kv_L{i}',f'o_L{i}']
+open(os.path.join(OUT,'pkglist.txt'),'w').write(chr(10).join(pk)+chr(10))
+print(f"fertig: {OUT} ({len(LAYERS)} von {NL} Layern, {len(pk)} Packages, meta v7, qknorm={int(has_qknorm)} qchunk={qchunk})", flush=True)
