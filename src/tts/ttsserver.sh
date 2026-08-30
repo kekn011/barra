@@ -8,6 +8,10 @@ ES=/data/adb/baseos/bin/enter-systemd.sh
 U=/data/local/ubuntu
 
 . /data/adb/baseos/bin/barra-i18n.sh
+# Koexistenz-Waechter (gemeinsam fuer alle Kit-Dienste, src/boot/barra-guard.sh). Fehlt er auf
+# einem aelteren Base, laufen die Aufrufe ins Leere statt ins Messer.
+G=/data/adb/baseos/bin/barra-guard.sh
+if [ -f "$G" ]; then . "$G"; else guard_check(){ :; }; guard_need(){ echo 0; }; guard_expendable(){ :; }; fi
 pins_on(){   # TTS nutzt den Grafikkern (Vokoder) -> Mali-Mindesttakt anheben
   [ "$TTS_NOPIN" = "1" ] && return
   echo 890000 > /sys/class/misc/mali0/device/scaling_min_freq 2>/dev/null
@@ -25,6 +29,8 @@ insys(){ printf %s "$1" > $U/root/.ttsctl.sh; sh "$ES" $U/root/.ttsctl.sh 2>&1; 
 
 case "${1:-status}" in
   start)
+    # Waechter (29.8.): gemessen 270 MB (ttsd 237 MB + zwei gpudecd)
+    guard_check tts 300 || exit 1
     pins_on
     insys "systemctl start barra-tts; sleep 3; systemctl is-active barra-tts"
     # Hebel 5 (Lazy-Compile-Warmup): das erste /say zahlt den ~2,4s Mali-Shader-Compile.
@@ -32,6 +38,8 @@ case "${1:-status}" in
     # nur rechnen, NICHT abspielen - der Warmup darf nicht hoerbar sein.
     # Jetzt beim Start abfangen statt beim Nutzer. Kurzer Text, play=0, best-effort mit Retries.
     insys "for v in piper-de piper-en; do for i in 1 2 3; do curl -s -m 30 -o /dev/null \"http://localhost:8095/say?voice=\$v&play=0&text=warmup\" && break; sleep 2; done; done; echo warmup-done"
+    # Die Container-Dienste erben oom_score_adj -1000 vom systemd des Containers -> killbar machen
+    guard_expendable $(pgrep -f "barra-tts/bin/ttsd.py") $(pgrep -f "barra-tts/bin/gpudecd")
     t tts.started;;
   stop)
     insys "systemctl stop barra-tts"

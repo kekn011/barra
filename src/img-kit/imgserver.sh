@@ -8,6 +8,10 @@
 # Container-CLI: barra-img "prompt" [-o datei.png] [-s seed] [-W breite] [-H hoehe] [-n schritte]
 K=/data/local/barra-img
 . /data/adb/baseos/bin/barra-i18n.sh
+# Koexistenz-Waechter (gemeinsam fuer alle Kit-Dienste, src/boot/barra-guard.sh). Fehlt er auf
+# einem aelteren Base, laufen die Aufrufe ins Leere statt ins Messer.
+G=/data/adb/baseos/bin/barra-guard.sh
+if [ -f "$G" ]; then . "$G"; else guard_check(){ :; }; guard_need(){ echo 0; }; guard_expendable(){ :; }; fi
 R=/data/adb/baseos/run; mkdir -p $R
 PORT=8096
 MODELS=$K/models
@@ -33,6 +37,9 @@ case "${1:-status}" in
     pgrep -f "$K/bin/sd-server" >/dev/null && { t img.already_running; exit 0; }
     [ -f "$M" ] || { t img.model_missing "$M" "$MODELS"; exit 1; }
     [ -f "$MODELS/taesd.safetensors" ] || { t img.taesd_missing "$MODELS"; exit 1; }
+    # Waechter (29.8.): Aufschlag 1300 MB ueber der Modellgroesse (gemessen: 3281 MB Spitze
+    # waehrend der Bilderzeugung bei 2035 MB Modell; geladen im Leerlauf 2241 MB).
+    guard_check img "$(guard_need "$M" 1300)" || exit 1
     pins_on
     # Mali-Betriebspunkt (24.8.26): KHR_coopmat aus (Emulationsbremse), eigener GEMM + FA, getunte Stock-Tiles
     export GGML_VK_DISABLE_COOPMAT=1
@@ -43,6 +50,7 @@ case "${1:-status}" in
       --sampling-method lcm --steps 4 --cfg-scale 1.0 -W 512 -H 512 \
       --listen-ip 0.0.0.0 --listen-port $PORT </dev/null >$R/imgserver.log 2>&1 &
     P=$!
+    guard_expendable "$P"   # sonst oom_score_adj -1000 = unkillbar
     i=0; while [ $i -lt 90 ]; do grep -aq "listening on" $R/imgserver.log 2>/dev/null && break; kill -0 $P 2>/dev/null || break; sleep 1; i=$((i+1)); done
     if grep -aq "listening on" $R/imgserver.log 2>/dev/null; then
       t img.started "$P" "$(basename "$M")" "$PORT"

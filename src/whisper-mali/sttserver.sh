@@ -13,6 +13,10 @@ DM=/data/local/ubuntu/opt/hwbridge/pf; DC=/data/local/ubuntu/opt/hwbridge/pfc
 P=$KIT/turbo
 
 . /data/adb/baseos/bin/barra-i18n.sh
+# Koexistenz-Waechter (gemeinsam fuer alle Kit-Dienste, src/boot/barra-guard.sh). Fehlt er auf
+# einem aelteren Base, laufen die Aufrufe ins Leere statt ins Messer.
+G=/data/adb/baseos/bin/barra-guard.sh
+if [ -f "$G" ]; then . "$G"; else guard_check(){ :; }; guard_need(){ echo 0; }; guard_expendable(){ :; }; fi
 pins_on(){
   [ "$STT_NOPIN" = "1" ] && return
   for CP in /sys/devices/system/cpu/cpufreq/policy*; do echo performance > $CP/scaling_governor 2>/dev/null; done
@@ -71,9 +75,10 @@ case "${1:-status}" in
     MDL="${2:-$KIT/models/ggml-large-v3-turbo-q5_0.bin}"
     PORT="${3:-8090}"
     pgrep -f "$BIN/whisper-server" >/dev/null && { t stt.already; exit 0; }
-    # Koexistenz-Verbot (22.8.): stt+llm zusammen = OOM-Panic + TPU-Graph-Limit (104+145 > ~157)
-    pgrep -f "llama-server" >/dev/null && { t stt.llm_running; exit 1; }
     [ -f "$MDL" ] || { t stt.model_missing "$MDL"; exit 1; }
+    # Waechter (29.8.): Sachverbot stt<->llm + Speicherpruefung. Aufschlag 1100 MB ueber der
+    # Modellgroesse (gemessen: 1636 MB bei 547 MB Modell).
+    guard_check stt "$(guard_need "$MDL" 1100)" || exit 1
     mkdir -p $R
     pins_on
     # TPU-Encoder, wenn ein Package-Satz fuers Modell installiert ist; sonst CPU
@@ -92,12 +97,14 @@ case "${1:-status}" in
         WSP_PKG_DIR=$P WSP_SOCK_MAIN=$DM WSP_SOCK_CORE=$DC LD_LIBRARY_PATH=$BIN \
           setsid $BIN/whisper-server -m "$MDL" --host 0.0.0.0 --port $PORT -t 8 -bs 1 -bo 1 \
           </dev/null >$R/sttserver.log 2>&1 &
-        t stt.started_tpu "$!" "$(basename $MDL)" "$PORT";;
+        P=$!; guard_expendable "$P"   # sonst oom_score_adj -1000 = unkillbar
+        t stt.started_tpu "$P" "$(basename $MDL)" "$PORT";;
       *)
         LD_LIBRARY_PATH=$BIN \
           setsid $BIN/whisper-server -m "$MDL" --host 0.0.0.0 --port $PORT -t 8 -bs 1 -bo 1 \
           </dev/null >$R/sttserver.log 2>&1 &
-        t stt.started_cpu "$!" "$(basename $MDL)" "$PORT";;
+        P=$!; guard_expendable "$P"
+        t stt.started_cpu "$P" "$(basename $MDL)" "$PORT";;
     esac
     t stt.hint "$PORT";;
   *) t stt.usage;;

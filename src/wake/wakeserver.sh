@@ -8,14 +8,21 @@ ES=/data/adb/baseos/bin/enter-systemd.sh
 U=/data/local/ubuntu
 H=/data/adb/hwbridge
 . /data/adb/baseos/bin/barra-i18n.sh
+# Koexistenz-Waechter (gemeinsam fuer alle Kit-Dienste, src/boot/barra-guard.sh). Fehlt er auf
+# einem aelteren Base, laufen die Aufrufe ins Leere statt ins Messer.
+G=/data/adb/baseos/bin/barra-guard.sh
+if [ -f "$G" ]; then . "$G"; else guard_check(){ :; }; guard_need(){ echo 0; }; guard_expendable(){ :; }; fi
 insys(){ printf %s "$1" > $U/root/.wakectl.sh; sh "$ES" $U/root/.wakectl.sh 2>&1; rm -f $U/root/.wakectl.sh; }
 
 case "${1:-status}" in
   start)
     # audiod-record laeuft ueber den Supervisor (start_micrec), sobald das Binary da ist; anstossen falls noetig
     [ -x "$H/audiod-record" ] || { t wake.no_kit; exit 1; }
+    # Waechter (29.8.): gemessen 80 MB (wake-bridge RSS 51 MB + Mikrofon-Bruecke)
+    guard_check wake 100 || exit 1
     pgrep -f "$H/audiod-record" >/dev/null 2>&1 || LD_LIBRARY_PATH=/system/lib64:/vendor/lib64 setsid "$H/audiod-record" "$U/opt/hwbridge/micrec.sock" </dev/null >/dev/null 2>&1 &
     insys "systemctl start barra-wake; sleep 3; systemctl is-active barra-wake"
+    guard_expendable $(pgrep -f "barra-wake/wake-bridge")   # sonst unkillbar (-1000 vom systemd)
     t wake.active;;
   stop)
     insys "systemctl stop barra-wake"

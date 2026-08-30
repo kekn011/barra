@@ -13,6 +13,10 @@ R=/data/adb/baseos/run
 F=/sys/class/devfreq
 
 . /data/adb/baseos/bin/barra-i18n.sh
+# Koexistenz-Waechter (gemeinsam fuer alle Kit-Dienste, src/boot/barra-guard.sh). Fehlt er auf
+# einem aelteren Base, laufen die Aufrufe ins Leere statt ins Messer.
+G=/data/adb/baseos/bin/barra-guard.sh
+if [ -f "$G" ]; then . "$G"; else guard_check(){ :; }; guard_need(){ echo 0; }; guard_expendable(){ :; }; fi
 pins_on(){
   [ "$PYA_NOPIN" = "1" ] && return
   for CP in /sys/devices/system/cpu/cpufreq/policy*; do echo performance > $CP/scaling_governor 2>/dev/null; done
@@ -38,8 +42,8 @@ case "${1:-status}" in
   log) tail -30 $R/pya-tpud.log;;
   start)
     pgrep -f "tpud_pipe4 $D/tpu.sock" >/dev/null && { t pya.already; exit 0; }
-    # Koexistenz-Verbot (22.8.): LLM pinnt den Speicher — Diarization dazu riskiert OOM
-    pgrep -f "llama-server" >/dev/null && { t pya.llm_running; exit 1; }
+    # Waechter (29.8.): Sachverbot pya<->llm + Speicherpruefung (gemessen: 100 MB, tpud RSS 10 MB).
+    guard_check pya 150 || exit 1
     # Packages generisch: r34_trunk ODER eres_body ODER titanet-Segmentkette (alphabetisch = model_ids)
     PKG=$(ls $KIT/*.package 2>/dev/null | sort | tr '\n' ' ')
     [ -n "$PKG" ] || { t pya.no_kit "$KIT"; exit 1; }
@@ -48,6 +52,7 @@ case "${1:-status}" in
     pins_on
     export LD_LIBRARY_PATH=/system/lib64:/vendor/lib64
     TPU_CPU=8 TPU_WARMUP=2 setsid $BIN $D/tpu.sock $PKG </dev/null >$R/pya-tpud.log 2>&1 &
+    guard_expendable "$!"
     i=0; while [ $i -lt 60 ]; do grep -aq bereit $R/pya-tpud.log && break; sleep 1; i=$((i+1)); done
     grep -aq bereit $R/pya-tpud.log || { t pya.tpud_fail; tail -3 $R/pya-tpud.log; pins_off; exit 1; }
     chmod 666 $D/tpu.sock 2>/dev/null

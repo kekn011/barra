@@ -92,6 +92,9 @@ $Kopien = @(
 # Freistehende Skript-Assets: dieselbe Frage, ohne Archiv drumherum.
 $Frei = @(
   @{ f='tts-kit\ttsserver.sh';     q='src\tts\ttsserver.sh' }
+  # Der Waechter reist im Setup mit (kein Asset) - hier trotzdem gegen src/ pruefen, damit die
+  # Kopie nicht auseinanderlaeuft. Genau diese Klasse Fehler ist dreimal ausgeliefert worden.
+  @{ f='base\barra-guard.sh';      q='src\boot\barra-guard.sh' }
   @{ f='whisper-kit\sttserver.sh'; q='src\whisper-mali\sttserver.sh' }
 )
 Write-Host "== Kopien in den Archiven gegen src/ =="

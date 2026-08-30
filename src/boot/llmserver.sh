@@ -11,6 +11,10 @@
 # laesst die Pins aus, stop stellt die Governors zurueck.
 . /data/adb/baseos/llm/env.sh
 . /data/adb/baseos/bin/barra-i18n.sh
+# Koexistenz-Waechter (gemeinsam fuer alle Kit-Dienste, src/boot/barra-guard.sh). Fehlt er auf
+# einem aelteren Base, laufen die Aufrufe ins Leere statt ins Messer.
+G=/data/adb/baseos/bin/barra-guard.sh
+if [ -f "$G" ]; then . "$G"; else guard_check(){ :; }; guard_need(){ echo 0; }; guard_expendable(){ :; }; fi
 R=/data/adb/baseos/run; mkdir -p $R
 MODELS=/data/local/ubuntu/home/barra/models
 DEF=$(ls /data/local/ubuntu/home/*/models/*.gguf /data/local/ubuntu/home/*/*.gguf 2>/dev/null | head -1)
@@ -95,11 +99,16 @@ case "${1:-status}" in
   start)
     M="${2:-$DEF}"; CTX="${3:-4096}"; NGL="${4:-99}"
     pgrep -f "$LLM/llama-server" >/dev/null && { t llm.already_running; exit 0; }
-    # Koexistenz-Verbot (22.8.): llm+stt zusammen = OOM-Panic + TPU-Graph-Limit (145+104 > ~157)
-    pgrep -f "baseos/stt/whisper-server" >/dev/null && { t llm.stt_running; exit 1; }
     [ -f "$M" ] || { t llm.model_missing "$M" "$MODELS"; exit 1; }
+    # Waechter (29.8.): Sachverbot llm<->stt (TPU-Graph-Limit 145+104 > ~157) UND Speicherpruefung.
+    # Aufschlag 1400 MB ueber der Modellgroesse (gemessen: 4031 MB bei 2654 MB Modell).
+    guard_check llm "$(guard_need "$M" 1400)" || exit 1
     attn_start "$M" || t llm.attn_no_kit "$(basename "$M" .gguf)"
     setsid $LLM/llama-server -m "$M" -ngl $NGL --host 0.0.0.0 --port 8080 -c $CTX -t 4 </dev/null >$R/llmserver.log 2>&1 &
-    t llm.started "$!" "$(basename $M)" "$CTX" "$NGL";;
+    P=$!
+    # Ohne das erbt der Server oom_score_adj -1000 (su/adbd) und ist fuer den Kernel UNKILLBAR:
+    # bei Speichermangel paniert dann der Kernel, statt den Server zu beenden (29.8. belegt).
+    guard_expendable "$P"
+    t llm.started "$P" "$(basename $M)" "$CTX" "$NGL";;
   *) t llm.usage;;
 esac

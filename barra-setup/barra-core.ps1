@@ -825,6 +825,16 @@ function Run-KitsInner(){
     Pkg (T 'core.kit.wait_dev')
     if ((AdbState) -ne 'device') { [void](Run $script:ADB 'wait-for-device' $null 90) }
     if ((AdbState) -ne 'device') { throw (T 'core.kit.no_dev') }
+    # Koexistenz-Waechter (29.8.): reist im Setup selbst mit (barra-setup\base\barra-guard.sh),
+    # NICHT als Release-Asset - so erreicht er auch ein Base-Image, das noch ohne ihn gebacken wurde.
+    # Fehlt die Datei, laufen die guard_*-Aufrufe der Dienstskripte in ihre Attrappen und schuetzen
+    # NICHTS: dann kann ein zweiter Dienst den Speicher sprengen und der Kernel paniert (29.8. belegt).
+    $gsrc = Join-Path $script:Kit 'base\barra-guard.sh'
+    if (Test-Path $gsrc) {
+      [void](Run $script:ADB "push `"$gsrc`" /data/local/tmp/barra-guard.sh" $null 60)
+      $o = AdbSuM 'cp /data/local/tmp/barra-guard.sh /data/adb/baseos/bin/barra-guard.sh && chmod 755 /data/adb/baseos/bin/barra-guard.sh && rm -f /data/local/tmp/barra-guard.sh && echo GRD_OK' 60
+      if ($o -notmatch 'GRD_OK') { Warn (T 'core.kit.no_guard') }
+    } else { Warn (T 'core.kit.no_guard') }
     # Modellwahl aus dem Setup (precfg.KITMODELS); ohne Angabe das Standard-Modell je Kit
     $km = @{}
     if ($script:PreCfg -and $script:PreCfg.KITMODELS) { $km = $script:PreCfg.KITMODELS }
