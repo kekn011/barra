@@ -1,0 +1,45 @@
+#!/bin/bash
+# barra-power - reboot / shutdown des GANZEN Telefons aus dem Container heraus.
+#
+# Warum: der Container laeuft in einem eigenen PID-Namespace. Ein `reboot` DARIN beendet nur
+# dessen systemd (= den Container): Android und der Kernel laufen weiter, alle Adressen
+# bleiben auf den Interfaces, aber sshd und jeder Dienst sind weg, das Telefon bootet NICHT.
+# Genau so standen am 30.8. zwei Nodes nach `sudo reboot` "ohne Dienste" da (Ping ja, alles
+# refused). Deshalb gehen reboot/poweroff/halt/shutdown ueber cfgd (Android-Seite:
+# setprop sys.powerctl), das Geraet startet echt neu bzw. schaltet ab.
+#
+# Einbau: /usr/local/sbin/barra-power, dazu Symlinks reboot/poweroff/halt/shutdown daneben
+# (sudo secure_path hat /usr/local/sbin vor /usr/sbin), plus systemd-Drop-ins fuer
+# systemd-reboot/-poweroff.service als zweites Netz (barra-power.conf).
+[ -r /usr/share/barra/barra-i18n.sh ] && . /usr/share/barra/barra-i18n.sh
+type t >/dev/null 2>&1 || t(){ shift 0; printf '%s\n' "$*"; }
+BRIDGE=/opt/hwbridge
+me=$(basename "$0")
+action=""
+case "$me" in
+  reboot)        action=reboot ;;
+  poweroff|halt) action=shutdown ;;
+  shutdown)
+    action=shutdown
+    for a in "$@"; do case "$a" in -r) action=reboot ;; -h|-P|-H) action=shutdown ;; -c) echo "$(t power.cancel_na)"; exit 0 ;; esac; done ;;
+  barra-power)   case "${1:-}" in reboot) action=reboot ;; shutdown|poweroff|halt) action=shutdown ;; *) echo "barra-power reboot|shutdown"; exit 2 ;; esac ;;
+  *) echo "barra-power: unbekannter Aufrufname $me"; exit 2 ;;
+esac
+[ "$(id -u)" = 0 ] || { echo "$(t power.need_root)"; exit 1; }
+C="$BRIDGE/cfg"
+mkdir -p "$C" 2>/dev/null; rm -f "$C/resp"
+echo "power $action" > "$C/req" 2>/dev/null || { echo "$(t power.no_bridge)"; exit 1; }
+i=0; resp=""
+while [ $i -lt 40 ]; do
+  [ -f "$C/resp" ] && { resp=$(cat "$C/resp"); rm -f "$C/resp"; break; }
+  sleep 0.25; i=$((i+1))
+done
+case "$resp" in
+  OK*) echo "$(t "power.sent_$action")" ;;
+  *)   echo "$(t power.no_bridge)"; [ -n "$resp" ] && echo "  $resp"; exit 1 ;;
+esac
+# Android startet in ~2 s neu. Solange NICHT zurueckkehren: wuerde dieser Prozess als
+# ExecStart von systemd-reboot.service enden, zoege systemd sein eigenes reboot(2) durch und
+# killte den Container, bevor das Geraet neu startet.
+sleep 120
+echo "$(t power.timeout)"; exit 1
