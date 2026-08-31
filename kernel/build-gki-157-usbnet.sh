@@ -35,7 +35,13 @@ setopt CONFIG_IP_SET_HASH_NETIFACE m
 setopt CONFIG_IP_SET_LIST_SET m
 setopt CONFIG_NETFILTER_XT_SET m
 setopt CONFIG_NETFILTER_XT_MATCH_ADDRTYPE m
-setopt CONFIG_NETFILTER_XT_MATCH_RPFILTER m
+# rpfilter built-in (=y): der Node hat KEINEN /lib/modules-Baum, =m-Module leben nur ueber die
+# barra-kernel-update.sh-Payload - rpfilter war da nie dabei. Calico Felix programmiert per
+# iptables-legacy "-m rpfilter" in der raw-Tabelle (IPv4); ohne das Match panict felix in einer
+# Endlosschleife (calico-node 0/1). IP_NF_MATCH_RPFILTER = ipt_rpfilter fuer iptables-legacy IPv4
+# (IPv6-Zwilling CONFIG_IP6_NF_MATCH_RPFILTER ist schon =y). Belegt 31.8.2026.
+setopt CONFIG_NETFILTER_XT_MATCH_RPFILTER y
+setopt CONFIG_IP_NF_MATCH_RPFILTER y
 setopt CONFIG_VXLAN m
 
 echo "== NEU: USB-Ethernet built-in (=y) fuer Dock-LAN =="
