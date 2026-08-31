@@ -95,8 +95,9 @@ int  barra_gpu_dispatch(barra_gpu* g, const uint8_t* spirv, uint32_t slen,
  *     BARRA_GPU3_MAXSTAGE Stufen je Roundtrip. Eigene Session (barra_gpu3_open). --- */
 #define BARRA_GPU3_MAXSTAGE 4096
 #define BARRA_GPU3_MAXPC    128
-typedef struct { int sock; int nimported; } barra_gpu3;
+typedef struct { int sock; int nimported; int autosync; } barra_gpu3;   /* autosync=0: Sync uebernimmt der Aufrufer (ggml-gpud) */
 int  barra_gpu3_open(barra_gpu3* g);                                /* 0=ok */
+void barra_gpu3_set_autosync(barra_gpu3* g, int on);               /* 1=Default (je Batch), 0=Aufrufer synct */
 void barra_gpu3_close(barra_gpu3* g);                               /* gibt Handles + Shader frei */
 int  barra_gpu3_import(barra_gpu3* g, barra_zbuf** bufs, int n);    /* setzt bufs[i]->gpu_h */
 int  barra_gpu3_release(barra_gpu3* g, barra_zbuf** bufs, int n);

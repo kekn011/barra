@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include "barra.h"
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -268,7 +269,7 @@ int barra_gpu_dispatch(barra_gpu* g, const uint8_t* spirv, uint32_t slen, uint32
  * Bindings mit Offset/Range und Push-Constants; alles in EINEM Roundtrip je Batch. */
 #define GPZ3_MAGIC 0x47505A33u
 static int gpu3_dead(barra_gpu3* g){ if(g&&g->sock>=0){ close(g->sock); g->sock=-1; } return -1; }
-int barra_gpu3_open(barra_gpu3* g){
+int barra_gpu3_open(barra_gpu3* g){ if(g) g->autosync=1;
   if(!g) return -1;
   g->sock=dial("gpuzc.sock"); g->nimported=0;
   if(g->sock<0){ fprintf(stderr,"barra: gpuzc.sock nicht erreichbar\n"); return -1; }
@@ -317,6 +318,7 @@ int barra_gpu3_flags(barra_gpu3* g, uint32_t flags){
   if(send_hdr_fds(g->sock,hdr,0,0)||rn(g->sock,&status,4)) return gpu3_dead(g);
   return status?-1:0;
 }
+void barra_gpu3_set_autosync(barra_gpu3* g, int on){ if(g) g->autosync=on; }
 int barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* st, int nstage){
   if(!g||g->sock<0||nstage<=0||nstage>BARRA_GPU3_MAXSTAGE) return -1;
   /* 1) Unimportierte Puffer importieren (einmalig) */
@@ -328,23 +330,44 @@ int barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* st, int nstage){
   }
   /* 2) CPU-Zugriff schliessen — EINMAL je verschiedenem Puffer (der DMA_BUF_SYNC-ioctl flusht den
    *    ganzen Puffer, ~60 us; je Binding je Stufe gerufen waren das bei 1024 Stufen ~190 ms) */
+  static int g_t_on=-1; if(g_t_on<0) g_t_on=getenv("BARRA_GPU3_TIME")?1:0;
+  struct timespec tt[6]; if(g_t_on) clock_gettime(CLOCK_MONOTONIC,&tt[0]);
   barra_zbuf** uniq=malloc(sizeof(barra_zbuf*)*(size_t)nstage*ZC_MAXBUF); int nu=0;
   if(!uniq) return -1;
   for(int s=0;s<nstage;s++) for(int i=0;i<st[s].nbind;i++){ barra_zbuf* z=st[s].binds[i].buf; int d=0; for(int j=0;j<nu;j++) if(uniq[j]==z){ d=1; break; } if(!d) uniq[nu++]=z; }
-  for(int j=0;j<nu;j++) barra_zc_cpu_end(uniq[j]);
+  if(g_t_on) clock_gettime(CLOCK_MONOTONIC,&tt[1]);
+  if(g->autosync) for(int j=0;j<nu;j++) barra_zc_cpu_end(uniq[j]);
+  if(g_t_on) clock_gettime(CLOCK_MONOTONIC,&tt[2]);
   uint32_t hdr[6]={GPZ3_MAGIC,5,(uint32_t)nstage,0,0,0}; int rc=-1,desync=0; uint32_t status=1;
   if(send_hdr_fds(g->sock,hdr,0,0)==0){
     rc=0;
+    /* Alle Stufen in EINEN Puffer und mit EINEM write() senden: pro Stufe ein eigener write()
+     * liess Client und Daemon je Stufe ueber den Socket pingpongen (~4 ms Scheduler-Roundtrip je
+     * Stufe bei idle-geparkten Cores -> 138 ms/Batch statt 14 ms GPU, gemessen 30.8.). */
+    size_t cap=(size_t)nstage*(24+ZC_MAXBUF*16+BARRA_GPU3_MAXPC);
+    unsigned char* big=malloc(cap); size_t bn=0;
+    if(!big){ rc=-1; desync=1; }
     for(int s=0;s<nstage&&rc==0;s++){
-      unsigned char pkt[24+ZC_MAXBUF*16+BARRA_GPU3_MAXPC]; uint32_t* w=(uint32_t*)pkt; size_t n=0;
-      w[0]=(uint32_t)st[s].sh; w[1]=st[s].gx; w[2]=st[s].gy; w[3]=st[s].gz; w[4]=(uint32_t)st[s].nbind; w[5]=st[s].pcsize; n=24;
-      for(int i=0;i<st[s].nbind;i++){ uint32_t* b=(uint32_t*)(pkt+n); b[0]=(uint32_t)st[s].binds[i].buf->gpu_h; b[1]=(uint32_t)(st[s].binds[i].off&0xffffffffu); b[2]=(uint32_t)(st[s].binds[i].off>>32); b[3]=st[s].binds[i].range; n+=16; }
-      if(st[s].pcsize){ memcpy(pkt+n,st[s].pc,st[s].pcsize); n+=st[s].pcsize; }
-      if(wn(g->sock,pkt,n)){ rc=-1; desync=1; }
+      uint32_t* w=(uint32_t*)(big+bn);
+      w[0]=(uint32_t)st[s].sh; w[1]=st[s].gx; w[2]=st[s].gy; w[3]=st[s].gz; w[4]=(uint32_t)st[s].nbind; w[5]=st[s].pcsize; bn+=24;
+      for(int i=0;i<st[s].nbind;i++){ uint32_t* b=(uint32_t*)(big+bn); b[0]=(uint32_t)st[s].binds[i].buf->gpu_h; b[1]=(uint32_t)(st[s].binds[i].off&0xffffffffu); b[2]=(uint32_t)(st[s].binds[i].off>>32); b[3]=st[s].binds[i].range; bn+=16; }
+      if(st[s].pcsize){ memcpy(big+bn,st[s].pc,st[s].pcsize); bn+=st[s].pcsize; }
     }
+    if(rc==0 && wn(g->sock,big,bn)){ rc=-1; desync=1; }
+    free(big);
+    if(g_t_on) clock_gettime(CLOCK_MONOTONIC,&tt[3]);
     if(rc==0){ if(rn(g->sock,&status,4)){ rc=-1; desync=1; } else if(status!=0) rc=-1; }
   } else desync=1;
-  for(int j=0;j<nu;j++) barra_zc_cpu_begin(uniq[j]);
+  if(g_t_on) clock_gettime(CLOCK_MONOTONIC,&tt[4]);
+  if(g->autosync) for(int j=0;j<nu;j++) barra_zc_cpu_begin(uniq[j]);
+  if(g_t_on){ clock_gettime(CLOCK_MONOTONIC,&tt[5]);
+    static long gn=0; static double a[5];
+    a[0]+=(tt[1].tv_sec-tt[0].tv_sec)*1e3+(tt[1].tv_nsec-tt[0].tv_nsec)/1e6;   /* uniq sammeln */
+    a[1]+=(tt[2].tv_sec-tt[1].tv_sec)*1e3+(tt[2].tv_nsec-tt[1].tv_nsec)/1e6;   /* cpu_end */
+    a[2]+=(tt[3].tv_sec-tt[2].tv_sec)*1e3+(tt[3].tv_nsec-tt[2].tv_nsec)/1e6;   /* send */
+    a[3]+=(tt[4].tv_sec-tt[3].tv_sec)*1e3+(tt[4].tv_nsec-tt[3].tv_nsec)/1e6;   /* warten (daemon) */
+    a[4]+=(tt[5].tv_sec-tt[4].tv_sec)*1e3+(tt[5].tv_nsec-tt[4].tv_nsec)/1e6;   /* cpu_begin */
+    if(++gn%64==0) fprintf(stderr,"barra-batch (Mittel je Aufruf, n=%ld nstage~%d): uniq %.2f, cpu_end %.2f, send %.2f, warten %.2f, cpu_begin %.2f ms%s",gn,nstage,a[0]/gn,a[1]/gn,a[2]/gn,a[3]/gn,a[4]/gn,"\n"); }
   free(uniq);
   if(rc) fprintf(stderr,"barra: GPU3-Batch fehlgeschlagen (status=%u)\n",status);
   if(desync) gpu3_dead(g);
