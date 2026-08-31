@@ -1,0 +1,93 @@
+# LLM-Dienst als Pod: llama-server (glibc, ggml-rpc-Client) laeuft auf einem beliebigen Node,
+# die GPU-Arbeit macht der ggml-rpc-server auf der Android-Seite von barra-13c0 (Mali, Vulkan).
+# Machbarkeitsstand 30.8.: Binaerdateien+Modell per hostPath aus ~/llm-pod (Image folgt).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: barra
+---
+# GPU-Node als Dienst: gpu-13c0.barra.svc -> 192.168.178.118:50052 (ohne Selector, feste Endpoints)
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-13c0
+  namespace: barra
+spec:
+  ports:
+  - name: ggml-rpc
+    port: 50052
+    targetPort: 50052
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: gpu-13c0
+  namespace: barra
+subsets:
+- addresses:
+  - ip: 192.168.178.118
+  ports:
+  - name: ggml-rpc
+    port: 50052
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm
+  namespace: barra
+spec:
+  selector:
+    app: llm
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm
+  namespace: barra
+spec:
+  replicas: 1
+  # der ggml-rpc-server bedient genau EINE Verbindung: nie zwei llama-server gleichzeitig -> Recreate
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llm
+  template:
+    metadata:
+      labels:
+        app: llm
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: barra-13c0   # GPU-Node: RPC ueber localhost (cross-node kostet ~35 %, s. Messung 30.8.)
+      containers:
+      - name: llama-server
+        image: ubuntu:24.04
+        command: ["/opt/llm/bin/llama-server"]
+        args: ["-m", "/opt/llm/models/qwen2.5-1.5b.gguf",
+               "--rpc", "gpu-13c0.barra.svc.cluster.local:50052",
+               "-ngl", "99", "-c", "4096", "-t", "4",
+               "--host", "0.0.0.0", "--port", "8080"]
+        env:
+        - name: LD_LIBRARY_PATH
+          value: /opt/llm/bin
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        volumeMounts:
+        - name: llm
+          mountPath: /opt/llm
+          readOnly: true
+      volumes:
+      - name: llm
+        hostPath:
+          path: /home/kevin/llm-pod
+          type: Directory

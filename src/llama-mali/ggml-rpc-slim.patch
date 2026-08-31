@@ -1,0 +1,99 @@
+--- a/ggml/src/ggml-rpc/ggml-rpc.cpp	2026-08-30 17:31:46.297518692 +0200
++++ b/ggml/src/ggml-rpc/ggml-rpc.cpp	2026-08-30 17:31:46.438626688 +0200
+@@ -357,13 +357,13 @@
+ static std::shared_ptr<socket_t> get_socket(const std::string & endpoint) {
+     static std::mutex mutex;
+     std::lock_guard<std::mutex> lock(mutex);
+-    static std::unordered_map<std::string, std::weak_ptr<socket_t>> sockets;
++    // barra: rpc-slim (1) - Verbindungen leben so lange wie der Prozess (der rpc-server bedient genau
++    // EINE Verbindung; jede Neuverbindung kostet einen HELLO-Roundtrip).
++    static std::unordered_map<std::string, std::shared_ptr<socket_t>> sockets;
+ 
+     auto it = sockets.find(endpoint);
+     if (it != sockets.end()) {
+-        if (auto sock = it->second.lock()) {
+-            return sock;
+-        }
++        return it->second;
+     }
+     std::string host;
+     int port;
+@@ -625,6 +625,19 @@
+ 
+     if (rpc_get) {
+         ggml_backend_rpc_buffer_type_context * buft_ctx = (ggml_backend_rpc_buffer_type_context *)buft->context;
++        // barra: rpc-slim (2) - die Antwort haengt nur von Op/Typ/Formen ab: einmal fragen, dann lokal.
++        static std::mutex cache_mutex;
++        static std::unordered_map<std::string, size_t> cache;
++        char key[512]; int kl = snprintf(key, sizeof(key), "%s|%d|%d|%lld,%lld,%lld,%lld", buft_ctx->endpoint.c_str(), (int)tensor->op, (int)tensor->type,
++            (long long)tensor->ne[0], (long long)tensor->ne[1], (long long)tensor->ne[2], (long long)tensor->ne[3]);
++        for (int i = 0; i < GGML_MAX_SRC && tensor->src[i] && kl < (int)sizeof(key) - 64; i++)
++            kl += snprintf(key + kl, sizeof(key) - kl, "|%d:%lld,%lld,%lld,%lld", (int)tensor->src[i]->type,
++                (long long)tensor->src[i]->ne[0], (long long)tensor->src[i]->ne[1], (long long)tensor->src[i]->ne[2], (long long)tensor->src[i]->ne[3]);
++        {
++            std::lock_guard<std::mutex> lock(cache_mutex);
++            auto cit = cache.find(key);
++            if (cit != cache.end()) return cit->second;
++        }
+         auto sock = get_socket(buft_ctx->endpoint);
+ 
+         rpc_msg_get_alloc_size_req request = {
+@@ -643,6 +656,7 @@
+         bool status = send_rpc_cmd(sock, RPC_CMD_GET_ALLOC_SIZE, &request, sizeof(request), &response, sizeof(response));
+         RPC_STATUS_ASSERT(status);
+ 
++        { std::lock_guard<std::mutex> lock(cache_mutex); cache[key] = response.alloc_size; }
+         return response.alloc_size;
+     }
+ 
+@@ -1418,7 +1432,9 @@
+     const rpc_tensor * tensors = (const rpc_tensor *)src;
+     LOG_DBG("[%s] device: %u, n_nodes: %u, n_tensors: %u\n", __func__, device, n_nodes, n_tensors);
+ 
+-    size_t buf_size = ggml_tensor_overhead()*(n_nodes + n_tensors) + ggml_graph_overhead_custom(n_nodes, false);
++    // barra: rpc-slim (4) - Graph gross genug fuer Knoten UND Blaetter (ggml_build_forward_expand fuellt
++    // visited_hash_set und use_counts; ohne sie lehnt ggml_can_fuse() jede Backend-Fusion ab).
++    size_t buf_size = ggml_tensor_overhead()*(n_nodes + n_tensors) + ggml_graph_overhead_custom(n_nodes + n_tensors, false);
+     if (stored_graphs[device].buffer.size() < buf_size) {
+         stored_graphs[device].buffer.resize(buf_size);
+     }
+@@ -1430,8 +1446,7 @@
+     ggml_context_ptr ctx_ptr { ggml_init(params) };
+     GGML_ASSERT(ctx_ptr != nullptr);
+     ggml_context * ctx = ctx_ptr.get();
+-    struct ggml_cgraph * graph = ggml_new_graph_custom(ctx, n_nodes, false);
+-    graph->n_nodes = n_nodes;
++    struct ggml_cgraph * graph = ggml_new_graph_custom(ctx, n_nodes + n_tensors, false);
+     std::unordered_map<uint64_t, const rpc_tensor*> tensor_ptrs;
+     tensor_ptrs.reserve(n_tensors);
+     for (uint32_t i = 0; i < n_tensors; i++) {
+@@ -1442,15 +1457,23 @@
+     for (uint32_t i = 0; i < n_nodes; i++) {
+         int64_t id;
+         memcpy(&id, &nodes[i], sizeof(id));
+-        graph->nodes[i] = create_node(id, ctx, tensor_ptrs, tensor_map);
+-
+-        // Check if create_node failed for a *non-zero* ID.
+-        // If id was 0, create_node returning nullptr is expected.
+-        // If id was non-zero and create_node returned nullptr, it indicates a deserialization error.
+-        if (graph->nodes[i] == nullptr && id != 0) {
++        ggml_tensor * node = create_node(id, ctx, tensor_ptrs, tensor_map);
++        // id == 0 -> nullptr ist erwartet; sonst Deserialisierungsfehler
++        if (node == nullptr && id != 0) {
+             GGML_LOG_ERROR("[%s] failed to create graph node %d (id=%" PRId64 ")\n", __func__, i, id);
+             return false;
+         }
++        if (node != nullptr) {
++            ggml_build_forward_expand(graph, node);   // barra: rpc-slim (4)
++        }
++    }
++    if ((uint32_t)graph->n_nodes != n_nodes) {
++        GGML_LOG_WARN("[%s] Graph nach build_forward_expand: %d Knoten statt %u\n", __func__, graph->n_nodes, n_nodes);
++    }
++    // barra: rpc-slim (3) - das echte Backend sieht den Graphen hier zum ersten Mal: optimieren (Vulkan:
++    // Umordnung fuer Fusionen), der Client-Scheduler kennt nur das RPC-Backend ohne Optimierung.
++    if (backends[device]->iface.graph_optimize) {
++        backends[device]->iface.graph_optimize(backends[device], graph);
+     }
+     ggml_status status = ggml_backend_graph_compute(backends[device], graph);
+     GGML_ASSERT(status == GGML_STATUS_SUCCESS && "Unsuccessful graph computations are not supported with RPC");
