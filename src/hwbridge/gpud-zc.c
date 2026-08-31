@@ -67,10 +67,30 @@ static int gpu_init(void){
   uint32_t qn=0; vkGetPhysicalDeviceQueueFamilyProperties(phys,&qn,0);
   VkQueueFamilyProperties qf[16]; if(qn>16)qn=16; vkGetPhysicalDeviceQueueFamilyProperties(phys,&qn,qf);
   qfam=UINT32_MAX; for(uint32_t i=0;i<qn;i++) if(qf[i].queueFlags&VK_QUEUE_COMPUTE_BIT){qfam=i;break;}
-  const char* exts[]={VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME};   /* push_descriptor: auf Mali-G715 beim Submit Geraeteverlust (30.8.) -> Sets aus Session-Pool */
+  /* Basis-Extensions + optional Integer-Dot-Product (fuer dotPacked4x8EXT im mmvq-Kernel, ggml-gpud M2). */
+  const char* exts[8]; uint32_t nx=0;
+  exts[nx++]=VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME;
+  exts[nx++]=VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+  exts[nx++]=VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME;
+  /* push_descriptor: auf Mali-G715 beim Submit Geraeteverlust (30.8.) -> Sets aus Session-Pool */
+  int has_idp=0;
+  { uint32_t ne=0; vkEnumerateDeviceExtensionProperties(phys,0,&ne,0); VkExtensionProperties* ep=calloc(ne?ne:1,sizeof *ep);
+    if(ep){ vkEnumerateDeviceExtensionProperties(phys,0,&ne,ep);
+      for(uint32_t i=0;i<ne;i++) if(!strcmp(ep[i].extensionName,VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME)) has_idp=1;
+      free(ep); } }
+  if(has_idp) exts[nx++]=VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME;
+  VkPhysicalDeviceShaderIntegerDotProductFeatures idp={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,.shaderIntegerDotProduct=VK_TRUE};
+  /* Subgroup-Eigenschaften protokollieren (Cluster-Reduktion im GEMV braucht CLUSTERED im COMPUTE-Stage). */
+  VkPhysicalDeviceSubgroupProperties sgp={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+  VkPhysicalDeviceProperties2 pp2={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,.pNext=&sgp};
+  vkGetPhysicalDeviceProperties2(phys,&pp2);
+  LOG("[gpud-zc] subgroup: size %u, clustered=%d arithmetic=%d compute-stage=%d, integer-dot=%d\n",
+      sgp.subgroupSize,(sgp.supportedOperations&VK_SUBGROUP_FEATURE_CLUSTERED_BIT)?1:0,
+      (sgp.supportedOperations&VK_SUBGROUP_FEATURE_ARITHMETIC_BIT)?1:0,
+      (sgp.supportedStages&VK_SHADER_STAGE_COMPUTE_BIT)?1:0,has_idp);
   float prio=1.0f;
   VkDeviceQueueCreateInfo qci={.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,.queueFamilyIndex=qfam,.queueCount=1,.pQueuePriorities=&prio};
-  VkDeviceCreateInfo dci={.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,.queueCreateInfoCount=1,.pQueueCreateInfos=&qci,.enabledExtensionCount=3,.ppEnabledExtensionNames=exts};
+  VkDeviceCreateInfo dci={.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,.pNext=has_idp?&idp:NULL,.queueCreateInfoCount=1,.pQueueCreateInfos=&qci,.enabledExtensionCount=nx,.ppEnabledExtensionNames=exts};
   CK(vkCreateDevice(phys,&dci,0,&dev),"CreateDevice");
   vkGetDeviceQueue(dev,qfam,0,&queue);
   pGetMemFdProps=(PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(dev,"vkGetMemoryFdPropertiesKHR");
