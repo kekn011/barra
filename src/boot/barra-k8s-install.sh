@@ -169,6 +169,40 @@ EOF
 systemctl daemon-reload; systemctl enable barra-k8s-net.service >/dev/null 2>&1
 systemctl restart barra-k8s-net.service; systemctl status barra-k8s-net.service --no-pager -n 3 | tail -3
 
+# ---- 5b) netd-cleanup (Dauerdienst): Androids bw_/fw_-Ketten mit quota2/bpf leeren ----------
+# Der Chroot-iptables-Trick aus Schritt 3 fixt nur kubelite/kube-proxy. Der CALICO-Container
+# bringt sein eigenes, aelteres iptables (1.8.4) mit, das Androids netd-Matches quota2 und
+# "bpf --object-pinned" NICHT parsen kann -> felix crasht beim save/restore der GESAMTEN Tabellen
+# ("Can't find library for match quota2" / "bpf: failed to get bpf object") in einer Panic-Schleife.
+# netd programmiert diese Ketten beim Boot neu (live kommen sie nicht wieder) -> wir halten sie leer.
+cat > /opt/barra-k8s/barra-netd-cleanup.sh <<'EOF'
+#!/bin/bash
+# barra-netd-cleanup.sh - haelt Androids netd-Ketten (bw_/fw_) mit quota2/bpf-Matches leer,
+# damit die aeltere iptables im Calico-Container sie lesen kann (sonst felix-Panic-Loop).
+while true; do
+  for t in raw mangle nat filter; do
+    for c in $(iptables-legacy-save -t "$t" 2>/dev/null | grep -E ' -m (bpf|quota2)' | sed -n 's/^-A \([^ ]*\) .*/\1/p' | sort -u); do
+      iptables-legacy -t "$t" -F "$c" 2>/dev/null
+    done
+  done
+  sleep 20
+done
+EOF
+chmod 755 /opt/barra-k8s/barra-netd-cleanup.sh
+cat > /etc/systemd/system/barra-netd-cleanup.service <<'EOF'
+[Unit]
+Description=barra: Androids netd bpf/quota2 iptables-Ketten leeren (Calico-Kompatibilitaet)
+After=network.target
+[Service]
+ExecStart=/opt/barra-k8s/barra-netd-cleanup.sh
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload; systemctl enable --now barra-netd-cleanup.service >/dev/null 2>&1
+log "netd-cleanup: $(systemctl is-active barra-netd-cleanup.service)"
+
 # ---- 6) Daemons in Reihenfolge, warten ------------------------------------------------------
 B=/var/snap/microk8s/current/var/kubernetes/backend
 for d in k8s-dqlite containerd kubelite cluster-agent apiserver-kicker; do systemctl reset-failed snap.microk8s.daemon-$d 2>/dev/null; done
@@ -183,6 +217,11 @@ i=0; while [ $i -lt 60 ]; do c=$(curl -sk -o /dev/null -w '%{http_code}' -m 3 ht
 log "API: HTTP $c nach $((i*5))s"
 i=0; while [ $i -lt 60 ]; do st=$(microk8s kubectl get node "$(hostname)" --no-headers 2>/dev/null | awk '{print $2}'); [ "$st" = Ready ] && break; sleep 5; i=$((i+1)); done
 log "Node: ${st:-unbekannt} nach $((i*5))s"
+# Calico felix fest auf iptables-legacy: dieser GKI-Kernel hat KEIN nf_tables
+# (iptables-nft-save = "Could not fetch rule set generation id") -> nft-Backend crasht felix.
+# Auto-Detect waehlt zwar legacy, explizit ist sicherer. Idempotent.
+microk8s kubectl set env ds/calico-node -n kube-system FELIX_IPTABLESBACKEND=Legacy FELIX_IPTABLESLOCKTIMEOUTSECS=10 >/dev/null 2>&1 \
+  && log "calico: FELIX_IPTABLESBACKEND=Legacy gesetzt" || log "calico: felix-env noch nicht setzbar (DaemonSet nicht bereit)"
 /opt/barra-k8s/barra-k8s-net.sh
 microk8s kubectl get nodes -o wide 2>&1 | tail -2
 microk8s kubectl get pods -A 2>&1 | tail -6
