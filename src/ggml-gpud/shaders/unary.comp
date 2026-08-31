@@ -1,0 +1,18 @@
+#version 450
+// Elementweise f32, zusammenhaengend: 0 SCALE (x*s+b), 1 SILU, 2 GELU, 3 RELU, 4 NEG, 5 GELU_QUICK, 6 SIGMOID
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer D { float d[]; };
+layout(push_constant) uniform PC { uint n, offa, offd, op; float s, b; } pc;
+void main() {
+    uint g = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 256u + gl_LocalInvocationID.x; if (g >= pc.n) return;
+    float x = a[pc.offa + g]; float r;
+    if      (pc.op == 0u) r = x * pc.s + pc.b;
+    else if (pc.op == 1u) r = x / (1.0 + exp(-x));
+    else if (pc.op == 2u) r = 0.5 * x * (1.0 + tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)));
+    else if (pc.op == 3u) r = max(x, 0.0);
+    else if (pc.op == 4u) r = -x;
+    else if (pc.op == 5u) r = x / (1.0 + exp(-1.702 * x));
+    else                  r = 1.0 / (1.0 + exp(-x));
+    d[pc.offd + g] = r;
+}

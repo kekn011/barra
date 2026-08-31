@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// SET_ROWS: dst[:, idx[i01, i02%ne11, i03%ne12], i02, i03] = src0[:, i01, i02, i03] (f32 -> f32|f16).
+// Index int64 (nur die unteren 32 Bit werden gelesen, i64 == 1) oder int32. Eine Workgroup je Quellzeile.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A   { float     a[]; };
+layout(std430, binding = 1) readonly  buffer I   { uint      idx[]; };
+layout(std430, binding = 2) writeonly buffer D32 { float     d32[]; };
+layout(std430, binding = 3) writeonly buffer D16 { float16_t d16[]; };
+layout(push_constant) uniform PC {
+    uint ne00, ne01, ne02, ne03;
+    uint nb01, nb02, nb03;         // src0-Strides (Elemente)
+    uint ne11, ne12, nb11, nb12;   // Index-Strides (Elemente des Indextyps)
+    uint nbd1, nbd2, nbd3;         // dst-Strides (Elemente)
+    uint offa, offi, offd, i64, dt, nrows;
+} pc;
+void main() {
+    uint r = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x; if (r >= pc.nrows) return;
+    uint i01 = r % pc.ne01; uint t = r / pc.ne01; uint i02 = t % pc.ne02; uint i03 = t / pc.ne02;
+    uint ii = pc.offi + i01 + (i02 % pc.ne11) * pc.nb11 + (i03 % pc.ne12) * pc.nb12;
+    uint row = (pc.i64 != 0u) ? idx[ii * 2u] : idx[ii];
+    uint sb = pc.offa + i01 * pc.nb01 + i02 * pc.nb02 + i03 * pc.nb03;
+    uint db = pc.offd + row * pc.nbd1 + i02 * pc.nbd2 + i03 * pc.nbd3;
+    for (uint k = gl_LocalInvocationID.x; k < pc.ne00; k += 256u) {
+        float v = a[sb + k];
+        if (pc.dt == 0u) d32[db + k] = v; else d16[db + k] = float16_t(v);
+    }
+}

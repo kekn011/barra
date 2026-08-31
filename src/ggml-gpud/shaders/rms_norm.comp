@@ -1,0 +1,22 @@
+#version 450
+// RMS_NORM je Zeile (ne00), optional fusioniert mit MUL(weight[ne00]); eine Workgroup je Zeile.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A { float a[]; };
+layout(std430, binding = 1) readonly  buffer W { float w[]; };
+layout(std430, binding = 2) writeonly buffer D { float d[]; };
+layout(push_constant) uniform PC { uint ne00, nrows, nb01, nbd1, offa, offw, offd, fuse; float eps; } pc;
+shared float red[256];
+void main() {
+    uint r = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x; uint t = gl_LocalInvocationID.x; if (r >= pc.nrows) return;
+    uint ab = pc.offa + r * pc.nb01; uint db = pc.offd + r * pc.nbd1;
+    float s = 0.0;
+    for (uint k = t; k < pc.ne00; k += 256u) { float x = a[ab + k]; s += x * x; }
+    red[t] = s; barrier();
+    for (uint o = 128u; o > 0u; o >>= 1) { if (t < o) red[t] += red[t + o]; barrier(); }
+    float scale = 1.0 / sqrt(red[0] / float(pc.ne00) + pc.eps);
+    for (uint k = t; k < pc.ne00; k += 256u) {
+        float v = a[ab + k] * scale;
+        if (pc.fuse != 0u) v *= w[pc.offw + k];
+        d[db + k] = v;
+    }
+}

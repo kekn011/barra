@@ -1,0 +1,27 @@
+#version 450
+// GLU f32: dst[ne0, rows] = act(x) * g; x/g aus src0-Haelften (split==0: Zeile hat 2*ne0 Elemente) oder src0/src1.
+// op: 0 REGLU, 1 GEGLU, 2 SWIGLU; swapped tauscht x und g.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A { float a[]; };
+layout(std430, binding = 1) readonly  buffer B { float b[]; };
+layout(std430, binding = 2) writeonly buffer D { float d[]; };
+layout(push_constant) uniform PC { uint ne0, nrows, nb01, nb11, nbd1, offa, offb, offd, split, swapped, op, n; } pc;
+float act(float x, uint op) {
+    if (op == 0u) return max(x, 0.0);
+    if (op == 1u) return 0.5 * x * (1.0 + tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)));
+    return x / (1.0 + exp(-x));
+}
+void main() {
+    uint g = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 256u + gl_LocalInvocationID.x; if (g >= pc.n) return;
+    uint i0 = g % pc.ne0; uint r = g / pc.ne0;
+    float x, y;
+    if (pc.split == 0u) {
+        uint base = pc.offa + r * pc.nb01;
+        x = a[base + i0 + (pc.swapped != 0u ? pc.ne0 : 0u)];
+        y = a[base + i0 + (pc.swapped != 0u ? 0u : pc.ne0)];
+    } else {
+        x = a[pc.offa + r * pc.nb01 + i0]; y = b[pc.offb + r * pc.nb11 + i0];
+        if (pc.swapped != 0u) { float t = x; x = y; y = t; }
+    }
+    d[pc.offd + r * pc.nbd1 + i0] = act(x, pc.op) * y;
+}

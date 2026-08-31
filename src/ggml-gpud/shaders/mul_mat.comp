@@ -1,0 +1,34 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// MUL_MAT (M1, Korrektheit): dst[ne01, ne11, ne12, ne13] f32 = src0[ne00, ne01, ne02, ne03]^T * src1[ne00, ne11, ne12, ne13] f32
+// Broadcast src0 ueber ne12/ne02 (r2) und ne13/ne03 (r3). Workgroup = 8 Zeilen x 32 Lanes ueber k.
+layout(local_size_x = 32, local_size_y = 8) in;
+layout(std430, binding = 0) readonly  buffer S0 { uint  src0[]; };
+layout(std430, binding = 1) readonly  buffer S1 { float src1[]; };
+layout(std430, binding = 2) writeonly buffer D  { float dst[]; };
+layout(push_constant) uniform PC {
+    uint ne00, ne01, ne11, ne12;
+    uint nb01, nb02, nb03;         // src0-Strides in BYTES
+    uint nb11, nb12, nb13;         // src1-Strides (Elemente)
+    uint nbd1, nbd2, nbd3;         // dst-Strides (Elemente)
+    uint off0, off1, offd, type;   // off0 in BYTES
+    uint r2, r3;
+} pc;
+#include "dequant.glsl"
+shared float red[8][32];
+void main() {
+    uint lane = gl_LocalInvocationID.x; uint ly = gl_LocalInvocationID.y;
+    uint row = gl_WorkGroupID.x * 8u + ly; uint col = gl_WorkGroupID.y; uint z = gl_WorkGroupID.z;
+    uint i12 = z % pc.ne12; uint i13 = z / pc.ne12; uint i02 = i12 / pc.r2; uint i03 = i13 / pc.r3;
+    float acc = 0.0;
+    if (row < pc.ne01) {
+        uint rowb = pc.off0 + row * pc.nb01 + i02 * pc.nb02 + i03 * pc.nb03;
+        uint cb = pc.off1 + col * pc.nb11 + i12 * pc.nb12 + i13 * pc.nb13;
+        for (uint k = lane; k < pc.ne00; k += 32u) acc += deq(pc.type, rowb, k) * src1[cb + k];
+    }
+    red[ly][lane] = acc; barrier();
+    if (lane == 0u && row < pc.ne01) {
+        float s = 0.0; for (uint i = 0u; i < 32u; i++) s += red[ly][i];
+        dst[pc.offd + row + col * pc.nbd1 + i12 * pc.nbd2 + i13 * pc.nbd3] = s;
+    }
+}

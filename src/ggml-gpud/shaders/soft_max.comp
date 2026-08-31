@@ -1,0 +1,45 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// SOFT_MAX je Zeile (ne00) mit scale und optionaler Maske (f16 an Binding 1, f32 an Binding 2), max_bias == 0.
+// Maske broadcastet: i11 = i01 % ne11, i12 = i02 % ne12, i13 = i03 % ne13.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A   { float     a[]; };
+layout(std430, binding = 1) readonly  buffer M16 { float16_t m16[]; };
+layout(std430, binding = 2) readonly  buffer M32 { float     m32[]; };
+layout(std430, binding = 3)           buffer D   { float     d[]; };   // read/write (Zwischenwerte e)
+layout(push_constant) uniform PC {
+    uint ne00, ne01, ne02, ne11, ne12, ne13;
+    uint nb01, nb02, nb03;         // src-Strides (Elemente)
+    uint nbm1, nbm2, nbm3;         // Masken-Strides (Elemente)
+    uint nbd1, nbd2, nbd3;         // dst-Strides (Elemente)
+    uint offa, offm, offd, mask, nrows;   // mask: 0 keine, 1 f16, 2 f32
+    float scale;
+} pc;
+shared float red[256];
+void main() {
+    uint r = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x; uint t = gl_LocalInvocationID.x; if (r >= pc.nrows) return;
+    uint i1 = r % pc.ne01; uint q = r / pc.ne01; uint i2 = q % pc.ne02; uint i3 = q / pc.ne02;
+    uint ab = pc.offa + i1 * pc.nb01 + i2 * pc.nb02 + i3 * pc.nb03;
+    uint mb = pc.offm + (i1 % pc.ne11) * pc.nbm1 + (i2 % pc.ne12) * pc.nbm2 + (i3 % pc.ne13) * pc.nbm3;
+    uint db = pc.offd + i1 * pc.nbd1 + i2 * pc.nbd2 + i3 * pc.nbd3;
+    float mx = -1e30;
+    for (uint k = t; k < pc.ne00; k += 256u) {
+        float v = a[ab + k] * pc.scale;
+        if (pc.mask == 1u) v += float(m16[mb + k]); else if (pc.mask == 2u) v += m32[mb + k];
+        mx = max(mx, v);
+    }
+    red[t] = mx; barrier();
+    for (uint o = 128u; o > 0u; o >>= 1) { if (t < o) red[t] = max(red[t], red[t + o]); barrier(); }
+    mx = red[0]; barrier();
+    float s = 0.0;
+    for (uint k = t; k < pc.ne00; k += 256u) {
+        float v = a[ab + k] * pc.scale;
+        if (pc.mask == 1u) v += float(m16[mb + k]); else if (pc.mask == 2u) v += m32[mb + k];
+        float e = exp(v - mx); d[db + k] = e; s += e;
+    }
+    red[t] = s; barrier();
+    for (uint o = 128u; o > 0u; o >>= 1) { if (t < o) red[t] += red[t + o]; barrier(); }
+    float inv = 1.0 / red[0];
+    for (uint k = t; k < pc.ne00; k += 256u) d[db + k] *= inv;
+}

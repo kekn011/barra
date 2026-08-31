@@ -1,0 +1,33 @@
+#version 450
+// Quantisiert x (f32, zusammenhaengend, ne00 x ncols) in q8_1-Bloecke fuer den int-dot-GEMV.
+// Blocklayout (36 B = 9 uint): [0] = packHalf2x16(d, s); [1..8] = 32 int8 (4 je uint).
+//   d = maxabs/127; qs_i = round(x_i/d); s = d * sum(qs_i)  (Min-Korrektur fuer q4_K).
+// Ein Workgroup (32 Threads) = ein 32er-Block; Grid 2D ueber alle Bloecke (nb32*ncols).
+layout(local_size_x = 32) in;
+layout(std430, binding = 0) readonly  buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer Q { uint  q[]; };
+layout(push_constant) uniform PC { uint ne00, ncols, nb32, offx, offq, nblk; } pc;
+shared float sh[32];
+shared int   qi[32];
+void main() {
+    uint b = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x; if (b >= pc.nblk) return;
+    uint t = gl_LocalInvocationID.x;
+    uint c = b / pc.nb32, kb = b % pc.nb32;
+    float v = x[pc.offx + c * pc.ne00 + kb * 32u + t];
+    sh[t] = abs(v); barrier();
+    for (uint o = 16u; o > 0u; o >>= 1) { if (t < o) sh[t] = max(sh[t], sh[t + o]); barrier(); }
+    float amax = sh[0]; barrier();
+    float d = amax / 127.0;
+    int qv = (d > 0.0) ? int(round(v / d)) : 0;
+    qi[t] = qv; barrier();
+    // Summe der quantisierten Werte (fuer s)
+    sh[t] = float(qv); barrier();
+    for (uint o = 16u; o > 0u; o >>= 1) { if (t < o) sh[t] += sh[t + o]; barrier(); }
+    if (t == 0u) {
+        q[pc.offq + b * 9u] = packHalf2x16(vec2(d, d * sh[0]));
+    }
+    if (t < 8u) {
+        uint w = (uint(qi[t*4u]) & 0xFFu) | ((uint(qi[t*4u+1u]) & 0xFFu) << 8) | ((uint(qi[t*4u+2u]) & 0xFFu) << 16) | ((uint(qi[t*4u+3u]) & 0xFFu) << 24);
+        q[pc.offq + b * 9u + 1u + t] = w;
+    }
+}

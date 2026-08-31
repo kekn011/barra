@@ -1,0 +1,24 @@
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+// GET_ROWS: dst[ne00, ne10, ne11, ne12] f32 = src0-Zeilen (f32/f16/q4_K/q6_K/q8_0) nach src1-Index (int32).
+// Eine Workgroup je Zielzeile. Voraussetzung (Backend prueft): ne02 == ne03 == 1.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer S0 { uint  src0[]; };
+layout(std430, binding = 1) readonly  buffer S1 { int   idx[]; };
+layout(std430, binding = 2) writeonly buffer D  { float dst[]; };
+layout(push_constant) uniform PC {
+    uint ne00, ne10, ne11, ne12;
+    uint nb01;                     // src0-Zeilenstride in BYTES
+    uint nb10, nb11, nb12;         // src1-Strides (Elemente)
+    uint nbd1, nbd2, nbd3;         // dst-Strides (Elemente)
+    uint off0, off1, offd, type, nrows;   // off0 in BYTES, off1/offd in Elementen
+} pc;
+#include "dequant.glsl"
+void main() {
+    uint r = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x; if (r >= pc.nrows) return;
+    uint i10 = r % pc.ne10; uint t = r / pc.ne10; uint i11 = t % pc.ne11; uint i12 = t / pc.ne11;
+    int row = idx[pc.off1 + i10 * pc.nb10 + i11 * pc.nb11 + i12 * pc.nb12];
+    uint rowb = pc.off0 + uint(row) * pc.nb01;
+    uint db = pc.offd + i10 * pc.nbd1 + i11 * pc.nbd2 + i12 * pc.nbd3;
+    for (uint k = gl_LocalInvocationID.x; k < pc.ne00; k += 256u) dst[db + k] = deq(pc.type, rowb, k);
+}

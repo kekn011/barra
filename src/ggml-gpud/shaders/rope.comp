@@ -1,0 +1,35 @@
+#version 450
+// ROPE f32 (norm / neox), ext_factor == 0 (kein YaRN), optional freq_factors (Binding 2, f32).
+// src0[ne00, ne01(heads), ne02(tokens), ne03], pos int32[ne02]. Ein Thread je Elementpaar.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A  { float a[]; };
+layout(std430, binding = 1) readonly  buffer P  { int   pos[]; };
+layout(std430, binding = 2) readonly  buffer FF { float ff[]; };
+layout(std430, binding = 3) writeonly buffer D  { float d[]; };
+layout(push_constant) uniform PC {
+    uint ne00, ne01, ne02, n_dims;
+    uint nb01, nb02, nb03;        // src-Strides (Elemente)
+    uint nbd1, nbd2, nbd3;        // dst-Strides (Elemente)
+    uint offa, offp, offf, offd;
+    uint neox, has_ff, npairs;    // npairs = ne00/2 * ne01*ne02*ne03
+    float theta_scale, freq_scale, attn_factor;
+} pc;
+void main() {
+    uint g = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 256u + gl_LocalInvocationID.x; if (g >= pc.npairs) return;
+    uint hlf = pc.ne00 / 2u;
+    uint p = g % hlf; uint t = g / hlf; uint i1 = t % pc.ne01; t /= pc.ne01; uint i2 = t % pc.ne02; uint i3 = t / pc.ne02;
+    uint sb = pc.offa + i1 * pc.nb01 + i2 * pc.nb02 + i3 * pc.nb03;
+    uint db = pc.offd + i1 * pc.nbd1 + i2 * pc.nbd2 + i3 * pc.nbd3;
+    if (2u * p >= pc.n_dims) {           // Rest: kopieren
+        d[db + 2u * p] = a[sb + 2u * p]; d[db + 2u * p + 1u] = a[sb + 2u * p + 1u]; return;
+    }
+    uint ia, ib;
+    if (pc.neox != 0u) { ia = p; ib = p + pc.n_dims / 2u; } else { ia = 2u * p; ib = 2u * p + 1u; }
+    float theta = float(pos[pc.offp + i2]) * pow(pc.theta_scale, float(p));
+    if (pc.has_ff != 0u) theta /= ff[pc.offf + p];
+    theta *= pc.freq_scale;
+    float c = cos(theta) * pc.attn_factor, s = sin(theta) * pc.attn_factor;
+    float x0 = a[sb + ia], x1 = a[sb + ib];
+    d[db + ia] = x0 * c - x1 * s;
+    d[db + ib] = x0 * s + x1 * c;
+}

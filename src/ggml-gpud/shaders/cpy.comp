@@ -1,0 +1,27 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// CPY/CONT/DUP: f32|f16 -> f32|f16. Kopiert in ggml-Logikreihenfolge (flacher Index g). Quelle und Ziel
+// koennen VERSCHIEDENE ne haben (reshape+cont) -> g getrennt nach Quell-ne (nes) und Ziel-ne (ne) zerlegen.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer A32 { float     a32[]; };
+layout(std430, binding = 1) readonly  buffer A16 { float16_t a16[]; };
+layout(std430, binding = 2) writeonly buffer D32 { float     d32[]; };
+layout(std430, binding = 3) writeonly buffer D16 { float16_t d16[]; };
+layout(push_constant) uniform PC {
+    uint ne0, ne1, ne2, ne3;       // Ziel-ne
+    uint nes0, nes1, nes2, nes3;   // Quell-ne
+    uint nb00, nb01, nb02, nb03;   // src-Strides (Elemente)
+    uint nb0, nb1, nb2, nb3;       // dst-Strides (Elemente)
+    uint offa, offd, st, dt, n;
+} pc;
+void main() {
+    uint g = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 256u + gl_LocalInvocationID.x;
+    if (g >= pc.n) return;
+    uint s0 = g % pc.nes0; uint ts = g / pc.nes0; uint s1 = ts % pc.nes1; ts /= pc.nes1; uint s2 = ts % pc.nes2; uint s3 = ts / pc.nes2;
+    uint d0 = g % pc.ne0;  uint td = g / pc.ne0;  uint d1 = td % pc.ne1;  td /= pc.ne1;  uint d2 = td % pc.ne2;  uint d3 = td / pc.ne2;
+    uint sa = pc.offa + s0 * pc.nb00 + s1 * pc.nb01 + s2 * pc.nb02 + s3 * pc.nb03;
+    uint da = pc.offd + d0 * pc.nb0  + d1 * pc.nb1  + d2 * pc.nb2  + d3 * pc.nb3;
+    float v = (pc.st == 0u) ? a32[sa] : float(a16[sa]);
+    if (pc.dt == 0u) d32[da] = v; else d16[da] = float16_t(v);
+}

@@ -1,0 +1,118 @@
+#version 450
+// M2 GEMV fuer q4_K / q6_K: dst[row, col] = sum_k deq(src0[row, k]) * src1[k, col].
+// v2: x liegt kachelweise (KT = 4096 Elemente = 16 Bloecke, 16 KB) im Shared Memory und wird von den 8 Zeilen einer
+// Workgroup geteilt (v1 las x je Zeile und Block neu -> 4,3 GB/s). Workgroup = 16 Lanes x 4; Thread = 2 Zeilen.
+// Lane-Mapping je Kachel: Chunk c = lane + 16*i (q4_K: 4 Chunks a 64 Elemente je Block, q6_K: 2 Haelften a 128).
+// Voraussetzung (Backend): ne00 % 256 == 0, q4_K-Zeilenanfang 4-Byte-aligned, q6_K 2-Byte-aligned.
+layout(local_size_x = 16, local_size_y = 4) in;
+layout(std430, binding = 0) readonly  buffer S0  { uint  src0[]; };
+layout(std430, binding = 1) readonly  buffer S1  { float src1[]; };
+layout(std430, binding = 2) readonly  buffer S1V { vec4  src1v[]; };
+layout(std430, binding = 3) writeonly buffer D   { float dst[]; };
+layout(push_constant) uniform PC {
+    uint ne00, ne01, ne11, ne12;
+    uint nb01, nb02, nb03;         // src0-Strides in BYTES
+    uint nb11, nb12, nb13;         // src1-Strides (Elemente)
+    uint nbd1, nbd2, nbd3;         // dst-Strides (Elemente)
+    uint off0, off1, offd, type;   // off0 BYTES; type 2 q4_K, 3 q6_K
+    uint r2, r3, nblk;
+} pc;
+#define KT 4096u
+#define ROWS_PER_THREAD 2u
+shared vec4  xs[KT / 4u];
+shared float red[8][16];
+
+float f16u(uint bits) { return unpackHalf2x16(bits & 0xFFFFu).x; }
+uint ldw(uint boff) { uint i = boff >> 2; if ((boff & 2u) == 0u) return src0[i]; return (src0[i] >> 16) | (src0[i + 1u] << 16); }
+vec4 nib_lo(uint q) { return vec4(float(q & 0xFu), float((q >> 8) & 0xFu), float((q >> 16) & 0xFu), float((q >> 24) & 0xFu)); }
+vec4 nib_hi(uint q) { return vec4(float((q >> 4) & 0xFu), float((q >> 12) & 0xFu), float((q >> 20) & 0xFu), float((q >> 28) & 0xFu)); }
+uint byte_of(uint w0, uint w1, uint w2, uint k) { uint w = k < 4u ? w0 : (k < 8u ? w1 : w2); return (w >> ((k & 3u) * 8u)) & 0xFFu; }
+
+// q4_K: Chunk j (0..3) des Blocks an Byteadresse bb; x-Elemente des Chunks ab xs-Index xe (Elemente, relativ zur Kachel)
+float dot_q4k_chunk(uint bb, uint j, uint xe) {
+    uint bw = bb >> 2;
+    uint w0 = src0[bw]; float d = f16u(w0), dmin = f16u(w0 >> 16);
+    uint s0 = src0[bw + 1u], s1 = src0[bw + 2u], s2 = src0[bw + 3u];
+    uint j0 = j * 2u, j1 = j0 + 1u; float sc0, mn0, sc1, mn1;
+    if (j0 < 4u) {
+        sc0 = float(byte_of(s0, s1, s2, j0) & 63u); mn0 = float(byte_of(s0, s1, s2, j0 + 4u) & 63u);
+        sc1 = float(byte_of(s0, s1, s2, j1) & 63u); mn1 = float(byte_of(s0, s1, s2, j1 + 4u) & 63u);
+    } else {
+        sc0 = float((byte_of(s0, s1, s2, j0 + 4u) & 0xFu) | ((byte_of(s0, s1, s2, j0 - 4u) >> 6) << 4));
+        mn0 = float((byte_of(s0, s1, s2, j0 + 4u) >> 4)   | ((byte_of(s0, s1, s2, j0)      >> 6) << 4));
+        sc1 = float((byte_of(s0, s1, s2, j1 + 4u) & 0xFu) | ((byte_of(s0, s1, s2, j1 - 4u) >> 6) << 4));
+        mn1 = float((byte_of(s0, s1, s2, j1 + 4u) >> 4)   | ((byte_of(s0, s1, s2, j1)      >> 6) << 4));
+    }
+    float slo = 0.0, shi = 0.0, xlo = 0.0, xhi = 0.0;
+    uint xv = xe >> 2;   // vec4-Index
+    for (uint u = 0u; u < 8u; u++) {
+        uint q = src0[bw + 4u + j * 8u + u];
+        vec4 xl = xs[xv + u], xh = xs[xv + 8u + u];
+        slo += dot(nib_lo(q), xl); shi += dot(nib_hi(q), xh);
+        xlo += dot(xl, vec4(1.0)); xhi += dot(xh, vec4(1.0));
+    }
+    return d * (sc0 * slo + sc1 * shi) - dmin * (mn0 * xlo + mn1 * xhi);
+}
+// q6_K: Haelfte h (0..1) des Blocks an Byteadresse bb (2-Byte-aligned)
+float dot_q6k_half(uint bb, uint h, uint xe) {
+    float d = f16u(ldw(bb + 208u));
+    uint qlb = bb + h * 64u, qhb = bb + 128u + h * 32u, scb = bb + 192u + h * 8u;
+    uint sw0 = ldw(scb), sw1 = ldw(scb + 4u);
+    vec4 s0 = vec4(0.0), s1 = vec4(0.0);
+    uint xv = xe >> 2;
+    for (uint u = 0u; u < 8u; u++) {
+        uint qlL = ldw(qlb + u * 4u), qlH = ldw(qlb + 32u + u * 4u), qh = ldw(qhb + u * 4u);
+        vec4 x0 = xs[xv + u], x1 = xs[xv + 8u + u], x2 = xs[xv + 16u + u], x3 = xs[xv + 24u + u];
+        vec4 q0 = nib_lo(qlL) + 16.0 * vec4(float(qh & 3u), float((qh >> 8) & 3u), float((qh >> 16) & 3u), float((qh >> 24) & 3u)) - 32.0;
+        vec4 q1 = nib_lo(qlH) + 16.0 * vec4(float((qh >> 2) & 3u), float((qh >> 10) & 3u), float((qh >> 18) & 3u), float((qh >> 26) & 3u)) - 32.0;
+        vec4 q2 = nib_hi(qlL) + 16.0 * vec4(float((qh >> 4) & 3u), float((qh >> 12) & 3u), float((qh >> 20) & 3u), float((qh >> 28) & 3u)) - 32.0;
+        vec4 q3 = nib_hi(qlH) + 16.0 * vec4(float((qh >> 6) & 3u), float((qh >> 14) & 3u), float((qh >> 22) & 3u), float((qh >> 30) & 3u)) - 32.0;
+        vec4 p = vec4(dot(q0, x0), dot(q1, x1), dot(q2, x2), dot(q3, x3));
+        if (u < 4u) s0 += p; else s1 += p;
+    }
+    vec4 sc0 = vec4(float(int(sw0 << 24) >> 24), float(int(sw0 << 8) >> 24), float(int(sw1 << 24) >> 24), float(int(sw1 << 8) >> 24));
+    vec4 sc1 = vec4(float(int(sw0 << 16) >> 24), float(int(sw0) >> 24), float(int(sw1 << 16) >> 24), float(int(sw1) >> 24));
+    return d * (dot(sc0, s0) + dot(sc1, s1));
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x, ly = gl_LocalInvocationID.y, tid = ly * 16u + lane;
+    uint row0 = gl_WorkGroupID.x * (4u * ROWS_PER_THREAD) + ly * ROWS_PER_THREAD;
+    uint col = gl_WorkGroupID.y; uint z = gl_WorkGroupID.z;
+    uint i12 = z % pc.ne12; uint i13 = z / pc.ne12; uint i02 = i12 / pc.r2; uint i03 = i13 / pc.r3;
+    uint xb = pc.off1 + col * pc.nb11 + i12 * pc.nb12 + i13 * pc.nb13;
+    uint rowb[ROWS_PER_THREAD]; float acc[ROWS_PER_THREAD];
+    for (uint r = 0u; r < ROWS_PER_THREAD; r++) { rowb[r] = pc.off0 + (row0 + r) * pc.nb01 + i02 * pc.nb02 + i03 * pc.nb03; acc[r] = 0.0; }
+    bool vec_ok = (xb & 3u) == 0u;
+    for (uint k0 = 0u; k0 < pc.ne00; k0 += KT) {
+        uint kt = min(KT, pc.ne00 - k0);
+        // x-Kachel kooperativ laden (64 Threads, je 4 Elemente pro Schritt)
+        for (uint e = tid * 4u; e < kt; e += 256u) {
+            uint g = xb + k0 + e;
+            xs[e >> 2] = vec_ok ? src1v[g >> 2] : vec4(src1[g], src1[g + 1u], src1[g + 2u], src1[g + 3u]);
+        }
+        barrier();
+        uint blk0 = k0 >> 8, nbt = kt >> 8;   // Bloecke dieser Kachel
+        if (pc.type == 2u) {
+            for (uint c = lane; c < nbt * 4u; c += 16u) {
+                uint kb = blk0 + (c >> 2), j = c & 3u; uint xe = (c >> 2) * 256u + j * 64u;
+                for (uint r = 0u; r < ROWS_PER_THREAD; r++) if (row0 + r < pc.ne01) acc[r] += dot_q4k_chunk(rowb[r] + kb * 144u, j, xe);
+            }
+        } else {
+            for (uint c = lane; c < nbt * 2u; c += 16u) {
+                uint kb = blk0 + (c >> 1), h = c & 1u; uint xe = (c >> 1) * 256u + h * 128u;
+                for (uint r = 0u; r < ROWS_PER_THREAD; r++) if (row0 + r < pc.ne01) acc[r] += dot_q6k_half(rowb[r] + kb * 210u, h, xe);
+            }
+        }
+        barrier();
+    }
+    for (uint r = 0u; r < ROWS_PER_THREAD; r++) {
+        red[ly * ROWS_PER_THREAD + r][lane] = acc[r];
+    }
+    barrier();
+    if (lane < 4u * ROWS_PER_THREAD) {   // 8 Zeilen: Lanes 0..7 summieren je eine Zeile
+        uint rr = lane; float s = 0.0; for (uint i = 0u; i < 16u; i++) s += red[rr][i];
+        uint row = gl_WorkGroupID.x * (4u * ROWS_PER_THREAD) + rr;
+        if (row < pc.ne01) dst[pc.offd + row + col * pc.nbd1 + i12 * pc.nbd2 + i13 * pc.nbd3] = s;
+    }
+}
