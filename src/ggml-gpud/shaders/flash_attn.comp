@@ -1,0 +1,71 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// FLASH_ATTN_EXT (Korrektheit, Online-Softmax). Ein Workgroup je (Query i, Head h, Batch z).
+// Q [D,N,n_head,n_batch] f32/f16; K [D,M,n_head_kv,n_batch] f16; V [M,DV,n_head_kv,n_batch] f16 (transponiert);
+// mask [M,Npad,nem2,1] f16/f32 (Broadcast head via nem2); out [DV,n_head,N,n_batch] f32.
+// s = scale*(Q.K); if softcap: s=softcap*tanh(s); s += slope*mask; Online-Softmax; O += p*V; O /= L.
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer Q32 { float     q32[]; };
+layout(std430, binding = 1) readonly buffer Q16 { float16_t q16[]; };
+layout(std430, binding = 2) readonly buffer K   { float16_t kk[]; };
+layout(std430, binding = 3) readonly buffer V   { float16_t vv[]; };
+layout(std430, binding = 4) readonly buffer M16 { float16_t m16[]; };
+layout(std430, binding = 5) readonly buffer M32 { float     m32[]; };
+layout(std430, binding = 6) writeonly buffer O  { float     oo[]; };
+layout(push_constant) uniform PC {
+    uint D, DV, M;
+    uint nbq1, nbq2, nbq3;
+    uint nbk1, nbk2, nbk3;
+    uint nbv1, nbv2, nbv3;
+    uint nbm1, nbm2;
+    uint nbd1, nbd2, nbd3;
+    uint offq, offk, offv, offm, offd;
+    uint qt, maskt, gqa, n_head_log2, nem2;
+    float scale, softcap, m0, m1;
+} pc;
+shared float qsh[256];
+shared float acc[256];
+shared float red[128];
+shared float g_c, g_e, g_inv;
+void main() {
+    uint i = gl_WorkGroupID.x, h = gl_WorkGroupID.y, z = gl_WorkGroupID.z;
+    uint hk = h / pc.gqa;
+    uint t = gl_LocalInvocationID.x;
+    uint qbase = pc.offq + i * pc.nbq1 + h * pc.nbq2 + z * pc.nbq3;
+    for (uint d = t; d < pc.D; d += 128u) qsh[d] = (pc.qt == 0u ? q32[qbase + d] : float(q16[qbase + d])) * pc.scale;
+    for (uint d = t; d < pc.DV; d += 128u) acc[d] = 0.0;
+    barrier();
+    float slope = 1.0;
+    if (pc.n_head_log2 != 0u) {
+        float base = (h < pc.n_head_log2) ? pc.m0 : pc.m1;
+        int exph = (h < pc.n_head_log2) ? int(h + 1u) : int(2u * (h - pc.n_head_log2) + 1u);
+        slope = pow(base, float(exph));
+    }
+    float M_ = -1e30, L_ = 0.0;
+    uint kbase = pc.offk + hk * pc.nbk2 + z * pc.nbk3;
+    uint vbase = pc.offv + hk * pc.nbv2 + z * pc.nbv3;
+    uint mbase = pc.offm + i * pc.nbm1 + (h % pc.nem2) * pc.nbm2;
+    for (uint j = 0u; j < pc.M; j++) {
+        float partial = 0.0;
+        for (uint d = t; d < pc.D; d += 128u) partial += qsh[d] * float(kk[kbase + j * pc.nbk1 + d]);
+        red[t] = partial; barrier();
+        for (uint o = 64u; o > 0u; o >>= 1) { if (t < o) red[t] += red[t + o]; barrier(); }
+        if (t == 0u) {
+            float s = red[0];
+            if (pc.softcap != 0.0) s = pc.softcap * tanh(s);
+            float mv = (pc.maskt == 1u) ? float(m16[mbase + j]) : (pc.maskt == 2u ? m32[mbase + j] : 0.0);
+            s += slope * mv;
+            float Mn = max(M_, s);
+            g_c = exp(M_ - Mn); g_e = exp(s - Mn);
+            L_ = L_ * g_c + g_e; M_ = Mn;
+        }
+        barrier();
+        for (uint d = t; d < pc.DV; d += 128u) acc[d] = acc[d] * g_c + g_e * float(vv[vbase + d * pc.nbv1 + j]);
+        barrier();
+    }
+    if (t == 0u) g_inv = (L_ > 0.0) ? 1.0 / L_ : 0.0;
+    barrier();
+    uint obase = pc.offd + h * pc.nbd1 + i * pc.nbd2 + z * pc.nbd3;
+    for (uint d = t; d < pc.DV; d += 128u) oo[obase + d] = acc[d] * g_inv;
+}
