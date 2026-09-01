@@ -32,8 +32,8 @@
   # release-please-config.json). Je Zeile genau EINE Versionsangabe - sonst weiss der
   # generische Ersetzer nicht, welche gemeint ist.
   '_release' = @{
-    base='https://github.com/kekn011/barra/releases/download/v0.2.0' # x-release-please-version
-    tag='v0.2.0' # x-release-please-version
+    base='https://github.com/kekn011/barra/releases/download/v0.3.0' # x-release-please-version
+    tag='v0.3.0' # x-release-please-version
   }
 
   # ---------- Kleinteile, die der Kit-Lauf ebenfalls uebertraegt ----------
