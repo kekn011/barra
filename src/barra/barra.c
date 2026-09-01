@@ -268,7 +268,12 @@ int barra_gpu_dispatch(barra_gpu* g, const uint8_t* spirv, uint32_t slen, uint32
  * Protokoll: siehe gpud-zc.c (C). Shader werden einmal geladen (Handle), Stufen tragen
  * Bindings mit Offset/Range und Push-Constants; alles in EINEM Roundtrip je Batch. */
 #define GPZ3_MAGIC 0x47505A33u
-static int gpu3_dead(barra_gpu3* g){ if(g&&g->sock>=0){ close(g->sock); g->sock=-1; } return -1; }
+static int gpu3_dead(barra_gpu3* g){
+  /* LAUT sterben - errno unterscheidet EPIPE/ECONNRESET (Daemon hat zugemacht) von
+   * EBADF (jemand hat UNSEREN fd geschlossen, z.B. Double-Close eines dmabuf-fd). */
+  if(g&&g->sock>=0){ fprintf(stderr,"barra: GPU3-Session tot (fd=%d, errno=%d %s)\n",g->sock,errno,strerror(errno)); close(g->sock); g->sock=-1; }
+  return -1;
+}
 int barra_gpu3_open(barra_gpu3* g){ if(g) g->autosync=1;
   if(!g) return -1;
   g->sock=dial("gpuzc.sock"); g->nimported=0;
@@ -279,6 +284,10 @@ void barra_gpu3_close(barra_gpu3* g){ if(g&&g->sock>=0){ close(g->sock); g->sock
 int barra_gpu3_import(barra_gpu3* g, barra_zbuf** bufs, int n){
   if(!g||g->sock<0||n<=0||n>ZC_MAXBUF) return -1;
   int fds[ZC_MAXBUF]; uint32_t sizes[ZC_MAXBUF], hd[ZC_MAXBUF];
+  /* fd-Pruefung VOR sendmsg: ein fd<0 in SCM_RIGHTS liefert EBADF, das sonst wie ein toter
+   * Socket aussieht und die GESUNDE Session mitreisst (gpu3_dead). 31.8.: genau so hat der
+   * global freigegebene Scratch (use-after-free ueber Backend-Instanzen) die Session gekillt. */
+  for(int i=0;i<n;i++){ if(bufs[i]->fd<0||!bufs[i]->size){ fprintf(stderr,"barra: GPU3-Import mit ungueltigem Puffer (fd=%d size=%u) - schon freigegeben?\n",bufs[i]->fd,bufs[i]->size); return -1; } }
   for(int i=0;i<n;i++){ fds[i]=bufs[i]->fd; sizes[i]=bufs[i]->size; }
   uint32_t hdr[6]={GPZ3_MAGIC,1,(uint32_t)n,0,0,0}; uint32_t status=1;
   if(send_hdr_fds(g->sock,hdr,fds,n)||wn(g->sock,sizes,n*4)||rn(g->sock,&status,4)) return gpu3_dead(g);
@@ -320,13 +329,21 @@ int barra_gpu3_flags(barra_gpu3* g, uint32_t flags){
 }
 void barra_gpu3_set_autosync(barra_gpu3* g, int on){ if(g) g->autosync=on; }
 int barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* st, int nstage){
-  if(!g||g->sock<0||nstage<=0||nstage>BARRA_GPU3_MAXSTAGE) return -1;
+  /* Fehlerpfade hier muessen LAUT sein (fprintf, nicht GGML-Log: llama-bench schluckt den GGML-Log
+   * komplett) - der stumme r=-1 hat am 31.8. Stunden Diagnose gekostet. */
+  if(!g||g->sock<0||nstage<=0||nstage>BARRA_GPU3_MAXSTAGE){
+    fprintf(stderr,"barra: GPU3-Batch abgelehnt (sock=%d nstage=%d) - Session tot?\n",g?g->sock:-99,nstage);
+    return -1;
+  }
   /* 1) Unimportierte Puffer importieren (einmalig) */
   for(int s=0;s<nstage;s++){
-    if(st[s].sh<0||st[s].nbind<0||st[s].nbind>ZC_MAXBUF||st[s].pcsize>BARRA_GPU3_MAXPC||(st[s].pcsize&&!st[s].pc)) return -1;
+    if(st[s].sh<0||st[s].nbind<0||st[s].nbind>ZC_MAXBUF||st[s].pcsize>BARRA_GPU3_MAXPC||(st[s].pcsize&&!st[s].pc)){
+      fprintf(stderr,"barra: GPU3-Batch Stufe %d ungueltig (sh=%d nbind=%d pcsize=%u)\n",s,st[s].sh,st[s].nbind,st[s].pcsize);
+      return -1;
+    }
     barra_zbuf* need[ZC_MAXBUF]; int k=0;
-    for(int i=0;i<st[s].nbind;i++){ barra_zbuf* z=st[s].binds[i].buf; if(!z) return -1; if(z->gpu_h<0){ int dup_=0; for(int j=0;j<k;j++) if(need[j]==z) dup_=1; if(!dup_) need[k++]=z; } }
-    if(k&&barra_gpu3_import(g,need,k)) return -1;
+    for(int i=0;i<st[s].nbind;i++){ barra_zbuf* z=st[s].binds[i].buf; if(!z){ fprintf(stderr,"barra: GPU3-Batch Stufe %d Bind %d ohne Puffer\n",s,i); return -1; } if(z->gpu_h<0){ int dup_=0; for(int j=0;j<k;j++) if(need[j]==z) dup_=1; if(!dup_) need[k++]=z; } }
+    if(k&&barra_gpu3_import(g,need,k)){ fprintf(stderr,"barra: GPU3-Batch Stufe %d: Import von %d Puffern fehlgeschlagen\n",s,k); return -1; }
   }
   /* 2) CPU-Zugriff schliessen — EINMAL je verschiedenem Puffer (der DMA_BUF_SYNC-ioctl flusht den
    *    ganzen Puffer, ~60 us; je Binding je Stufe gerufen waren das bei 1024 Stufen ~190 ms) */
