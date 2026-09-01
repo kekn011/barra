@@ -45,10 +45,10 @@
     sha256='481a599f3585a762625a60985e30ef0335b1a6265ab9efda9e40b5997f11ab31' }
   'tts-service' = @{ kit='tts'; file='barra-tts.service'; origin='barra'; bytes=305
     sha256='1e319014adb83d62511bcc7c6e8b8fc8274705d97fadf6304466433d7948331b' }
-  'tts-server' = @{ kit='tts'; file='ttsserver.sh'; origin='barra'; bytes=2466
-    sha256='332b320c195caa05d2ed3a2a1e676b70d43fa380b9ba91b985c2f4eefe76379b' }
-  'stt-server' = @{ kit='stt'; file='sttserver.sh'; origin='barra'; bytes=5535
-    sha256='261a85987f9680f55ddc97721c08eceb4b4f96f4ad4de6b4e16d5a151d5c511d' }
+  'tts-server' = @{ kit='tts'; file='ttsserver.sh'; origin='barra'; bytes=3073
+    sha256='252ce6d4cb2192960e0bb0ce7b867dcba796796fb164568fb1ed39f24a4fe13e' }
+  'stt-server' = @{ kit='stt'; file='sttserver.sh'; origin='barra'; bytes=6001
+    sha256='f1262739a710e522d8938d2096f4768ef78cda85e6262506abacca688fa28fd9' }
   'dev-kit' = @{ kit='dev'; file='barra-dev-kit.tar.gz'; origin='barra'; bytes=24877591
     sha256='a7fb69c4e9ec4088c41ae5d9bd90ea74edfcaadc32d74811831778a1d7a2349f' }
 
@@ -57,17 +57,17 @@
   # Bewusst OHNE eigenen sha256 - sie ist die Referenz, nicht der Prueffall.
   'payload-sums' = @{ kit='payload'; file='SHA256SUMS'; origin='barra'; bytes=326
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
-  'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=429630384
-    sha256='834e8901ec2b84435ad0fe01d10ff93782e1466762856a285fc64458b03d22f4'
+  'payload-base' = @{ kit='payload'; file='barra-base.tar.gz'; origin='barra'; bytes=430100696
+    sha256='6977f59562ad97944668cefda97146be98a3a861f3726ac3f998b258a5201660'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   'payload-boot' = @{ kit='payload'; file='boot-lz4.img'; origin='barra'; bytes=53477376
-    sha256='adb51190ffa908a12dd78e16e48a1478488f4d228dd32a8fc894ffd11145a667'
+    sha256='e42b31f7f1d84693e1943bc0f7a13cb7508ccfa2a47dc9070b6b82f9e2f2b194'
     license='Apache-2.0'; licenseUrl='https://github.com/kekn011/barra/blob/main/LICENSE' }
   # rfkill.ko ist mit dem Signaturschluessel DIESES Kernel-Builds signiert (GKI 'protected exports'):
   # es gehoert zum Kernel, nicht zum Base-Image. Ein rfkill.ko aus einem anderen Build wird vom
   # Kernel abgelehnt -> bcmdhd laedt nicht -> Node ohne WLAN (30.8. erlebt).
   'payload-rfkill' = @{ kit='payload'; file='wifi-rfkill.ko'; origin='barra'; bytes=63817
-    sha256='31af0598543616971e5a9e77395705e6c4fd0249dcb3595db14d7c00ecc267c6'
+    sha256='46faf9c43bd90237810e1ef9f0eab055f57f5d4c27600830a76d11e8a89c15e3'
     license='GPL-2.0'; licenseUrl='https://github.com/kekn011/barra/tree/main/kernel' }
   'magisk' = @{
     kit='payload'; file='Magisk-30.7.apk'; origin='upstream'; bytes=11613864
