@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 # SDK-Patch: Bild-Kit (img) in Setup-GUI, Core, i18n, .gitignore einhaengen. BOM/CRLF der .ps1 bleiben erhalten.
 import io, re, os, sys
-R = r'C:\Users\kevin\projects\barra'
+# Repo-Wurzel aus der Lage dieses Skripts (src/img-kit/) ableiten; BARRA_ROOT uebersteuert.
+R = os.environ.get('BARRA_ROOT') or os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 def rd(p):
     b = open(p, 'rb').read()
     bom = b.startswith(b'\xef\xbb\xbf')
