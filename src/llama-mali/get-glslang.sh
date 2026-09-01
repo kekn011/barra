@@ -12,7 +12,8 @@ else
   curl -s "https://api.github.com/repos/KhronosGroup/glslang/releases/tags/$TAG" > "$WORK/rel.json"
 fi
 RTAG=$(grep '"tag_name"' "$WORK/rel.json" | head -1 | sed 's/.*: "\(.*\)".*/\1/')
-URL=$(grep browser_download_url "$WORK/rel.json" | grep -i linux | grep -i release | grep -v debug | head -1 | sed 's/.*"\(https[^"]*\)".*/\1/')
+# .zip erzwingen: seit glslang 16.5 gibt es auch .tar.gz-Assets, die der unzip-Schritt nicht lesen kann (1.9.)
+URL=$(grep browser_download_url "$WORK/rel.json" | grep -i linux | grep -i release | grep -v debug | grep -i '\.zip"' | head -1 | sed 's/.*"\(https[^"]*\)".*/\1/')
 echo "tag=$RTAG url=$URL"
 [ -n "$URL" ] || { echo "FEHLER: kein Linux-Release-Asset gefunden"; exit 1; }
 curl -sL -o "$WORK/glslang.zip" "$URL"
