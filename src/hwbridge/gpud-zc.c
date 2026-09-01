@@ -324,7 +324,10 @@ next:
 #define MAXSTAGE3 4096
 #define MAXPC3 128
 typedef struct { int used; uint32_t nbind, pcsize; VkShaderModule shader; VkDescriptorSetLayout dsl; VkPipelineLayout pll; VkPipeline pipe; } Sh3;
-typedef struct { uint32_t sh,gx,gy,gz,nbind,pcsize; uint32_t hd[MAXBUF]; VkDeviceSize off[MAXBUF], range[MAXBUF]; unsigned char pc[MAXPC3]; } Stage3;
+typedef struct { uint32_t sh,gx,gy,gz,nbind,pcsize,flags; uint32_t hd[MAXBUF]; VkDeviceSize off[MAXBUF], range[MAXBUF]; unsigned char pc[MAXPC3]; } Stage3;
+/* Stage3.flags (v3.1, cmd=7): bit0 = 1 -> KEINE Barriere vor dieser Stufe noetig (Client hat die
+ * Abhaengigkeiten verfolgt: Stufe liest nichts, was seit der letzten Barriere geschrieben wurde).
+ * 0 = Barriere (fail-safe Default; cmd=5-Clients liefern implizit 0 -> altes Verhalten). */
 static void sh3_free(Sh3* e){
   if(e->pipe)vkDestroyPipeline(dev,e->pipe,0); if(e->pll)vkDestroyPipelineLayout(dev,e->pll,0);
   if(e->dsl)vkDestroyDescriptorSetLayout(dev,e->dsl,0); if(e->shader)vkDestroyShaderModule(dev,e->shader,0);
@@ -389,7 +392,7 @@ static int run_stages3(DPool3* dp, Sh3* sh, HBuf* h, Stage3* st, uint32_t nstage
   VkMemoryBarrier s2s={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT,.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT};
   for(uint32_t s=0;s<nstage;s++){
     Sh3* e=&sh[st[s].sh];
-    if(s&&!(flags&1)) vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&s2s,0,0,0,0);
+    if(s&&!(flags&1)&&!(st[s].flags&1)) vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&s2s,0,0,0,0);
     vkCmdBindPipeline(cb,VK_PIPELINE_BIND_POINT_COMPUTE,e->pipe);
     if(st[s].nbind) vkCmdBindDescriptorSets(cb,VK_PIPELINE_BIND_POINT_COMPUTE,e->pll,0,1,&dset[s],0,0);
     if(st[s].pcsize) vkCmdPushConstants(cb,e->pll,VK_SHADER_STAGE_COMPUTE_BIT,0,st[s].pcsize,st[s].pc);
@@ -442,11 +445,11 @@ static void serve_v3(int c, uint32_t* hdr, int* fds, int nfd){
       VK_LOCK(); int r=sh3_load(&sh[slot],spv,slen,nbind,pcsize); VK_UNLOCK();
       free(spv);
       if(r==0){ status=0; shh=(uint32_t)slot; wfull(c,&status,4); wfull(c,&shh,4); } else wfull(c,&status,4);
-    } else if(cmd==5){                            /* DISPATCH nstage */
+    } else if(cmd==5||cmd==7){                    /* DISPATCH nstage (7 = v3.1 mit Stufen-Flags) */
       uint32_t nstage=hdr[2]; int ok=(nstage>=1&&nstage<=MAXSTAGE3);
       for(uint32_t s=0; ok&&s<nstage; s++){
-        uint32_t sx[6]; if(rfull(c,sx,24)){ ok=0; break; }
-        Stage3* S=&st[s]; S->sh=sx[0]; S->gx=sx[1]; S->gy=sx[2]; S->gz=sx[3]; S->nbind=sx[4]; S->pcsize=sx[5];
+        uint32_t sx[7]; sx[6]=0; if(rfull(c,sx,cmd==7?28:24)){ ok=0; break; }
+        Stage3* S=&st[s]; S->sh=sx[0]; S->gx=sx[1]; S->gy=sx[2]; S->gz=sx[3]; S->nbind=sx[4]; S->pcsize=sx[5]; S->flags=sx[6];
         if(S->sh>=MAXSH3||!sh[S->sh].used||S->nbind>MAXBUF||S->nbind!=sh[S->sh].nbind||S->pcsize!=sh[S->sh].pcsize||sx[1]>65535u||sx[2]>65535u||sx[3]>65535u){ ok=0; break; }
         uint32_t bd[MAXBUF*4]; if(S->nbind&&rfull(c,bd,S->nbind*16)){ ok=0; break; }
         for(uint32_t i=0;i<S->nbind;i++){

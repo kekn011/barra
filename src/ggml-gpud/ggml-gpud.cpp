@@ -40,23 +40,25 @@ struct pc_softmax  { uint32_t ne00, ne01, ne02, ne11, ne12, ne13, nb01, nb02, nb
 struct pc_glu      { uint32_t ne0, nrows, nb01, nb11, nbd1, offa, offb, offd, split, swapped, op, n; };
 struct pc_set_rows { uint32_t ne00, ne01, ne02, ne03, nb01, nb02, nb03, ne11, ne12, nb11, nb12, nbd1, nbd2, nbd3, offa, offi, offd, i64, dt, nrows; };
 
-struct shader_def { const uint8_t * spv; uint32_t len; uint32_t nbind; uint32_t pcsize; const char * name; };
+// wmask: Bitmaske der GESCHRIEBENEN Bindings (aus den writeonly-Deklarationen der Shader; soft_max
+// Binding 3 ist read+write -> zaehlt als Schreiber). Grundlage fuer das Barrieren-Tracking (v3.1).
+struct shader_def { const uint8_t * spv; uint32_t len; uint32_t nbind; uint32_t pcsize; const char * name; uint32_t wmask; };
 static const shader_def g_shaders[SH_N] = {
-    { gpud_spv_binary,   gpud_spv_binary_len,   3, sizeof(pc_binary),   "binary"   },
-    { gpud_spv_unary,    gpud_spv_unary_len,    2, sizeof(pc_unary),    "unary"    },
-    { gpud_spv_rms_norm, gpud_spv_rms_norm_len, 3, sizeof(pc_rms),      "rms_norm" },
-    { gpud_spv_cpy,      gpud_spv_cpy_len,      4, sizeof(pc_cpy),      "cpy"      },
-    { gpud_spv_get_rows, gpud_spv_get_rows_len, 3, sizeof(pc_get_rows), "get_rows" },
-    { gpud_spv_mul_mat,  gpud_spv_mul_mat_len,  3, sizeof(pc_mul_mat),  "mul_mat"  },
-    { gpud_spv_rope,     gpud_spv_rope_len,     4, sizeof(pc_rope),     "rope"     },
-    { gpud_spv_soft_max, gpud_spv_soft_max_len, 4, sizeof(pc_softmax),  "soft_max" },
-    { gpud_spv_glu,      gpud_spv_glu_len,      3, sizeof(pc_glu),      "glu"      },
-    { gpud_spv_set_rows, gpud_spv_set_rows_len, 4, sizeof(pc_set_rows), "set_rows" },
-    { gpud_spv_gemv_q,   gpud_spv_gemv_q_len,   4, sizeof(pc_gemv),     "gemv_q"   },
-    { gpud_spv_quantize_q8_1, gpud_spv_quantize_q8_1_len, 2, sizeof(pc_quant),  "quant_q81" },
-    { gpud_spv_gemv_q4k_iq,   gpud_spv_gemv_q4k_iq_len,   3, sizeof(pc_gemv_iq), "gemv_q4k_iq" },
-    { gpud_spv_gemv_q6k_iq,   gpud_spv_gemv_q6k_iq_len,   3, sizeof(pc_gemv_iq), "gemv_q6k_iq" },
-    { gpud_spv_flash_attn,    gpud_spv_flash_attn_len,    7, sizeof(pc_flash),   "flash_attn" },
+    { gpud_spv_binary,   gpud_spv_binary_len,   3, sizeof(pc_binary),   "binary"  , 0x4 },
+    { gpud_spv_unary,    gpud_spv_unary_len,    2, sizeof(pc_unary),    "unary"   , 0x2 },
+    { gpud_spv_rms_norm, gpud_spv_rms_norm_len, 3, sizeof(pc_rms),      "rms_norm", 0x4 },
+    { gpud_spv_cpy,      gpud_spv_cpy_len,      4, sizeof(pc_cpy),      "cpy"     , 0xC },
+    { gpud_spv_get_rows, gpud_spv_get_rows_len, 3, sizeof(pc_get_rows), "get_rows", 0x4 },
+    { gpud_spv_mul_mat,  gpud_spv_mul_mat_len,  3, sizeof(pc_mul_mat),  "mul_mat" , 0x4 },
+    { gpud_spv_rope,     gpud_spv_rope_len,     4, sizeof(pc_rope),     "rope"    , 0x8 },
+    { gpud_spv_soft_max, gpud_spv_soft_max_len, 4, sizeof(pc_softmax),  "soft_max", 0x8 },
+    { gpud_spv_glu,      gpud_spv_glu_len,      3, sizeof(pc_glu),      "glu"     , 0x4 },
+    { gpud_spv_set_rows, gpud_spv_set_rows_len, 4, sizeof(pc_set_rows), "set_rows", 0xC },
+    { gpud_spv_gemv_q,   gpud_spv_gemv_q_len,   4, sizeof(pc_gemv),     "gemv_q"  , 0x8 },
+    { gpud_spv_quantize_q8_1, gpud_spv_quantize_q8_1_len, 2, sizeof(pc_quant),  "quant_q81", 0x2 },
+    { gpud_spv_gemv_q4k_iq,   gpud_spv_gemv_q4k_iq_len,   3, sizeof(pc_gemv_iq), "gemv_q4k_iq", 0x4 },
+    { gpud_spv_gemv_q6k_iq,   gpud_spv_gemv_q6k_iq_len,   3, sizeof(pc_gemv_iq), "gemv_q6k_iq", 0x4 },
+    { gpud_spv_flash_attn,    gpud_spv_flash_attn_len,    7, sizeof(pc_flash),   "flash_attn", 0x40 },
 };
 
 // ---------------------------------------------------------------- Session (eine je Prozess; gpud-zc serialisiert ohnehin)
@@ -196,8 +198,24 @@ struct gpud_encoder {
     size_t nst = 0, nbd = 0;
     uint64_t wgs = 0;                      // Workgroups im Batch (fuer die est_wg-Messung)
     double pred_ms = 0;                    // vorhergesagte GPU-Zeit des Batches (wgs * est_wg)
+    // Barrieren-Tracking (v3.1): Byte-Bereiche, die seit der letzten Barriere gelesen/geschrieben
+    // wurden (rohe mmap-Zeiger -> ggml-Aliasing ist automatisch konservativ abgedeckt). Eine neue
+    // Stufe braucht eine Barriere bei RAW (liest Geschriebenes), WAR (ueberschreibt Gelesenes) oder
+    // WAW; dann werden die Listen geleert. Schreiber zaehlen konservativ auch als Leser.
+    struct rng { uintptr_t lo, hi; };
+    std::vector<rng> rd_, wr_;
+    static bool ov(const std::vector<rng> & v, uintptr_t lo, uintptr_t hi) { for (auto & r : v) if (lo < r.hi && r.lo < hi) return true; return false; }
+    uint32_t barrier_flag(const rng * rs, int nr, const rng * ws, int nw) {
+        bool need = false;
+        for (int i = 0; i < nr && !need; i++) need = ov(wr_, rs[i].lo, rs[i].hi);
+        for (int i = 0; i < nw && !need; i++) need = ov(wr_, ws[i].lo, ws[i].hi) || ov(rd_, ws[i].lo, ws[i].hi);
+        if (need) { rd_.clear(); wr_.clear(); }
+        for (int i = 0; i < nr; i++) rd_.push_back(rs[i]);
+        for (int i = 0; i < nw; i++) { rd_.push_back(ws[i]); wr_.push_back(ws[i]); }
+        return need ? 0u : 1u;             // bit0 = Barriere ueberspringen
+    }
     gpud_encoder() { st.resize(GPUD_MAX_STAGE); bd.resize(GPUD_MAX_STAGE * 4); pcs.resize((size_t) GPUD_MAX_STAGE * GPUD_MAX_PC); }
-    void reset() { nst = 0; nbd = 0; wgs = 0; pred_ms = 0; opnames.clear(); }
+    void reset() { nst = 0; nbd = 0; wgs = 0; pred_ms = 0; opnames.clear(); rd_.clear(); wr_.clear(); }
     bool full(int nbind) const {
         if ((int) nst >= g_s.maxstage || nbd + nbind > bd.size()) return true;
         if (g_s.fixed) return false;
@@ -229,18 +247,29 @@ struct gpud_encoder {
             uint64_t end = (uint64_t) ((const char *) t->data - (const char *) c->z.map) + ggml_nbytes(t);
             if (end > c->z.size) { GGML_LOG_ERROR("gpud: Tensor %s ragt aus dem Puffer (%llu > %u)" "\n", t->name, (unsigned long long) end, c->z.size); return false; }
         }
+        // Abhaengigkeiten aus Tensor-Bereichen + wmask ableiten
+        rng rs[8], ws[8]; int nr = 0, nw = 0;
+        for (int i = 0; i < nbind; i++) {
+            const ggml_tensor * t = ts[i] ? ts[i] : ts[0];
+            uintptr_t lo = (uintptr_t) t->data, hi = lo + ggml_nbytes(t);
+            if (g_shaders[sh].wmask >> i & 1) ws[nw++] = { lo, hi }; else rs[nr++] = { lo, hi };
+        }
+        uint32_t fl = barrier_flag(rs, nr, ws, nw);
         uint8_t * p = &pcs[nst * GPUD_MAX_PC]; memcpy(p, pc, pcsize);
-        st[nst] = barra_gpu3_stage{ g_s.sh[sh], gx, gy, gz, b, nbind, p, pcsize };
+        st[nst] = barra_gpu3_stage{ g_s.sh[sh], gx, gy, gz, b, nbind, p, pcsize, fl };
         nst++; nbd += nbind; opnames.push_back(g_shaders[sh].name);
         uint64_t wg = (uint64_t) gx * gy * gz; wgs += wg; pred_ms += wg * g_s.est_wg;
         return true;
     }
-    bool push_raw(int sh, uint32_t gx, uint32_t gy, uint32_t gz, const barra_gpu3_bind * src, int nbind, const void * pc, uint32_t pcsize) {
+    // push_raw: Aufrufer liefert die Lese-/Schreib-Bereiche explizit (Scratch usw.)
+    bool push_raw(int sh, uint32_t gx, uint32_t gy, uint32_t gz, const barra_gpu3_bind * src, int nbind, const void * pc, uint32_t pcsize,
+                  const rng * rs, int nr, const rng * ws, int nw) {
         if (full(nbind)) return false;
         barra_gpu3_bind * bb = &bd[nbd];
         for (int i = 0; i < nbind; i++) { if (!src[i].buf || (src[i].off % GPUD_ALIGN)) return false; bb[i] = src[i]; }
+        uint32_t fl = barrier_flag(rs, nr, ws, nw);
         uint8_t * pp = &pcs[nst * GPUD_MAX_PC]; memcpy(pp, pc, pcsize);
-        st[nst] = barra_gpu3_stage{ g_s.sh[sh], gx, gy, gz, bb, nbind, pp, pcsize };
+        st[nst] = barra_gpu3_stage{ g_s.sh[sh], gx, gy, gz, bb, nbind, pp, pcsize, fl };
         nst++; nbd += nbind; opnames.push_back(g_shaders[sh].name);
         uint64_t wg = (uint64_t) gx * gy * gz; wgs += wg; pred_ms += wg * g_s.est_wg;
         return true;
@@ -457,7 +486,9 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
                 barra_gpu3_bind binds[2] = { bx, bq };
                 if (enc.full(2)) { if (g_s.log) GGML_LOG_INFO("gpud: flush wg full(2) nst=%zu maxstage=%d\n", enc.nst, g_s.maxstage); if (!flush()) return false; }
                 uint32_t gx, gy; grid2(pc.nblk, gx, gy);
-                if (!enc.push_raw(SH_QUANT_Q81, gx, gy, 1, binds, 2, &pc, sizeof(pc))) return false;
+                gpud_encoder::rng qr[1] = { { (uintptr_t) s1->data, (uintptr_t) s1->data + ggml_nbytes(s1) } };
+                gpud_encoder::rng qw[1] = { { (uintptr_t) g_s.scratch.map, (uintptr_t) g_s.scratch.map + need } };
+                if (!enc.push_raw(SH_QUANT_Q81, gx, gy, 1, binds, 2, &pc, sizeof(pc), qr, 1, qw, 1)) return false;
                 ctx->qx = s1;
             }
             // Stufe 2: int-dot-GEMV (W, scratch, dst). q4_K: Strides in uvec4 (144-B-Block, 16-aligned);
@@ -478,7 +509,10 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
                 barra_gpu3_bind binds[3] = { bw, bq, bd };
                 if (enc.full(3)) { if (g_s.log) GGML_LOG_INFO("gpud: flush wg full(3) nst=%zu maxstage=%d\n", enc.nst, g_s.maxstage); if (!flush()) return false; }
                 uint32_t gx, gy; grid2((pc.ne01 + 7) / 8, gx, gy);   // 8 Zeilen je Workgroup
-                if (!enc.push_raw(q6 ? SH_GEMV_Q6K_IQ : SH_GEMV_Q4K_IQ, gx, pc.ne11, (uint32_t) (s1->ne[2] * s1->ne[3]), binds, 3, &pc, sizeof(pc))) return false;
+                gpud_encoder::rng gr[2] = { { (uintptr_t) s0->data, (uintptr_t) s0->data + ggml_nbytes(s0) },
+                                            { (uintptr_t) g_s.scratch.map, (uintptr_t) g_s.scratch.map + need } };
+                gpud_encoder::rng gw[1] = { { (uintptr_t) t->data, (uintptr_t) t->data + ggml_nbytes(t) } };
+                if (!enc.push_raw(q6 ? SH_GEMV_Q6K_IQ : SH_GEMV_Q4K_IQ, gx, pc.ne11, (uint32_t) (s1->ne[2] * s1->ne[3]), binds, 3, &pc, sizeof(pc), gr, 2, gw, 1)) return false;
             }
             return true;
         }

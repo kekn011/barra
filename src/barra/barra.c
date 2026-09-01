@@ -355,18 +355,18 @@ int barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* st, int nstage){
   if(g_t_on) clock_gettime(CLOCK_MONOTONIC,&tt[1]);
   if(g->autosync) for(int j=0;j<nu;j++) barra_zc_cpu_end(uniq[j]);
   if(g_t_on) clock_gettime(CLOCK_MONOTONIC,&tt[2]);
-  uint32_t hdr[6]={GPZ3_MAGIC,5,(uint32_t)nstage,0,0,0}; int rc=-1,desync=0; uint32_t status=1;
+  uint32_t hdr[6]={GPZ3_MAGIC,7,(uint32_t)nstage,0,0,0}; int rc=-1,desync=0; uint32_t status=1;   /* cmd=7: v3.1-Stufenheader mit flags (Daemon >= 1.9. noetig; cmd=5 bleibt im Daemon fuer alte Clients) */
   if(send_hdr_fds(g->sock,hdr,0,0)==0){
     rc=0;
     /* Alle Stufen in EINEN Puffer und mit EINEM write() senden: pro Stufe ein eigener write()
      * liess Client und Daemon je Stufe ueber den Socket pingpongen (~4 ms Scheduler-Roundtrip je
      * Stufe bei idle-geparkten Cores -> 138 ms/Batch statt 14 ms GPU, gemessen 30.8.). */
-    size_t cap=(size_t)nstage*(24+ZC_MAXBUF*16+BARRA_GPU3_MAXPC);
+    size_t cap=(size_t)nstage*(28+ZC_MAXBUF*16+BARRA_GPU3_MAXPC);
     unsigned char* big=malloc(cap); size_t bn=0;
     if(!big){ rc=-1; desync=1; }
     for(int s=0;s<nstage&&rc==0;s++){
       uint32_t* w=(uint32_t*)(big+bn);
-      w[0]=(uint32_t)st[s].sh; w[1]=st[s].gx; w[2]=st[s].gy; w[3]=st[s].gz; w[4]=(uint32_t)st[s].nbind; w[5]=st[s].pcsize; bn+=24;
+      w[0]=(uint32_t)st[s].sh; w[1]=st[s].gx; w[2]=st[s].gy; w[3]=st[s].gz; w[4]=(uint32_t)st[s].nbind; w[5]=st[s].pcsize; w[6]=st[s].flags; bn+=28;
       for(int i=0;i<st[s].nbind;i++){ uint32_t* b=(uint32_t*)(big+bn); b[0]=(uint32_t)st[s].binds[i].buf->gpu_h; b[1]=(uint32_t)(st[s].binds[i].off&0xffffffffu); b[2]=(uint32_t)(st[s].binds[i].off>>32); b[3]=st[s].binds[i].range; bn+=16; }
       if(st[s].pcsize){ memcpy(big+bn,st[s].pc,st[s].pcsize); bn+=st[s].pcsize; }
     }

@@ -111,6 +111,9 @@ typedef struct {
   uint32_t gx, gy, gz;                      /* Dispatch-Dimensionen */
   const barra_gpu3_bind* binds; int nbind;  /* Storage-Bindings 0..nbind-1 (nbind == beim Laden) */
   const void* pc; uint32_t pcsize;          /* Push-Constants (pcsize == beim Laden) */
+  uint32_t flags;                           /* v3.1: bit0 = 1 -> KEINE Barriere vor dieser Stufe noetig
+                                             * (Aufrufer garantiert: liest nichts seit der letzten
+                                             * Barriere Geschriebenes). 0 = Barriere (fail-safe). */
 } barra_gpu3_stage;
 int  barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* stages, int nstage);   /* 0=ok; ein Roundtrip */
 
