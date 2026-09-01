@@ -65,11 +65,22 @@ struct gpud_session {
     int sh[SH_N];
     std::mutex mtx;
     bool log = false;
-    // Default 64: ein Batch mit ~400 Stufen (ganzer Token) hat mit den M1-Kerneln (~7 s GPU-Zeit) das Geraet
-    // HART aufgehaengt (30.8., kein pstore, Strom ziehen); mit 32 Stufen lief es. Vermutlich Job-Timeout/GPU-Reset
-    // im Mali-Treiber. Erst mit schnellen Kerneln (M2) wieder anheben - und dann nach GPU-Zeit je Batch begrenzen.
-    int maxstage = 64;               // GGML_GPUD_MAXSTAGE ueberschreibt (1..4096)
+    // Ein Batch mit ~7 s GPU-Zeit hat das Geraet HART aufgehaengt (30.8., kein pstore, Strom ziehen;
+    // vermutlich Job-Timeout/GPU-Reset im Mali-Treiber). Deshalb wird der Batch nach VORHERGESAGTER
+    // GPU-Zeit begrenzt (31.8.): je Workgroup wird eine gemessene ms-Schaetzung gefuehrt (est_wg, EMA:
+    // sofort HOCH bei Ueberraschung, langsam runter), der Encoder flusht bei pred_ms >= budget_ms.
+    // Workgroups skalieren mit der Arbeit (Prefill ~30x Decode je Stufe) -> Prefill drosselt a priori.
+    // GGML_GPUD_MAXSTAGE=<n> schaltet auf das alte FIXE Verhalten (Reproduzierbarkeit alter Messungen).
+    int maxstage = 512;              // harte Stufen-Obergrenze; im Fix-Modus die Batchgroesse
+    bool fixed = false;              // GGML_GPUD_MAXSTAGE gesetzt -> kein Zeit-Budget
+    double budget_ms = 100.0;        // GGML_GPUD_BUDGET_MS ueberschreibt (1..2000); 100 ms = der am
+                                     // 30./31.8. vermessene sichere Decode-Betriebspunkt (MS=512, med 103 ms)
+    double est_wg = 0.0;             // gemessene ms je Workgroup (0 = noch keine Messung -> Bootstrap-Cap 64)
     barra_zbuf scratch{}; bool scratch_ok = false; uint32_t scratch_sz = 0;   // x-q8_1 fuer int-dot-GEMV
+    // Scratch ist GLOBAL, Backends gibt es MEHRERE (llama-bench/Server ueberlappen Kontexte beim
+    // Wechsel). 31.8.: gpud_free der ALTEN Instanz hat den Scratch unter der neuen weggezogen ->
+    // Re-Import mit fd=-1 -> EBADF -> Session tot. Deshalb Refcount: Scratch stirbt mit der letzten.
+    int nbackends = 0;
     FILE * trace = nullptr;          // GGML_GPUD_TRACE=<datei>: je Batch Stufen + Ops, sofort geflusht
 };
 static gpud_session g_s;
@@ -78,7 +89,8 @@ static bool gpud_session_open() {
     std::lock_guard<std::mutex> lock(g_s.mtx);
     if (g_s.open) return true;
     g_s.log = getenv("GGML_GPUD_LOG") != nullptr;
-    if (const char * e = getenv("GGML_GPUD_MAXSTAGE")) { int v = atoi(e); if (v >= 1 && v <= GPUD_MAX_STAGE) g_s.maxstage = v; }
+    if (const char * e = getenv("GGML_GPUD_MAXSTAGE")) { int v = atoi(e); if (v >= 1 && v <= GPUD_MAX_STAGE) { g_s.maxstage = v; g_s.fixed = true; } }
+    if (const char * e = getenv("GGML_GPUD_BUDGET_MS")) { double v = atof(e); if (v >= 1.0 && v <= 2000.0) g_s.budget_ms = v; }
     if (const char * e = getenv("GGML_GPUD_TRACE")) g_s.trace = fopen(e, "w");
     if (barra_gpu3_open(&g_s.g)) { GGML_LOG_ERROR("gpud: gpuzc.sock nicht erreichbar (gpud-zc v3 laeuft?)\n"); return false; }
     for (int i = 0; i < SH_N; i++) {
@@ -181,9 +193,16 @@ struct gpud_encoder {
     std::vector<barra_gpu3_bind>  bd;      // reserviert, Zeiger bleiben gueltig
     std::vector<uint8_t>          pcs;     // GPUD_MAX_PC je Stufe
     size_t nst = 0, nbd = 0;
+    uint64_t wgs = 0;                      // Workgroups im Batch (fuer die est_wg-Messung)
+    double pred_ms = 0;                    // vorhergesagte GPU-Zeit des Batches (wgs * est_wg)
     gpud_encoder() { st.resize(GPUD_MAX_STAGE); bd.resize(GPUD_MAX_STAGE * 4); pcs.resize((size_t) GPUD_MAX_STAGE * GPUD_MAX_PC); }
-    void reset() { nst = 0; nbd = 0; opnames.clear(); }
-    bool full(int nbind) const { return (int) nst >= g_s.maxstage || nbd + nbind > bd.size(); }
+    void reset() { nst = 0; nbd = 0; wgs = 0; pred_ms = 0; opnames.clear(); }
+    bool full(int nbind) const {
+        if ((int) nst >= g_s.maxstage || nbd + nbind > bd.size()) return true;
+        if (g_s.fixed) return false;
+        if (g_s.est_wg <= 0) return (int) nst >= 64;            // Bootstrap: klein anfangen bis zur ersten Messung
+        return nst > 0 && pred_ms >= g_s.budget_ms;             // Zeit-Budget (>=1 Stufe je Batch garantiert)
+    }
     std::vector<const char *> opnames;   // je Stufe (nur Trace)
     // Binding fuer einen Tensor: Basis 64-aligned, Rest als Byte-Offset zurueck
     static bool bind(const ggml_tensor * t, barra_gpu3_bind & b, uint32_t & rem) {
@@ -212,6 +231,7 @@ struct gpud_encoder {
         uint8_t * p = &pcs[nst * GPUD_MAX_PC]; memcpy(p, pc, pcsize);
         st[nst] = barra_gpu3_stage{ g_s.sh[sh], gx, gy, gz, b, nbind, p, pcsize };
         nst++; nbd += nbind; opnames.push_back(g_shaders[sh].name);
+        uint64_t wg = (uint64_t) gx * gy * gz; wgs += wg; pred_ms += wg * g_s.est_wg;
         return true;
     }
     bool push_raw(int sh, uint32_t gx, uint32_t gy, uint32_t gz, const barra_gpu3_bind * src, int nbind, const void * pc, uint32_t pcsize) {
@@ -221,6 +241,7 @@ struct gpud_encoder {
         uint8_t * pp = &pcs[nst * GPUD_MAX_PC]; memcpy(pp, pc, pcsize);
         st[nst] = barra_gpu3_stage{ g_s.sh[sh], gx, gy, gz, bb, nbind, pp, pcsize };
         nst++; nbd += nbind; opnames.push_back(g_shaders[sh].name);
+        uint64_t wg = (uint64_t) gx * gy * gz; wgs += wg; pred_ms += wg * g_s.est_wg;
         return true;
     }
 };
@@ -298,10 +319,19 @@ static enum ggml_status gpud_graph_compute(ggml_backend_t backend, ggml_cgraph *
         if (g_s.trace) { fprintf(g_s.trace, "t=%.1f batch #%d: %zu Stufen:", gpud_now_ms(), ctx->n_batches + 1, enc.nst); for (size_t k = 0; k < enc.nst; k++) fprintf(g_s.trace, " %s", enc.opnames[k]); fprintf(g_s.trace, "\n"); fflush(g_s.trace); }
         int r; double t0 = gpud_now_ms();
         { std::lock_guard<std::mutex> lock(g_s.mtx); r = barra_gpu3_batch(&g_s.g, enc.st.data(), (int) enc.nst); }
-        ctx->ms_batch += gpud_now_ms() - t0;
+        double dt = gpud_now_ms() - t0;
+        ctx->ms_batch += dt;
         ctx->n_batches++;
-        if (g_s.trace) { fprintf(g_s.trace, "batch #%d fertig r=%d %.2f ms" "\n", ctx->n_batches, r, gpud_now_ms() - t0); fflush(g_s.trace); }
-        if (r) { GGML_LOG_ERROR("gpud: Batch mit %zu Stufen fehlgeschlagen (%d)\n", enc.nst, r); enc.reset(); return false; }
+        // est_wg nachfuehren: bei Ueberraschung nach oben SOFORT uebernehmen (Sicherheit gegen den
+        // Geraete-Hang), nach unten nur langsam (10 %/Batch) — Ausreisser druecken das Tempo kurz,
+        // reissen aber nie das Budget.
+        if (!g_s.fixed && r == 0 && enc.wgs > 0) {
+            double per = dt / (double) enc.wgs;
+            if (g_s.est_wg <= 0 || per > g_s.est_wg) g_s.est_wg = per;
+            else g_s.est_wg = 0.9 * g_s.est_wg + 0.1 * per;
+        }
+        if (g_s.trace) { fprintf(g_s.trace, "batch #%d fertig r=%d %.2f ms (pred %.1f, wgs %llu, est_wg %.4g)" "\n", ctx->n_batches, r, dt, enc.pred_ms, (unsigned long long) enc.wgs, g_s.est_wg); fflush(g_s.trace); }
+        if (r) { fprintf(stderr, "gpud: Batch mit %zu Stufen fehlgeschlagen (%d)\n", enc.nst, r); enc.reset(); return false; }   // fprintf: llama-bench schluckt GGML_LOG
         enc.reset();
         return true;
     };
@@ -571,7 +601,8 @@ static void gpud_free(ggml_backend_t backend) {
     gpud_backend_ctx * ctx = (gpud_backend_ctx *) backend->context;
     if (g_s.log) GGML_LOG_INFO("gpud: %d Knoten GPU, %d Knoten CPU-Rueckfall, %d Batches\n", ctx->n_gpu, ctx->n_cpu, ctx->n_batches);
     if (ctx->cpu) ggml_backend_free(ctx->cpu);
-    if (g_s.scratch_ok) { std::lock_guard<std::mutex> lock(g_s.mtx); barra_zbuf * pz = &g_s.scratch; barra_gpu3_release(&g_s.g, &pz, 1); barra_zc_free(&g_s.scratch); g_s.scratch_ok = false; }
+    { std::lock_guard<std::mutex> lock(g_s.mtx);
+      if (--g_s.nbackends <= 0 && g_s.scratch_ok) { barra_zbuf * pz = &g_s.scratch; barra_gpu3_release(&g_s.g, &pz, 1); barra_zc_free(&g_s.scratch); g_s.scratch_ok = false; g_s.scratch_sz = 0; } }
     delete ctx; delete backend;
 }
 static void gpud_synchronize(ggml_backend_t) {}   // Batch ist synchron
@@ -597,6 +628,7 @@ static ggml_guid_t gpud_guid(void) { static ggml_guid g = { 0x9d, 0x0b, 0x47, 0x
 
 ggml_backend_t ggml_backend_gpud_init(void) {
     if (!gpud_session_open()) return nullptr;
+    { std::lock_guard<std::mutex> lock(g_s.mtx); g_s.nbackends++; }
     ggml_backend_t b = new ggml_backend { gpud_guid(), gpud_backend_i, ggml_backend_reg_dev_get(ggml_backend_gpud_reg(), 0), new gpud_backend_ctx() };
     return b;
 }
