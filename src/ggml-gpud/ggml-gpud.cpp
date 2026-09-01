@@ -348,7 +348,7 @@ static ggml_backend_buffer_t gpud_nat_buft_alloc_buffer(ggml_backend_buffer_type
     gpud_buffer_ctx * c = new gpud_buffer_ctx();
     c->z.fd = -1; c->z.map = fake; c->z.size = (uint32_t) sz; c->z.gpu_h = hnd; c->z.tpu_h = -1; c->z.dsp_h = -1;
     c->state = 1;   // Geraet besitzt IMMER (CPU hat keinen echten Zugriff)
-    fprintf(stderr, "gpud: nativer Puffer %zu MB (handle %d)\n", sz >> 20, hnd);   // fprintf: llama-bench schluckt GGML_LOG
+    if (g_s.log) fprintf(stderr, "gpud: nativer Puffer %zu MB (handle %d)\n", sz >> 20, hnd);   // fprintf: llama-bench schluckt GGML_LOG
     return ggml_backend_buffer_init(buft, gpud_nat_buffer_i, c, sz);
 }
 // q6_K liegt im Native-Puffer REPACKT (224 B je Block, 16-B-aligned - die CPU liest ihn nie):
@@ -908,12 +908,6 @@ static ggml_backend_buffer_type_t gpud_dev_get_buffer_type(ggml_backend_dev_t) {
 static bool gpud_dev_supports_op(ggml_backend_dev_t, const ggml_tensor * op) {
     bool r = gpud_supports_op(op);
     if (!r && getenv("GGML_GPUD_LOGREJECT")) { const ggml_tensor* a=op->src[0]; fprintf(stderr, "REJ %s dt=%s s0=%s cont0=%d same=%d ne=%ld,%ld,%ld,%ld\n", ggml_op_name(op->op), ggml_type_name(op->type), a?ggml_type_name(a->type):"-", a?(int)ggml_is_contiguous(a):-1, a?(int)ggml_are_same_shape(a,op):-1, (long)op->ne[0],(long)op->ne[1],(long)op->ne[2],(long)op->ne[3]); }
-    if (false) {
-        const ggml_tensor * s0 = op->src[0], * s1 = op->src[1];
-        GGML_LOG_INFO("gpud: ABLEHNT %s  dst=%d[%ld,%ld,%ld,%ld] s0=%s s1=%s\n", ggml_op_name(op->op), (int)op->type,
-            (long)op->ne[0],(long)op->ne[1],(long)op->ne[2],(long)op->ne[3],
-            s0?ggml_type_name(s0->type):"-", s1?ggml_type_name(s1->type):"-");
-    }
     return r;
 }
 static bool gpud_dev_supports_buft(ggml_backend_dev_t, ggml_backend_buffer_type_t buft) { return gpud_buft_ours(buft); }
