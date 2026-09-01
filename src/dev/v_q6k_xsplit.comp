@@ -27,7 +27,7 @@ layout(push_constant) uniform PC {
     uint nb02h, nb03h;
     uint nb11, nb12, nb13;         // src1(x)-Strides (Elemente, fuer Spaltenindex)
     uint nbd1, nbd2, nbd3;
-    uint off0h, offxq, offd;       // off0h in u16; offxq = nblk_all (Split-Layout)
+    uint off0h, offxq, offd;       // off0h in u16; offxq in uint (q8_1-Block-Basis der Spalte 0)
     uint r2, r3, n256, xqcols;     // xqcols = nb32 (q8_1-Bloecke je Spalte)
 } pc;
 #define LPR 8u
@@ -81,7 +81,7 @@ void main() {
     uint rr = valid ? row : 0u;
     uint wrow = 2u * (pc.off0h + rr * pc.nb01h + i02 * pc.nb02h + i03 * pc.nb03h);   // Byte-Basis der Zeile
     uint xcol = (col * pc.nb11 + i12 * pc.nb12 + i13 * pc.nb13) / pc.ne00;
-    uint nblk_all = pc.offxq;   // offxq = Gesamt-Blockzahl (Split-Layout)
+    uint nblk_all = pc.xqcols * pc.ne11 * pc.ne12;
     uint qs4base = ((nblk_all + 3u) & ~3u) >> 2;
     uint xhdr0 = xcol * pc.xqcols;
     uint xqs40 = qs4base + xcol * pc.xqcols * 2u;

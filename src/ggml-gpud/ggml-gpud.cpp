@@ -610,7 +610,9 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
                     return gpud_encoder::bind(s0, bw_, remw_) && remw_ % (s0->type == GGML_TYPE_Q6_K ? 2u : 16u) == 0; }()) {
             uint32_t ncols = (uint32_t) (s1->ne[1] * s1->ne[2] * s1->ne[3]);
             uint32_t nb32 = (uint32_t) s1->ne[0] / 32;
-            uint32_t need = nb32 * ncols * 36u;                       // q8_1: 36 B je 32er-Block
+            // q8_1 im SPLIT-Layout (1.9.): Header-Array (4 B/Block) + 16-B-aligned qs (32 B/Block)
+            uint32_t nblk_all = nb32 * ncols;
+            uint32_t need = ((nblk_all * 4u + 15u) & ~15u) + nblk_all * 32u;
             if (need > g_s.scratch_sz) { if (g_s.log) GGML_LOG_INFO("gpud: flush wg scratch-grow (nst=%zu, need=%u > %u)\n", ctx->enc.nst, need, g_s.scratch_sz); if (!flush()) return false; if (!gpud_scratch_ensure(need)) return false; ctx->qx = nullptr; }
             barra_zbuf * sc = &g_s.scratch;
             // Stufe 1: quantisieren (x -> scratch) - entfaellt, wenn dasselbe x schon drinliegt (Dedup)
@@ -641,7 +643,7 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
                 pc.n256 = pc.ne00 / 256; pc.xqcols = nb32;
                 uint32_t remw = 0, remd = 0; barra_gpu3_bind bw, bd;
                 if (!gpud_encoder::bind(s0, bw, remw) || !gpud_encoder::bind(t, bd, remd)) return false;
-                pc.off0v4 = remw / u; pc.offxq = 0; pc.offd = remd / 4;   // remw % u == 0 vorab geprueft
+                pc.off0v4 = remw / u; pc.offxq = nblk_all; pc.offd = remd / 4;   // offxq = nblk_all (Split-Layout); remw % u == 0 vorab geprueft
                 barra_gpu3_bind bq{ sc, 0, 0 };
                 barra_gpu3_bind binds[3] = { bw, bq, bd };
                 if (enc.full(3)) { if (g_s.log) GGML_LOG_INFO("gpud: flush wg full(3) nst=%zu maxstage=%d\n", enc.nst, g_s.maxstage); if (!flush()) return false; }

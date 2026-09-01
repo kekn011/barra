@@ -21,7 +21,7 @@ layout(push_constant) uniform PC {
     uint nb02v4, nb03v4;
     uint nb11, nb12, nb13;         // src1(x)-Strides (Elemente, fuer Spaltenindex)
     uint nbd1, nbd2, nbd3;
-    uint off0v4, offxq, offd;      // off0v4 in uvec4; offxq = nblk_all (Split-Layout, s.u.)
+    uint off0v4, offxq, offd;      // off0v4 in uvec4; offxq in uint (q8_1-Block-Basis der Spalte 0)
     uint r2, r3, n256, xqcols;     // xqcols = nb32 (q8_1-Bloecke je Spalte)
 } pc;
 #define LPR 8u
@@ -66,17 +66,20 @@ void main() {
     uint wrow = pc.off0v4 + rr * pc.nb01v4 + i02 * pc.nb02v4 + i03 * pc.nb03v4;
     // Spalten-Basis der q8_1-Bloecke: col/i12/i13 waehlen die x-Spalte; deren Block 0
     uint xcol = (col * pc.nb11 + i12 * pc.nb12 + i13 * pc.nb13) / pc.ne00;   // Spaltenindex
-    // Split-Layout: Header[nblk_all] ab 0, danach (16B-aligned) 2 uvec4 qs je Block.
-    // offxq traegt seit dem Split-Layout die GESAMT-Blockzahl (nblk_all, alle Spalten).
-    uint nblk_all = pc.offxq;
-    uint qs4base = ((nblk_all + 3u) & ~3u) >> 2;
-    uint xhdr0 = xcol * pc.xqcols;
+    // Split-Layout: Header[xqcols*ncols] ab offxq, danach (16B-aligned) 2 uvec4 qs je Block
+    uint nblk_all = pc.xqcols * pc.ne11 * pc.ne12;
+    uint qs4base = ((pc.offxq + nblk_all + 3u) & ~3u) >> 2;
+    uint xhdr0 = pc.offxq + xcol * pc.xqcols;
     uint xqs40 = qs4base + xcol * pc.xqcols * 2u;
-    float acc = 0.0;
-    for (uint ib = 0u; ib < pc.n256; ib++) {
-        uint bi = ib * 8u + lane;
-        acc += dot_sub(wrow + ib * 9u, lane, xhdr0 + bi, xqs40 + bi * 2u);
+    float acc = 0.0, acc2 = 0.0;
+    uint ib = 0u;
+    for (; ib + 1u < pc.n256; ib += 2u) {
+        uint bi = ib * 8u + lane, bj = bi + 8u;
+        acc  += dot_sub(wrow + ib * 9u,        lane, xhdr0 + bi, xqs40 + bi * 2u);
+        acc2 += dot_sub(wrow + (ib + 1u) * 9u, lane, xhdr0 + bj, xqs40 + bj * 2u);
     }
+    if (ib < pc.n256) { uint bi = ib * 8u + lane; acc += dot_sub(wrow + ib * 9u, lane, xhdr0 + bi, xqs40 + bi * 2u); }
+    acc += acc2;
     acc = subgroupClusteredAdd(acc, LPR);
     if (lane == 0u && valid) {
         dst[pc.offd + row + col * pc.nbd1 + i12 * pc.nbd2 + i13 * pc.nbd3] = acc;

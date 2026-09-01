@@ -1,6 +1,8 @@
 #version 450
 // Quantisiert x (f32, zusammenhaengend, ne00 x ncols) in q8_1-Bloecke fuer den int-dot-GEMV.
-// Blocklayout (36 B = 9 uint): [0] = packHalf2x16(d, s); [1..8] = 32 int8 (4 je uint).
+// SPLIT-Layout (1.9., LSU-Entlastung im GEMV: 2 uvec4 statt 9 skalarer Loads je Block):
+//   Header-Array:  q[b] = packHalf2x16(d, s)                      (nblk uints ab 0)
+//   qs-Array:      q[align4(nblk) + b*8 + w] = 4 int8 je uint     (16-B-aligned je Block)
 //   d = maxabs/127; qs_i = round(x_i/d); s = d * sum(qs_i)  (Min-Korrektur fuer q4_K).
 // Ein Workgroup (32 Threads) = ein 32er-Block; Grid 2D ueber alle Bloecke (nb32*ncols).
 layout(local_size_x = 32) in;
@@ -24,10 +26,10 @@ void main() {
     sh[t] = float(qv); barrier();
     for (uint o = 16u; o > 0u; o >>= 1) { if (t < o) sh[t] += sh[t + o]; barrier(); }
     if (t == 0u) {
-        q[pc.offq + b * 9u] = packHalf2x16(vec2(d, d * sh[0]));
+        q[pc.offq + b] = packHalf2x16(vec2(d, d * sh[0]));
     }
     if (t < 8u) {
         uint w = (uint(qi[t*4u]) & 0xFFu) | ((uint(qi[t*4u+1u]) & 0xFFu) << 8) | ((uint(qi[t*4u+2u]) & 0xFFu) << 16) | ((uint(qi[t*4u+3u]) & 0xFFu) << 24);
-        q[pc.offq + b * 9u + 1u + t] = w;
+        q[pc.offq + ((pc.nblk + 3u) & ~3u) + b * 8u + t] = w;
     }
 }
