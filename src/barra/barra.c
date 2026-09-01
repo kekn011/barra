@@ -328,6 +328,14 @@ int barra_gpu3_flags(barra_gpu3* g, uint32_t flags){
   return status?-1:0;
 }
 void barra_gpu3_set_autosync(barra_gpu3* g, int on){ if(g) g->autosync=on; }
+int barra_gpu3_copy(barra_gpu3* g, int src_h, uint64_t src_off, int dst_h, uint64_t dst_off, uint64_t len){
+  /* GPU-seitige Kopie zwischen Session-Handles (cmd=11, synchron). Fuer den Native-Puffer-Pfad. */
+  if(!g||g->sock<0||src_h<0||dst_h<0||!len) return -1;
+  uint32_t hdr[6]={GPZ3_MAGIC,11,(uint32_t)src_h,(uint32_t)dst_h,0,0}; uint64_t pl[3]={src_off,dst_off,len}; uint32_t status=1;
+  if(send_hdr_fds(g->sock,hdr,0,0)||wn(g->sock,pl,24)||rn(g->sock,&status,4)) return gpu3_dead(g);
+  if(status){ fprintf(stderr,"barra: GPU3-Copy status=%u\n",status); return -1; }
+  return 0;
+}
 int barra_gpu3_alloc_native(barra_gpu3* g, uint32_t size){
   /* Mess-Experiment (1.9.): nativer Device-Local-Puffer im Daemon (cmd=10), Inhalt uninitialisiert. */
   if(!g||g->sock<0||!size) return -1;

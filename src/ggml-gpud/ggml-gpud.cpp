@@ -8,6 +8,7 @@
 #include "barra.h"
 #include "gpud_shaders.h"
 
+#include <sys/mman.h>   // Native-Buft: PROT_NONE-Fake-Adressraum fuer Tensor-Zeiger
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -80,6 +81,8 @@ struct gpud_session {
                                      // 30./31.8. vermessene sichere Decode-Betriebspunkt (MS=512, med 103 ms)
     double est_wg = 0.0;             // gemessene ms je Workgroup (0 = noch keine Messung -> Bootstrap-Cap 64)
     barra_zbuf scratch{}; bool scratch_ok = false; uint32_t scratch_sz = 0;   // x-q8_1 fuer int-dot-GEMV
+    // Staging-dmabuf fuer den Native-Buft (Upload/Download via barra_gpu3_copy); waechst bis 32 MB
+    barra_zbuf staging{}; bool staging_ok = false; uint32_t staging_sz = 0;
     // Scratch ist GLOBAL, Backends gibt es MEHRERE (llama-bench/Server ueberlappen Kontexte beim
     // Wechsel). 31.8.: gpud_free der ALTEN Instanz hat den Scratch unter der neuen weggezogen ->
     // Re-Import mit fd=-1 -> EBADF -> Session tot. Deshalb Refcount: Scratch stirbt mit der letzten.
@@ -122,7 +125,25 @@ static bool gpud_scratch_ensure(uint32_t bytes) {
 }
 
 // ---------------------------------------------------------------- Buffer (dmabuf)
+#define GPUD_STAGING_CAP (32u << 20)
+// Staging fuer Native-Puffer-Transfers (chunked); dmabuf, importiert, waechst bis CAP.
+static bool gpud_staging_ensure(uint32_t bytes) {
+    uint32_t want = bytes > GPUD_STAGING_CAP ? GPUD_STAGING_CAP : bytes;
+    if (g_s.staging_ok && g_s.staging_sz >= want) return true;
+    uint32_t sz = (want + 0xFFFFFu) & ~0xFFFFFu;
+    std::lock_guard<std::mutex> lock(g_s.mtx);
+    if (g_s.staging_ok) { barra_zbuf * pz = &g_s.staging; barra_gpu3_release(&g_s.g, &pz, 1); barra_zc_free(&g_s.staging); g_s.staging_ok = false; }
+    if (barra_zc_alloc(&g_s.staging, sz)) { GGML_LOG_ERROR("gpud: Staging alloc %u B fehlgeschlagen\n", sz); return false; }
+    barra_zbuf * pz = &g_s.staging;
+    if (barra_gpu3_import(&g_s.g, &pz, 1)) { GGML_LOG_ERROR("gpud: Staging-Import fehlgeschlagen\n"); barra_zc_free(&g_s.staging); return false; }
+    g_s.staging_ok = true; g_s.staging_sz = sz;
+    return true;
+}
+
 struct gpud_buffer_ctx { barra_zbuf z; int state = 0; };   // 0 = CPU darf zugreifen, 1 = Geraet besitzt (nach cpu_end)
+// Beide Buffer-Types (dmabuf + nativ) tragen einen gpud_buffer_ctx als context; nativ hat z.fd = -1,
+// z.map = PROT_NONE-Fake-Bereich (eindeutige Adressen fuer ggml/Encoder, Deref faellt LAUT) und state = 1.
+static inline bool gpud_buft_ours(ggml_backend_buffer_type_t b) { return b == ggml_backend_gpud_buffer_type() || b == ggml_backend_gpud_native_buffer_type(); }
 
 static const char * gpud_buft_get_name(ggml_backend_buffer_type_t) { return "GPUD"; }
 
@@ -190,6 +211,122 @@ ggml_backend_buffer_type_t ggml_backend_gpud_buffer_type(void) {
     return &buft;
 }
 
+// ------------------------------------------------- Native Buffer-Type ("GPUDnat", 1.9.2026)
+// Fuer Puffer OHNE CPU-Beteiligung nach dem Laden (Gewichte; spaeter KV): VkDeviceMemory im Daemon
+// statt dmabuf-Import - die GPU liest nativ ~31 GB/s vs ~14 GB/s importiert (gemessen 1.9., der
+// Treiber bietet fuer dmabuf-Import nur EINEN Memory-Typ an). RAM-NEUTRAL: nativ ERSETZT den dmabuf.
+// set/get_tensor laufen chunked ueber den Staging-dmabuf + barra_gpu3_copy. tensor->data zeigt in
+// einen PROT_NONE-mmap (eindeutig, nie dereferenzierbar -> CPU-Zugriff faellt sofort auf).
+// Routing: Default-Buft bleibt dmabuf; Gewichte per --override-tensor "<regex>=GPUDnat" (llama.cpp
+// tensor_buft_overrides) oder ueber die extra_bufts-Liste des Devices.
+static const char * gpud_nat_buft_get_name(ggml_backend_buffer_type_t) { return "GPUDnat"; }
+static void gpud_nat_buffer_free(ggml_backend_buffer_t buffer) {
+    gpud_buffer_ctx * c = (gpud_buffer_ctx *) buffer->context;
+    { std::lock_guard<std::mutex> lock(g_s.mtx); barra_zbuf * p = &c->z; if (g_s.open) barra_gpu3_release(&g_s.g, &p, 1); }
+    if (c->z.map) munmap(c->z.map, c->z.size);
+    delete c;
+}
+static void * gpud_nat_buffer_get_base(ggml_backend_buffer_t buffer) { return ((gpud_buffer_ctx *) buffer->context)->z.map; }
+// Chunked Upload: CPU -> Staging-dmabuf -> GPU-Copy in den nativen Puffer
+static bool gpud_nat_upload(gpud_buffer_ctx * c, uint64_t dst_off, const void * data, size_t size) {
+    if (!gpud_staging_ensure((uint32_t) (size > GPUD_STAGING_CAP ? GPUD_STAGING_CAP : size))) return false;
+    const char * src = (const char *) data;
+    while (size) {
+        size_t n = size > g_s.staging_sz ? g_s.staging_sz : size;
+        barra_zc_cpu_begin(&g_s.staging);
+        memcpy(g_s.staging.map, src, n);
+        barra_zc_cpu_end(&g_s.staging);
+        std::lock_guard<std::mutex> lock(g_s.mtx);
+        if (barra_gpu3_copy(&g_s.g, g_s.staging.gpu_h, 0, c->z.gpu_h, dst_off, n)) return false;
+        src += n; dst_off += n; size -= n;
+    }
+    return true;
+}
+static bool gpud_nat_download(gpud_buffer_ctx * c, uint64_t src_off, void * data, size_t size) {
+    if (!gpud_staging_ensure((uint32_t) (size > GPUD_STAGING_CAP ? GPUD_STAGING_CAP : size))) return false;
+    char * dst = (char *) data;
+    while (size) {
+        size_t n = size > g_s.staging_sz ? g_s.staging_sz : size;
+        { std::lock_guard<std::mutex> lock(g_s.mtx);
+          if (barra_gpu3_copy(&g_s.g, c->z.gpu_h, src_off, g_s.staging.gpu_h, 0, n)) return false; }
+        barra_zc_cpu_begin(&g_s.staging);
+        memcpy(dst, g_s.staging.map, n);
+        barra_zc_cpu_end(&g_s.staging);
+        dst += n; src_off += n; size -= n;
+    }
+    return true;
+}
+static void gpud_nat_buffer_set_tensor(ggml_backend_buffer_t b, ggml_tensor * t, const void * data, size_t off, size_t size) {
+    gpud_buffer_ctx * c = (gpud_buffer_ctx *) b->context;
+    uint64_t base = (uint64_t) ((const char *) t->data - (const char *) c->z.map);
+    if (!gpud_nat_upload(c, base + off, data, size)) GGML_ABORT("gpud: nativer Upload fehlgeschlagen (%zu B)", size);
+}
+static void gpud_nat_buffer_get_tensor(ggml_backend_buffer_t b, const ggml_tensor * t, void * data, size_t off, size_t size) {
+    gpud_buffer_ctx * c = (gpud_buffer_ctx *) b->context;
+    uint64_t base = (uint64_t) ((const char *) t->data - (const char *) c->z.map);
+    if (!gpud_nat_download(c, base + off, data, size)) GGML_ABORT("gpud: nativer Download fehlgeschlagen (%zu B)", size);
+}
+static void gpud_nat_buffer_memset_tensor(ggml_backend_buffer_t b, ggml_tensor * t, uint8_t v, size_t off, size_t size) {
+    gpud_buffer_ctx * c = (gpud_buffer_ctx *) b->context;
+    uint64_t base = (uint64_t) ((const char *) t->data - (const char *) c->z.map) + off;
+    if (!gpud_staging_ensure((uint32_t) (size > GPUD_STAGING_CAP ? GPUD_STAGING_CAP : size))) GGML_ABORT("gpud: Staging fehlt");
+    barra_zc_cpu_begin(&g_s.staging); memset(g_s.staging.map, v, size > g_s.staging_sz ? g_s.staging_sz : size); barra_zc_cpu_end(&g_s.staging);
+    while (size) {
+        size_t n = size > g_s.staging_sz ? g_s.staging_sz : size;
+        std::lock_guard<std::mutex> lock(g_s.mtx);
+        if (barra_gpu3_copy(&g_s.g, g_s.staging.gpu_h, 0, c->z.gpu_h, base, n)) GGML_ABORT("gpud: memset-Copy fehlgeschlagen");
+        base += n; size -= n;
+    }
+}
+static void gpud_nat_buffer_clear(ggml_backend_buffer_t buffer, uint8_t v) {
+    gpud_buffer_ctx * c = (gpud_buffer_ctx *) buffer->context;
+    ggml_tensor tmp{}; tmp.data = c->z.map;   // ganzer Puffer
+    gpud_nat_buffer_memset_tensor(buffer, &tmp, v, 0, c->z.size);
+}
+static const ggml_backend_buffer_i gpud_nat_buffer_i = {
+    /* .free_buffer   = */ gpud_nat_buffer_free,
+    /* .get_base      = */ gpud_nat_buffer_get_base,
+    /* .init_tensor   = */ nullptr,
+    /* .memset_tensor = */ gpud_nat_buffer_memset_tensor,
+    /* .set_tensor    = */ gpud_nat_buffer_set_tensor,
+    /* .get_tensor    = */ gpud_nat_buffer_get_tensor,
+    /* .set_tensor_2d = */ nullptr,
+    /* .get_tensor_2d = */ nullptr,
+    /* .cpy_tensor    = */ nullptr,
+    /* .clear         = */ gpud_nat_buffer_clear,
+    /* .reset         = */ nullptr,
+};
+static ggml_backend_buffer_t gpud_nat_buft_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
+    if (!gpud_session_open()) return nullptr;
+    if (size == 0) size = GPUD_ALIGN;
+    if (size > GPUD_MAX_BUF) { GGML_LOG_ERROR("gpud: nativer Puffer %zu B > %u B\n", size, GPUD_MAX_BUF); return nullptr; }
+    size_t sz = (size + 4095) & ~(size_t) 4095;
+    int hnd; { std::lock_guard<std::mutex> lock(g_s.mtx); hnd = barra_gpu3_alloc_native(&g_s.g, (uint32_t) sz); }
+    if (hnd < 0) { GGML_LOG_ERROR("gpud: ALLOC_NATIVE %zu B fehlgeschlagen\n", sz); return nullptr; }
+    void * fake = mmap(nullptr, sz, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (fake == MAP_FAILED) { GGML_LOG_ERROR("gpud: Fake-VA %zu B fehlgeschlagen\n", sz); return nullptr; }
+    gpud_buffer_ctx * c = new gpud_buffer_ctx();
+    c->z.fd = -1; c->z.map = fake; c->z.size = (uint32_t) sz; c->z.gpu_h = hnd; c->z.tpu_h = -1; c->z.dsp_h = -1;
+    c->state = 1;   // Geraet besitzt IMMER (CPU hat keinen echten Zugriff)
+    fprintf(stderr, "gpud: nativer Puffer %zu MB (handle %d)\n", sz >> 20, hnd);   // fprintf: llama-bench schluckt GGML_LOG
+    return ggml_backend_buffer_init(buft, gpud_nat_buffer_i, c, sz);
+}
+ggml_backend_buffer_type_t ggml_backend_gpud_native_buffer_type(void) {
+    static ggml_backend_buffer_type buft = {
+        /* .iface = */ {
+            /* .get_name       = */ gpud_nat_buft_get_name,
+            /* .alloc_buffer   = */ gpud_nat_buft_alloc_buffer,
+            /* .get_alignment  = */ gpud_buft_get_alignment,
+            /* .get_max_size   = */ gpud_buft_get_max_size,
+            /* .get_alloc_size = */ nullptr,
+            /* .is_host        = */ gpud_buft_is_host,
+        },
+        /* .device  = */ nullptr,
+        /* .context = */ nullptr,
+    };
+    return &buft;
+}
+
 // ---------------------------------------------------------------- Encoder
 struct gpud_encoder {
     std::vector<barra_gpu3_stage> st;
@@ -225,7 +362,7 @@ struct gpud_encoder {
     std::vector<const char *> opnames;   // je Stufe (nur Trace)
     // Binding fuer einen Tensor: Basis 64-aligned, Rest als Byte-Offset zurueck
     static bool bind(const ggml_tensor * t, barra_gpu3_bind & b, uint32_t & rem) {
-        if (!t || !t->buffer || t->buffer->buft != ggml_backend_gpud_buffer_type()) return false;
+        if (!t || !t->buffer || !gpud_buft_ours(t->buffer->buft)) return false;
         gpud_buffer_ctx * c = (gpud_buffer_ctx *) t->buffer->context;
         uint64_t off = (uint64_t) ((const char *) t->data - (const char *) c->z.map);
         if (off >= c->z.size) return false;
@@ -348,7 +485,7 @@ static enum ggml_status gpud_graph_compute(ggml_backend_t backend, ggml_cgraph *
     {   // Alle benutzten gpud-Puffer EINMAL flushen (CPU->GPU); Gewichte bleiben danach im GPU-Besitz.
         std::vector<gpud_buffer_ctx *> seen;
         auto touch = [&](const ggml_tensor * t) {
-            if (!t || !t->buffer || t->buffer->buft != ggml_backend_gpud_buffer_type()) return;
+            if (!t || !t->buffer || !gpud_buft_ours(t->buffer->buft)) return;
             gpud_buffer_ctx * c = (gpud_buffer_ctx *) t->buffer->context;
             if (c->state == 1) return;
             for (auto * x : seen) if (x == c) return;
@@ -436,7 +573,7 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
         if (i + 1 < cg->n_nodes) {
             ggml_tensor * nx = cg->nodes[i + 1];
             if (nx->op == GGML_OP_MUL && nx->src[0] == t && nx->src[1]->type == GGML_TYPE_F32 && nx->src[1]->ne[0] == t->ne[0] && ggml_nelements(nx->src[1]) == t->ne[0]
-                && ggml_node_get_use_count(cg, i) == 1 && ggml_is_contiguous(nx) && nx->buffer && nx->buffer->buft == ggml_backend_gpud_buffer_type()) {
+                && ggml_node_get_use_count(cg, i) == 1 && ggml_is_contiguous(nx) && nx->buffer && gpud_buft_ours(nx->buffer->buft)) {
                 w = nx->src[1]; out = nx; pc.fuse = 1; pc.nbd1 = E(nx->nb[1], 4); skip = 1;
             }
         }
@@ -723,7 +860,7 @@ static bool gpud_dev_supports_op(ggml_backend_dev_t, const ggml_tensor * op) {
     }
     return r;
 }
-static bool gpud_dev_supports_buft(ggml_backend_dev_t, ggml_backend_buffer_type_t buft) { return buft == ggml_backend_gpud_buffer_type(); }
+static bool gpud_dev_supports_buft(ggml_backend_dev_t, ggml_backend_buffer_type_t buft) { return gpud_buft_ours(buft); }
 static const ggml_backend_device_i gpud_device_i = {
     /* .get_name             = */ gpud_dev_get_name,
     /* .get_description      = */ gpud_dev_get_description,
@@ -748,7 +885,14 @@ static ggml_backend_dev_t gpud_reg_get_device(ggml_backend_reg_t reg, size_t ind
     static ggml_backend_device dev = { /* .iface */ gpud_device_i, /* .reg */ reg, /* .context */ nullptr };
     return &dev;
 }
-static void * gpud_reg_get_proc_address(ggml_backend_reg_t, const char *) { return nullptr; }
+static ggml_backend_buffer_type_t * gpud_dev_get_extra_bufts(ggml_backend_dev_t) {
+    static ggml_backend_buffer_type_t bufts[] = { ggml_backend_gpud_native_buffer_type(), nullptr };
+    return bufts;
+}
+static void * gpud_reg_get_proc_address(ggml_backend_reg_t, const char * name) {
+    if (strcmp(name, "ggml_backend_dev_get_extra_bufts") == 0) return (void *) gpud_dev_get_extra_bufts;
+    return nullptr;
+}
 static const ggml_backend_reg_i gpud_reg_i = {
     /* .get_name         = */ gpud_reg_get_name,
     /* .get_device_count = */ gpud_reg_get_device_count,
@@ -758,6 +902,7 @@ static const ggml_backend_reg_i gpud_reg_i = {
 ggml_backend_reg_t ggml_backend_gpud_reg(void) {
     static ggml_backend_reg reg = { /* .api_version */ GGML_BACKEND_API_VERSION, /* .iface */ gpud_reg_i, /* .context */ nullptr };
     ggml_backend_gpud_buffer_type()->device = gpud_reg_get_device(&reg, 0);
+    ggml_backend_gpud_native_buffer_type()->device = gpud_reg_get_device(&reg, 0);
     return &reg;
 }
 GGML_BACKEND_DL_IMPL(ggml_backend_gpud_reg)

@@ -121,7 +121,7 @@ static int import_buf(int fd, uint32_t size, VkBuffer* b, VkDeviceMemory* m){
   if(mt==UINT32_MAX) mt=pick_mem(fp.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
   if(mt==UINT32_MAX) return -1;
   VkExternalMemoryBufferCreateInfo ext={.sType=VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
-  VkBufferCreateInfo bci={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.pNext=&ext,.size=size,.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
+  VkBufferCreateInfo bci={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.pNext=&ext,.size=size,.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
   if(vkCreateBuffer(dev,&bci,0,b)!=VK_SUCCESS) return -1;
   int dfd=dup(fd); if(dfd<0){ vkDestroyBuffer(dev,*b,0); return -1; }
   VkImportMemoryFdInfoKHR imp={.sType=VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,.fd=dfd};
@@ -479,7 +479,7 @@ static void serve_v3(int c, uint32_t* hdr, int* fds, int nfd){
       uint32_t sz=hdr[2]; uint32_t hd2=0; int ok2=0;
       int slot=-1; for(int k=0;k<MAXH;k++) if(!h[k].used){slot=k;break;}
       if(slot>=0&&sz){
-        VkBufferCreateInfo bci={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=sz,.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
+        VkBufferCreateInfo bci={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=sz,.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
         VK_LOCK();
         if(vkCreateBuffer(dev,&bci,0,&h[slot].b)==VK_SUCCESS){
           VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev,h[slot].b,&mr);
@@ -495,6 +495,35 @@ static void serve_v3(int c, uint32_t* hdr, int* fds, int nfd){
         VK_UNLOCK();
       }
       if(ok2){ status=0; wfull(c,&status,4); wfull(c,&hd2,4); } else wfull(c,&status,4);
+    } else if(cmd==11){                           /* COPY src_h -> dst_h (1.9., Native-Puffer-Pfad):
+      * Payload 3*u64 [src_off,dst_off,len]. Synchron (Fence). Traegt Upload (Staging-dmabuf ->
+      * nativ) und Download (nativ -> Staging) fuer den GPUDnat-Buffer-Type. */
+      uint32_t s2=hdr[2], d2=hdr[3]; uint64_t pl[3];
+      if(rfull(c,pl,24)){ goto next; }
+      if(s2<MAXH&&d2<MAXH&&h[s2].used&&h[d2].used&&pl[2]&&pl[0]+pl[2]<=h[s2].size&&pl[1]+pl[2]<=h[d2].size){
+        VK_LOCK();
+        VkCommandBuffer cb=0; VkFence f=0;
+        VkCommandBufferAllocateInfo cbai={.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,.commandPool=pool,.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY,.commandBufferCount=1};
+        if(vkAllocateCommandBuffers(dev,&cbai,&cb)==VK_SUCCESS){
+          VkCommandBufferBeginInfo bi={.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+          vkBeginCommandBuffer(cb,&bi);
+          VkMemoryBarrier hb={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_HOST_WRITE_BIT,.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT};
+          vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&hb,0,0,0,0);
+          VkBufferCopy r={.srcOffset=pl[0],.dstOffset=pl[1],.size=pl[2]};
+          vkCmdCopyBuffer(cb,h[s2].b,h[d2].b,1,&r);
+          VkMemoryBarrier tb={.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER,.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT,.dstAccessMask=VK_ACCESS_HOST_READ_BIT|VK_ACCESS_SHADER_READ_BIT};
+          vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&tb,0,0,0,0);
+          vkEndCommandBuffer(cb);
+          VkFenceCreateInfo fci={.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+          if(vkCreateFence(dev,&fci,0,&f)==VK_SUCCESS){
+            VkSubmitInfo si={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&cb};
+            if(vkQueueSubmit(queue,1,&si,f)==VK_SUCCESS&&vkWaitForFences(dev,1,&f,VK_TRUE,UINT64_MAX)==VK_SUCCESS) status=0;
+            vkDestroyFence(dev,f,0); }
+          vkFreeCommandBuffers(dev,pool,1,&cb);
+        }
+        VK_UNLOCK();
+      }
+      wfull(c,&status,4);
     } else if(cmd==8){                            /* FLAGS (Messung): bit0 = keine Zwischen-Barrieren */
       sflags=hdr[2]; status=0; wfull(c,&status,4);
     } else if(cmd==7){                            /* EXIT: Daemon beendet sich, Supervisor respawnt (Dev-Loop ohne Reboot) */

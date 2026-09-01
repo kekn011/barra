@@ -116,7 +116,8 @@ typedef struct {
                                              * Barriere Geschriebenes). 0 = Barriere (fail-safe). */
 } barra_gpu3_stage;
 int  barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* stages, int nstage);   /* 0=ok; ein Roundtrip */
-int  barra_gpu3_alloc_native(barra_gpu3* g, uint32_t size);   /* Mess-Experiment: Device-Local-Puffer im Daemon, liefert Handle (Inhalt uninitialisiert) */
+int  barra_gpu3_alloc_native(barra_gpu3* g, uint32_t size);   /* Device-Local-Puffer im Daemon (GPU liest 2x schneller als dmabuf-Import), liefert Handle */
+int  barra_gpu3_copy(barra_gpu3* g, int src_h, uint64_t src_off, int dst_h, uint64_t dst_off, uint64_t len);   /* GPU-Kopie Handle->Handle (synchron); Upload/Download fuer native Puffer via Staging-dmabuf */
 
 /* ================= Zero-Copy (TPU) =================
  * Dieselben dmabufs als TPU-Tensor-Puffer: tpud importiert sie einmal (ImportBufferByFd,

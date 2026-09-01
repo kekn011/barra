@@ -10,6 +10,7 @@ extern "C" {
 GGML_BACKEND_API ggml_backend_t            ggml_backend_gpud_init(void);
 GGML_BACKEND_API bool                      ggml_backend_is_gpud(ggml_backend_t backend);
 GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_gpud_buffer_type(void);
+GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_gpud_native_buffer_type(void);   // "GPUDnat": VkDeviceMemory statt dmabuf (2x Lesetempo, kein CPU-Zugriff); fuer Gewichte via --override-tensor
 GGML_BACKEND_API ggml_backend_reg_t         ggml_backend_gpud_reg(void);
 #ifdef __cplusplus
 }
