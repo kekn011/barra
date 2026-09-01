@@ -34,7 +34,10 @@ an OpenAI-compatible API, with the attention math offloaded to the TPU.
 
 ## Quick start
 
-1. **Flash** — on a Windows PC, download a release, run `barra-setup`, fill in
+1. **Flash** — on a Windows PC, grab the **Source code (zip)** of the
+   [latest release](https://github.com/kekn011/barra/releases/latest) (that is
+   where `barra-setup` lives — the big binary assets are fetched on demand),
+   run `barra-setup`, fill in
    the form (user, Wi-Fi, SSH key, language), plug in the phone, hit Start.
    ~10 minutes later the node boots into your Wi-Fi and shows `ssh you@<ip>` on
    its screen. See [docs/flashing.md](docs/flashing.md).
