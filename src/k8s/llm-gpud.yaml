@@ -1,0 +1,90 @@
+# LLM-Dienst als Pod ueber das EIGENE ggml-gpud-Backend (Weg c, M4 - 1.9.2026):
+# llama-server (glibc) laeuft als Pod AUF dem GPU-Node und spricht den gpud-zc-Daemon
+# direkt ueber den gemounteten Unix-Socket (/opt/hwbridge) - kein RPC-Umweg, die Logits
+# bleiben im dmabuf. Gewichte liegen im nativen Device-Local-Puffer (GPUDnat via -ot).
+# privileged + /dev/dma_heap: der Client alloziert die Zero-Copy-dmabufs selbst.
+# --fa 0 ist PFLICHT (FLASH_ATTN_EXT ist als Sackgasse verifiziert, Default aus).
+# Eigenes Deployment/Service (llm-gpud) NEBEN dem RPC-Weg (Service llm) - Umschwenk
+# des Haupt-Services ist eine bewusste Entscheidung, kein Automatismus.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gpud
+  namespace: barra
+spec:
+  selector:
+    app: llm-gpud
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gpud
+  namespace: barra
+spec:
+  replicas: 1
+  # RAM: Modell + KV nur einmal auf dem Node -> nie zwei Instanzen gleichzeitig
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llm-gpud
+  template:
+    metadata:
+      labels:
+        app: llm-gpud
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: barra-13c0   # gpud-zc-Socket und dmabufs sind node-lokal
+      containers:
+      - name: llama-server
+        image: ubuntu:24.04
+        command: ["/opt/llm/bin/llama-server"]
+        args: ["-m", "/opt/models/qwen2.5-1.5b.gguf",
+               "-ngl", "99", "-c", "4096", "-t", "4", "-fa", "0",
+               "-ot", "\\.=GPUDnat",
+               "--host", "0.0.0.0", "--port", "8080"]
+        env:
+        - name: LD_LIBRARY_PATH
+          value: /opt/llm/bin
+        securityContext:
+          privileged: true   # /dev/dma_heap-ioctls (Zero-Copy-Allokation)
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        volumeMounts:
+        - name: llm
+          mountPath: /opt/llm
+          readOnly: true
+        - name: models
+          mountPath: /opt/models
+          readOnly: true
+        - name: hwbridge
+          mountPath: /opt/hwbridge
+        - name: dmaheap
+          mountPath: /dev/dma_heap
+      volumes:
+      - name: llm
+        hostPath:
+          path: /home/kevin/llm-pod-gpud
+          type: Directory
+      - name: models
+        hostPath:
+          path: /home/kevin/models
+          type: Directory
+      - name: hwbridge
+        hostPath:
+          path: /opt/hwbridge
+          type: Directory
+      - name: dmaheap
+        hostPath:
+          path: /dev/dma_heap
+          type: Directory
