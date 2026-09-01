@@ -25,7 +25,7 @@ static inline double gpud_now_ms() { return std::chrono::duration<double, std::m
 #define GPUD_MAX_PC 128
 
 // ---------------------------------------------------------------- Shader-Tabelle (Push-Constant-Layouts wie in shaders/*.comp)
-enum { SH_BINARY, SH_UNARY, SH_RMS, SH_CPY, SH_GET_ROWS, SH_MUL_MAT, SH_ROPE, SH_SOFTMAX, SH_GLU, SH_SET_ROWS, SH_GEMV_Q, SH_QUANT_Q81, SH_GEMV_Q4K_IQ, SH_GEMV_Q6K_IQ, SH_FLASH, SH_N };
+enum { SH_BINARY, SH_UNARY, SH_RMS, SH_CPY, SH_GET_ROWS, SH_MUL_MAT, SH_ROPE, SH_SOFTMAX, SH_GLU, SH_SET_ROWS, SH_GEMV_Q, SH_QUANT_Q81, SH_GEMV_Q4K_IQ, SH_GEMV_Q6K_IQ, SH_GEMV_Q6K_RP, SH_FLASH, SH_N };
 struct pc_binary   { uint32_t ne[4], nb0[4], nb1[4], nbd[4], ne1[4], offa, offb, offd, op, n; };
 struct pc_unary    { uint32_t n, offa, offd, op; float s, b; };
 struct pc_rms      { uint32_t ne00, nrows, nb01, nbd1, offa, offw, offd, fuse; float eps; };
@@ -59,6 +59,7 @@ static const shader_def g_shaders[SH_N] = {
     { gpud_spv_quantize_q8_1, gpud_spv_quantize_q8_1_len, 2, sizeof(pc_quant),  "quant_q81", 0x2 },
     { gpud_spv_gemv_q4k_iq,   gpud_spv_gemv_q4k_iq_len,   3, sizeof(pc_gemv_iq), "gemv_q4k_iq", 0x4 },
     { gpud_spv_gemv_q6k_iq,   gpud_spv_gemv_q6k_iq_len,   3, sizeof(pc_gemv_iq), "gemv_q6k_iq", 0x4 },
+    { gpud_spv_gemv_q6k_rp,   gpud_spv_gemv_q6k_rp_len,   3, sizeof(pc_gemv_iq), "gemv_q6k_rp", 0x4 },
     { gpud_spv_flash_attn,    gpud_spv_flash_attn_len,    7, sizeof(pc_flash),   "flash_attn", 0x40 },
 };
 
@@ -256,14 +257,51 @@ static bool gpud_nat_download(gpud_buffer_ctx * c, uint64_t src_off, void * data
     }
     return true;
 }
+static bool gpud_nat_q6_repack(const ggml_tensor * t);
 static void gpud_nat_buffer_set_tensor(ggml_backend_buffer_t b, ggml_tensor * t, const void * data, size_t off, size_t size) {
     gpud_buffer_ctx * c = (gpud_buffer_ctx *) b->context;
     uint64_t base = (uint64_t) ((const char *) t->data - (const char *) c->z.map);
+    if (gpud_nat_q6_repack(t)) {
+        // Repack 210 -> 224 B je Block beim Upload (chunked ueber das Staging).
+        if (off != 0 || size != ggml_nbytes(t)) GGML_ABORT("gpud: q6_K-Repack braucht ganze Tensoren (off=%zu size=%zu)", off, size);
+        if (!gpud_staging_ensure(GPUD_STAGING_CAP)) GGML_ABORT("gpud: Staging fehlt");
+        const size_t nblk = size / 210, per = g_s.staging_sz / 224;
+        const char * src = (const char *) data;
+        size_t blk = 0;
+        while (blk < nblk) {
+            size_t n = nblk - blk < per ? nblk - blk : per;
+            barra_zc_cpu_begin(&g_s.staging);
+            for (size_t i = 0; i < n; i++) memcpy((char *) g_s.staging.map + i * 224, src + (blk + i) * 210, 210);
+            barra_zc_cpu_end(&g_s.staging);
+            std::lock_guard<std::mutex> lock(g_s.mtx);
+            if (barra_gpu3_copy(&g_s.g, g_s.staging.gpu_h, 0, c->z.gpu_h, base + blk * 224, n * 224)) GGML_ABORT("gpud: Repack-Upload fehlgeschlagen");
+            blk += n;
+        }
+        return;
+    }
     if (!gpud_nat_upload(c, base + off, data, size)) GGML_ABORT("gpud: nativer Upload fehlgeschlagen (%zu B)", size);
 }
 static void gpud_nat_buffer_get_tensor(ggml_backend_buffer_t b, const ggml_tensor * t, void * data, size_t off, size_t size) {
     gpud_buffer_ctx * c = (gpud_buffer_ctx *) b->context;
     uint64_t base = (uint64_t) ((const char *) t->data - (const char *) c->z.map);
+    if (gpud_nat_q6_repack(t)) {
+        // Rueck-Repack 224 -> 210 B (Tests/Diagnose; im Betrieb nie gerufen).
+        if (off != 0 || size != ggml_nbytes(t)) GGML_ABORT("gpud: q6_K-Repack-Read braucht ganze Tensoren");
+        if (!gpud_staging_ensure(GPUD_STAGING_CAP)) GGML_ABORT("gpud: Staging fehlt");
+        const size_t nblk = size / 210, per = g_s.staging_sz / 224;
+        char * dst = (char *) data;
+        size_t blk = 0;
+        while (blk < nblk) {
+            size_t n = nblk - blk < per ? nblk - blk : per;
+            { std::lock_guard<std::mutex> lock(g_s.mtx);
+              if (barra_gpu3_copy(&g_s.g, c->z.gpu_h, base + blk * 224, g_s.staging.gpu_h, 0, n * 224)) GGML_ABORT("gpud: Repack-Download fehlgeschlagen"); }
+            barra_zc_cpu_begin(&g_s.staging);
+            for (size_t i = 0; i < n; i++) memcpy(dst + (blk + i) * 210, (const char *) g_s.staging.map + i * 224, 210);
+            barra_zc_cpu_end(&g_s.staging);
+            blk += n;
+        }
+        return;
+    }
     if (!gpud_nat_download(c, base + off, data, size)) GGML_ABORT("gpud: nativer Download fehlgeschlagen (%zu B)", size);
 }
 static void gpud_nat_buffer_memset_tensor(ggml_backend_buffer_t b, ggml_tensor * t, uint8_t v, size_t off, size_t size) {
@@ -311,6 +349,14 @@ static ggml_backend_buffer_t gpud_nat_buft_alloc_buffer(ggml_backend_buffer_type
     fprintf(stderr, "gpud: nativer Puffer %zu MB (handle %d)\n", sz >> 20, hnd);   // fprintf: llama-bench schluckt GGML_LOG
     return ggml_backend_buffer_init(buft, gpud_nat_buffer_i, c, sz);
 }
+// q6_K liegt im Native-Puffer REPACKT (224 B je Block, 16-B-aligned - die CPU liest ihn nie):
+// alle Kernel-Loads werden aligned uvec4, gemessen 12,7 -> 33,3 GB/s (1.9.). set/get_tensor
+// uebersetzen beim Staging-Transfer zwischen ggml-Layout (210 B) und Geraete-Layout.
+static bool gpud_nat_q6_repack(const ggml_tensor * t) { return t->type == GGML_TYPE_Q6_K && t->ne[0] % 256 == 0; }
+static size_t gpud_nat_buft_get_alloc_size(ggml_backend_buffer_type_t, const ggml_tensor * t) {
+    if (gpud_nat_q6_repack(t)) return (size_t) (t->ne[0] / 256) * 224 * t->ne[1] * t->ne[2] * t->ne[3];
+    return ggml_nbytes(t);
+}
 ggml_backend_buffer_type_t ggml_backend_gpud_native_buffer_type(void) {
     static ggml_backend_buffer_type buft = {
         /* .iface = */ {
@@ -318,7 +364,7 @@ ggml_backend_buffer_type_t ggml_backend_gpud_native_buffer_type(void) {
             /* .alloc_buffer   = */ gpud_nat_buft_alloc_buffer,
             /* .get_alignment  = */ gpud_buft_get_alignment,
             /* .get_max_size   = */ gpud_buft_get_max_size,
-            /* .get_alloc_size = */ nullptr,
+            /* .get_alloc_size = */ gpud_nat_buft_get_alloc_size,
             /* .is_host        = */ gpud_buft_is_host,
         },
         /* .device  = */ nullptr,
@@ -634,9 +680,15 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
             // q6_K: Strides in u16 (210-B-Block, nur 2-Byte-aligned - siehe gemv_q6k_iq.comp).
             {
                 const bool q6 = s0->type == GGML_TYPE_Q6_K;
+                const bool q6rp = q6 && s0->buffer && s0->buffer->buft == ggml_backend_gpud_native_buffer_type();   // Repack-Layout (224 B)
                 const uint32_t u = q6 ? 2u : 16u;
                 pc_gemv_iq pc{}; pc.ne00 = (uint32_t) s0->ne[0]; pc.ne01 = (uint32_t) s0->ne[1]; pc.ne11 = (uint32_t) s1->ne[1]; pc.ne12 = (uint32_t) s1->ne[2];
-                pc.nb01v4 = (uint32_t) (s0->nb[1] / u); pc.nb02v4 = (uint32_t) (s0->nb[2] / u); pc.nb03v4 = (uint32_t) (s0->nb[3] / u);
+                if (q6rp) {   // ggml-nb gelten nicht: Zeile = n256 * 224 B (kontiguierlich), Strides in u16
+                    uint32_t rowu = (pc.ne00 / 256) * 112u;
+                    pc.nb01v4 = rowu; pc.nb02v4 = rowu * pc.ne01; pc.nb03v4 = rowu * pc.ne01 * (uint32_t) s0->ne[2];
+                } else {
+                    pc.nb01v4 = (uint32_t) (s0->nb[1] / u); pc.nb02v4 = (uint32_t) (s0->nb[2] / u); pc.nb03v4 = (uint32_t) (s0->nb[3] / u);
+                }
                 pc.nb11 = E(s1->nb[1], 4); pc.nb12 = E(s1->nb[2], 4); pc.nb13 = E(s1->nb[3], 4);
                 pc.nbd1 = E(t->nb[1], 4); pc.nbd2 = E(t->nb[2], 4); pc.nbd3 = E(t->nb[3], 4);
                 pc.r2 = (uint32_t) (s1->ne[2] / s0->ne[2]); pc.r3 = (uint32_t) (s1->ne[3] / s0->ne[3]);
@@ -651,7 +703,7 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
                 gpud_encoder::rng gr[2] = { { (uintptr_t) s0->data, (uintptr_t) s0->data + ggml_nbytes(s0) },
                                             { (uintptr_t) g_s.scratch.map, (uintptr_t) g_s.scratch.map + need } };
                 gpud_encoder::rng gw[1] = { { (uintptr_t) t->data, (uintptr_t) t->data + ggml_nbytes(t) } };
-                if (!enc.push_raw(q6 ? SH_GEMV_Q6K_IQ : SH_GEMV_Q4K_IQ, gx, pc.ne11, (uint32_t) (s1->ne[2] * s1->ne[3]), binds, 3, &pc, sizeof(pc), gr, 2, gw, 1)) return false;
+                if (!enc.push_raw(q6rp ? SH_GEMV_Q6K_RP : (q6 ? SH_GEMV_Q6K_IQ : SH_GEMV_Q4K_IQ), gx, pc.ne11, (uint32_t) (s1->ne[2] * s1->ne[3]), binds, 3, &pc, sizeof(pc), gr, 2, gw, 1)) return false;
             }
             return true;
         }

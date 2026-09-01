@@ -1,0 +1,99 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_clustered : enable
+// int-dot-GEMV fuer q6_K: dst[row, col] = sum_k deq(W[row,k]) * x[k,col], x als q8_1 (aus quantize_q8_1).
+// Wie gemv_q4k_iq (8 Lanes je Zeile, subgroupClusteredAdd). block_q6_K ist 210 B und NUR 2-Byte-aligned
+// (Zeilenstride 210*n256, mod 4 = 2 bei ungeradem n256) -> v2 (1.9.): 32-Bit-Loads mit Unaligned-Trick
+// statt u16-Loads (v1: 2,15 ms je Stufe, 6,5x langsamer als q4k). Die Block-Paritaet ist je 256er-Block
+// UNIFORM fuer alle 8 Lanes einer Zeile -> ld() verzweigt billig; ql/qh/d liegen 4-Byte-strukturiert im
+// Block, nur die Basis wackelt um 2. Mali-Fork loest das per 224-B-Repack; hier NICHT moeglich
+// (UMA-dmabuf, CPU-Seite erwartet ggml-Layout).
+// Block 210 B: ql[128] qh[64] scales[16 x int8 @192] d[f16 @208]. q = (ql | qh<<4) - 32;
+// je 16 Elemente ein int8-Scale -> sc*(dot16 - 32*sum16), sum16 per dotPacked mit 0x01010101.
+// Voraussetzung (Backend): ne00 % 256 == 0, Gewichts-Offsets 2-Byte-aligned, x zusammenhaengend.
+#ifndef WGS
+#define WGS 64
+#endif
+layout(local_size_x = WGS) in;
+layout(std430, binding = 0) readonly buffer W  { uint w32[]; };
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };   // Alias: aligned uvec4 (Repack)
+layout(std430, binding = 1) readonly buffer XQ { uint xq[]; };
+layout(std430, binding = 1) readonly buffer XQ4 { uvec4 xq4[]; };   // Alias: qs-Bereich als uvec4
+layout(std430, binding = 2) writeonly buffer D { float dst[]; };
+layout(push_constant) uniform PC {
+    uint ne00, ne01, ne11, ne12;
+    uint nb01h;                    // src0-Zeilenstride in u16 (=105 * n256)
+    uint nb02h, nb03h;
+    uint nb11, nb12, nb13;         // src1(x)-Strides (Elemente, fuer Spaltenindex)
+    uint nbd1, nbd2, nbd3;
+    uint off0h, offxq, offd;       // off0h in u16; offxq = nblk_all (Split-Layout)
+    uint r2, r3, n256, xqcols;     // xqcols = nb32 (q8_1-Bloecke je Spalte)
+} pc;
+#define LPR 8u
+
+// 32-Bit-Wort bei GERADEM Byte-Offset b (b&2 uniform je Block).
+uint ld(uint b) {
+    uint i = b >> 2;
+    return (b & 2u) == 0u ? w32[i] : ((w32[i] >> 16) | (w32[i + 1u] << 16));
+}
+// u16 bei geradem Byte-Offset b.
+uint ld16(uint b) { uint w = w32[b >> 2]; return (b & 2u) == 0u ? (w & 0xFFFFu) : (w >> 16); }
+
+// Ein 32er-Subblock: Gewichtsblock bei uvec4-Basis b4 (256er-Block, REPACK-Layout 224 B aligned:
+// ql[128] qh[64] scales[16] d[2]+pad -> alles 16-B-strukturiert), Subblock sub(0..7); x-q8_1 split.
+float dot_sub(uint b4, uint sub, uint xhdr, uint xqs4) {
+    uint h = sub >> 2, seg = sub & 3u;
+    uint ql4 = b4 + h * 4u + (seg & 1u) * 2u;        // 32 ql-Bytes = 2 uvec4
+    uint qh4 = b4 + 8u + h * 2u;                     // 32 qh-Bytes = 2 uvec4
+    uint nsh = (seg >> 1) * 4u;                      // Nibble-Auswahl
+    uint hsh = seg * 2u;                             // qh-Bit-Auswahl
+    uint scw = ld16((b4 << 4) + 192u + h * 8u + seg * 2u);   // 2 int8-Scales (je 16 Elemente)
+    int sca = bitfieldExtract(int(scw), 0, 8), scb = bitfieldExtract(int(scw), 8, 8);
+    float d = unpackHalf2x16(ld16((b4 << 4) + 208u)).x;
+    vec2 ds = unpackHalf2x16(xq[xhdr]);              // (d_b, d_b*sum32) - sum32 hier ungenutzt
+    uvec4 x0 = xq4[xqs4], x1 = xq4[xqs4 + 1u];       // 8 qs-Worte als 2 uvec4 (Split-Layout)
+    int dqa = 0, dqb = 0, sa = 0, sb = 0;
+    {
+        uvec4 nl = w4[ql4];
+        uvec4 nh = w4[qh4];
+        uvec4 q = ((nl >> nsh) & 0x0F0F0F0Fu) | (((nh >> hsh) & 0x03030303u) << 4);
+        dqa += dotPacked4x8EXT(int(q.x), int(x0.x)) + dotPacked4x8EXT(int(q.y), int(x0.y)) + dotPacked4x8EXT(int(q.z), int(x0.z)) + dotPacked4x8EXT(int(q.w), int(x0.w));
+        sa  += dotPacked4x8EXT(int(0x01010101u), int(x0.x)) + dotPacked4x8EXT(int(0x01010101u), int(x0.y)) + dotPacked4x8EXT(int(0x01010101u), int(x0.z)) + dotPacked4x8EXT(int(0x01010101u), int(x0.w));
+    }
+    {
+        uvec4 nl = w4[ql4 + 1u];
+        uvec4 nh = w4[qh4 + 1u];
+        uvec4 q = ((nl >> nsh) & 0x0F0F0F0Fu) | (((nh >> hsh) & 0x03030303u) << 4);
+        dqb += dotPacked4x8EXT(int(q.x), int(x1.x)) + dotPacked4x8EXT(int(q.y), int(x1.y)) + dotPacked4x8EXT(int(q.z), int(x1.z)) + dotPacked4x8EXT(int(q.w), int(x1.w));
+        sb  += dotPacked4x8EXT(int(0x01010101u), int(x1.x)) + dotPacked4x8EXT(int(0x01010101u), int(x1.y)) + dotPacked4x8EXT(int(0x01010101u), int(x1.z)) + dotPacked4x8EXT(int(0x01010101u), int(x1.w));
+    }
+    return ds.x * d * (float(sca) * float(dqa - 32 * sa) + float(scb) * float(dqb - 32 * sb));
+}
+
+void main() {
+    uint rows_per_sg = gl_SubgroupSize / LPR;
+    uint rows_per_wg = (gl_WorkGroupSize.x / gl_SubgroupSize) * rows_per_sg;
+    uint row = rows_per_wg * gl_WorkGroupID.x + gl_SubgroupID * rows_per_sg + gl_SubgroupInvocationID / LPR;
+    uint lane = gl_SubgroupInvocationID % LPR;
+    uint col = gl_WorkGroupID.y, z = gl_WorkGroupID.z;
+    uint i12 = z % pc.ne12, i13 = z / pc.ne12, i02 = i12 / pc.r2, i03 = i13 / pc.r3;
+    bool valid = row < pc.ne01;
+    uint rr = valid ? row : 0u;
+    uint wrow = (pc.off0h + rr * pc.nb01h + i02 * pc.nb02h + i03 * pc.nb03h) >> 3;   // uvec4-Basis (Strides in u16, Repack: /8)
+    uint xcol = (col * pc.nb11 + i12 * pc.nb12 + i13 * pc.nb13) / pc.ne00;
+    uint nblk_all = pc.offxq;   // offxq = Gesamt-Blockzahl (Split-Layout)
+    uint qs4base = ((nblk_all + 3u) & ~3u) >> 2;
+    uint xhdr0 = xcol * pc.xqcols;
+    uint xqs40 = qs4base + xcol * pc.xqcols * 2u;
+    float acc = 0.0;
+    for (uint ib = 0u; ib < pc.n256; ib++) {
+        uint bi = ib * 8u + lane;
+        acc += dot_sub(wrow + ib * 14u, lane, xhdr0 + bi, xqs40 + bi * 2u);   // 224 B = 14 uvec4 je Block
+    }
+    acc = subgroupClusteredAdd(acc, LPR);
+    if (lane == 0u && valid) {
+        dst[pc.offd + row + col * pc.nbd1 + i12 * pc.nbd2 + i13 * pc.nbd3] = acc;
+    }
+}
