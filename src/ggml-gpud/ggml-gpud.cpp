@@ -269,7 +269,20 @@ struct gpud_backend_ctx {
     ggml_backend_t cpu = nullptr;   // Rueckfall fuer nicht kodierbare Knoten (in-place, is_host)
     int n_gpu = 0, n_cpu = 0, n_batches = 0, n_graphs = 0;
     double ms_batch = 0, ms_cpu = 0, ms_graph = 0;
+    // Quantize-Dedup: welcher x-Tensor liegt gerade als q8_1 im Scratch (1.9.: x wurde je GEMV
+    // quantisiert = 168 Stufen/Token, obwohl q/k/v bzw. gate/up dasselbe x teilen -> ~110 redundant).
+    // Tensor-OBJEKT-Identitaet reicht als Schluessel (SSA: ein Knoten wird genau einmal beschrieben);
+    // invalidiert je Graph-Start, bei Scratch-Grow und wenn ein Op den Datenbereich ueberschreibt.
+    const ggml_tensor * qx = nullptr;
 };
+
+// Schreibt Knoten t (dst) in den Datenbereich von x? (gleicher Puffer + Bereichs-Ueberlappung)
+static bool gpud_writes_over(const ggml_tensor * t, const ggml_tensor * x) {
+    if (!t || !x || !t->buffer || t->buffer != x->buffer) return false;
+    const char * a0 = (const char *) t->data, * a1 = a0 + ggml_nbytes(t);
+    const char * b0 = (const char *) x->data, * b1 = b0 + ggml_nbytes(x);
+    return a0 < b1 && b0 < a1;
+}
 
 static bool gpud_supports_op(const ggml_tensor * op);
 
@@ -338,14 +351,21 @@ static enum ggml_status gpud_graph_compute(ggml_backend_t backend, ggml_cgraph *
     };
     static int fl_full = 0, fl_calls = 0;
     (void) fl_full;
+    ctx->qx = nullptr;   // Scratch-Inhalt gehoert zum vorigen Graphen (gleiche Zeiger, neue Daten)
     for (int i = 0; i < cg->n_nodes; i++) {
         ggml_tensor * node = cg->nodes[i];
         if (op_is_noop(node)) continue;
         int skip = 0;
-        if (gpud_supports_op(node) && encode_node(ctx, cg, i, skip, flush)) { ctx->n_gpu++; i += skip; continue; }
+        if (gpud_supports_op(node) && encode_node(ctx, cg, i, skip, flush)) {
+            ctx->n_gpu++;
+            // Dedup-Invalidierung: alle vom (ggf. fusionierten) Encode beschriebenen Knoten pruefen
+            for (int j = i; j <= i + skip && ctx->qx; j++) if (gpud_writes_over(cg->nodes[j], ctx->qx)) ctx->qx = nullptr;
+            i += skip; continue;
+        }
         // Rueckfall: erst die GPU-Arbeit abschliessen (Reihenfolge!), dann CPU in-place
         if (!flush()) return GGML_STATUS_FAILED;
         node_on_cpu(ctx, node);
+        if (gpud_writes_over(node, ctx->qx)) ctx->qx = nullptr;
     }
     if (!flush()) return GGML_STATUS_FAILED;
     ctx->ms_graph += gpud_now_ms() - tg0; ctx->n_graphs++;
@@ -425,10 +445,10 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
             uint32_t ncols = (uint32_t) (s1->ne[1] * s1->ne[2] * s1->ne[3]);
             uint32_t nb32 = (uint32_t) s1->ne[0] / 32;
             uint32_t need = nb32 * ncols * 36u;                       // q8_1: 36 B je 32er-Block
-            if (need > g_s.scratch_sz) { if (g_s.log) GGML_LOG_INFO("gpud: flush wg scratch-grow (nst=%zu, need=%u > %u)\n", ctx->enc.nst, need, g_s.scratch_sz); if (!flush()) return false; if (!gpud_scratch_ensure(need)) return false; }
+            if (need > g_s.scratch_sz) { if (g_s.log) GGML_LOG_INFO("gpud: flush wg scratch-grow (nst=%zu, need=%u > %u)\n", ctx->enc.nst, need, g_s.scratch_sz); if (!flush()) return false; if (!gpud_scratch_ensure(need)) return false; ctx->qx = nullptr; }
             barra_zbuf * sc = &g_s.scratch;
-            // Stufe 1: quantisieren (x -> scratch)
-            {
+            // Stufe 1: quantisieren (x -> scratch) - entfaellt, wenn dasselbe x schon drinliegt (Dedup)
+            if (ctx->qx != s1) {
                 pc_quant pc{}; pc.ne00 = (uint32_t) s1->ne[0]; pc.ncols = ncols; pc.nb32 = nb32; pc.nblk = nb32 * ncols;
                 uint32_t remx = 0; barra_gpu3_bind bx;
                 if (!gpud_encoder::bind(s1, bx, remx)) return false;
@@ -438,6 +458,7 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
                 if (enc.full(2)) { if (g_s.log) GGML_LOG_INFO("gpud: flush wg full(2) nst=%zu maxstage=%d\n", enc.nst, g_s.maxstage); if (!flush()) return false; }
                 uint32_t gx, gy; grid2(pc.nblk, gx, gy);
                 if (!enc.push_raw(SH_QUANT_Q81, gx, gy, 1, binds, 2, &pc, sizeof(pc))) return false;
+                ctx->qx = s1;
             }
             // Stufe 2: int-dot-GEMV (W, scratch, dst). q4_K: Strides in uvec4 (144-B-Block, 16-aligned);
             // q6_K: Strides in u16 (210-B-Block, nur 2-Byte-aligned - siehe gemv_q6k_iq.comp).
