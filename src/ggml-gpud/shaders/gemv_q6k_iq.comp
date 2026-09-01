@@ -1,21 +1,21 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
-#extension GL_EXT_shader_16bit_storage : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_integer_dot_product : require
 #extension GL_KHR_shader_subgroup_basic : enable
 #extension GL_KHR_shader_subgroup_clustered : enable
 // int-dot-GEMV fuer q6_K: dst[row, col] = sum_k deq(W[row,k]) * x[k,col], x als q8_1 (aus quantize_q8_1).
-// Wie gemv_q4k_iq (8 Lanes je Zeile, subgroupClusteredAdd), ABER: block_q6_K ist 210 B (NUR 2-Byte-
-// aligned, 1.9.: ne00=8960 -> Zeilenstride 7350 B, mod 4 = 2) -> Gewichte als u16 gelesen und zu
-// 32-Bit-Worten fuer dotPacked4x8EXT zusammengesetzt. Der Mali-Vulkan-Fork loest das per 224-B-Repack;
-// hier NICHT moeglich: UMA-dmabuf, die CPU-Seite (set/get_tensor, Rueckfall) erwartet ggml-Layout.
-// Block 210 B = 105 u16: ql[128 B] qh[64 B] scales[16 x int8] d[f16 @208]. q = (ql | qh<<4) - 32;
-// je 16 Elemente ein int8-Scale -> dot16 - 32*sum16 (sum16 per dotPacked mit 0x01010101).
+// Wie gemv_q4k_iq (8 Lanes je Zeile, subgroupClusteredAdd). block_q6_K ist 210 B und NUR 2-Byte-aligned
+// (Zeilenstride 210*n256, mod 4 = 2 bei ungeradem n256) -> v2 (1.9.): 32-Bit-Loads mit Unaligned-Trick
+// statt u16-Loads (v1: 2,15 ms je Stufe, 6,5x langsamer als q4k). Die Block-Paritaet ist je 256er-Block
+// UNIFORM fuer alle 8 Lanes einer Zeile -> ld() verzweigt billig; ql/qh/d liegen 4-Byte-strukturiert im
+// Block, nur die Basis wackelt um 2. Mali-Fork loest das per 224-B-Repack; hier NICHT moeglich
+// (UMA-dmabuf, CPU-Seite erwartet ggml-Layout).
+// Block 210 B: ql[128] qh[64] scales[16 x int8 @192] d[f16 @208]. q = (ql | qh<<4) - 32;
+// je 16 Elemente ein int8-Scale -> sc*(dot16 - 32*sum16), sum16 per dotPacked mit 0x01010101.
 // Voraussetzung (Backend): ne00 % 256 == 0, Gewichts-Offsets 2-Byte-aligned, x zusammenhaengend.
 layout(local_size_x = 64) in;
-layout(std430, binding = 0) readonly buffer W  { uint16_t w16[]; };
-layout(std430, binding = 1) readonly buffer XQ { uint  xq[]; };
+layout(std430, binding = 0) readonly buffer W  { uint w32[]; };
+layout(std430, binding = 1) readonly buffer XQ { uint xq[]; };
 layout(std430, binding = 2) writeonly buffer D { float dst[]; };
 layout(push_constant) uniform PC {
     uint ne00, ne01, ne11, ne12;
@@ -28,31 +28,37 @@ layout(push_constant) uniform PC {
 } pc;
 #define LPR 8u
 
-uint w32(uint h) { return uint(w16[h]) | (uint(w16[h + 1u]) << 16); }
+// 32-Bit-Wort bei GERADEM Byte-Offset b (b&2 uniform je Block).
+uint ld(uint b) {
+    uint i = b >> 2;
+    return (b & 2u) == 0u ? w32[i] : ((w32[i] >> 16) | (w32[i + 1u] << 16));
+}
+// u16 bei geradem Byte-Offset b.
+uint ld16(uint b) { uint w = w32[b >> 2]; return (b & 2u) == 0u ? (w & 0xFFFFu) : (w >> 16); }
 
-// Ein 32er-Subblock: Gewicht bei u16-Basis wblk (256er-Block), Subblock sub(0..7); x-q8_1-Block bei xbase.
-float dot_sub(uint wblk, uint sub, uint xbase) {
+// Ein 32er-Subblock: Gewichtsblock bei Byte-Basis bblk (256er-Block), Subblock sub(0..7); x-q8_1 bei xbase.
+float dot_sub(uint bblk, uint sub, uint xbase) {
     uint h = sub >> 2, seg = sub & 3u;
-    uint qlb = wblk + h * 32u + (seg & 1u) * 16u;    // 32 ql-Bytes = 16 u16
-    uint qhb = wblk + 64u + h * 16u;                 // 32 qh-Bytes = 16 u16
+    uint qlb = bblk + h * 64u + (seg & 1u) * 32u;    // 32 ql-Bytes = 8 Worte
+    uint qhb = bblk + 128u + h * 32u;                // 32 qh-Bytes = 8 Worte
     uint nsh = (seg >> 1) * 4u;                      // Nibble-Auswahl
     uint hsh = seg * 2u;                             // qh-Bit-Auswahl
-    uint scw = uint(w16[wblk + 96u + h * 4u + seg]); // 2 int8-Scales (je 16 Elemente)
+    uint scw = ld16(bblk + 192u + h * 8u + seg * 2u);// 2 int8-Scales (je 16 Elemente)
     int sca = bitfieldExtract(int(scw), 0, 8), scb = bitfieldExtract(int(scw), 8, 8);
-    float d = unpackHalf2x16(uint(w16[wblk + 104u])).x;
+    float d = unpackHalf2x16(ld16(bblk + 208u)).x;
     vec2 ds = unpackHalf2x16(xq[xbase]);             // (d_b, d_b*sum32) - sum32 hier ungenutzt
     uint xb = xbase + 1u;
     int dqa = 0, dqb = 0, sa = 0, sb = 0;
     for (uint w = 0u; w < 4u; w++) {
-        uint nib = (w32(qlb + 2u * w) >> nsh) & 0x0F0F0F0Fu;
-        uint hi  = ((w32(qhb + 2u * w) >> hsh) & 0x03030303u) << 4;
+        uint nib = (ld(qlb + 4u * w) >> nsh) & 0x0F0F0F0Fu;
+        uint hi  = ((ld(qhb + 4u * w) >> hsh) & 0x03030303u) << 4;
         int xw = int(xq[xb + w]);
         dqa += dotPacked4x8EXT(int(nib | hi), xw);
         sa  += dotPacked4x8EXT(int(0x01010101u), xw);
     }
     for (uint w = 4u; w < 8u; w++) {
-        uint nib = (w32(qlb + 2u * w) >> nsh) & 0x0F0F0F0Fu;
-        uint hi  = ((w32(qhb + 2u * w) >> hsh) & 0x03030303u) << 4;
+        uint nib = (ld(qlb + 4u * w) >> nsh) & 0x0F0F0F0Fu;
+        uint hi  = ((ld(qhb + 4u * w) >> hsh) & 0x03030303u) << 4;
         int xw = int(xq[xb + w]);
         dqb += dotPacked4x8EXT(int(nib | hi), xw);
         sb  += dotPacked4x8EXT(int(0x01010101u), xw);
@@ -69,12 +75,12 @@ void main() {
     uint i12 = z % pc.ne12, i13 = z / pc.ne12, i02 = i12 / pc.r2, i03 = i13 / pc.r3;
     bool valid = row < pc.ne01;
     uint rr = valid ? row : 0u;
-    uint wrow = pc.off0h + rr * pc.nb01h + i02 * pc.nb02h + i03 * pc.nb03h;
+    uint wrow = 2u * (pc.off0h + rr * pc.nb01h + i02 * pc.nb02h + i03 * pc.nb03h);   // Byte-Basis der Zeile
     uint xcol = (col * pc.nb11 + i12 * pc.nb12 + i13 * pc.nb13) / pc.ne00;
     uint xcolbase = pc.offxq + xcol * pc.xqcols * 9u;
     float acc = 0.0;
     for (uint ib = 0u; ib < pc.n256; ib++) {
-        acc += dot_sub(wrow + ib * 105u, lane, xcolbase + (ib * 8u + lane) * 9u);
+        acc += dot_sub(wrow + ib * 210u, lane, xcolbase + (ib * 8u + lane) * 9u);
     }
     acc = subgroupClusteredAdd(acc, LPR);
     if (lane == 0u && valid) {
