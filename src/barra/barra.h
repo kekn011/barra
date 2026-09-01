@@ -116,6 +116,7 @@ typedef struct {
                                              * Barriere Geschriebenes). 0 = Barriere (fail-safe). */
 } barra_gpu3_stage;
 int  barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* stages, int nstage);   /* 0=ok; ein Roundtrip */
+int  barra_gpu3_alloc_native(barra_gpu3* g, uint32_t size);   /* Mess-Experiment: Device-Local-Puffer im Daemon, liefert Handle (Inhalt uninitialisiert) */
 
 /* ================= Zero-Copy (TPU) =================
  * Dieselben dmabufs als TPU-Tensor-Puffer: tpud importiert sie einmal (ImportBufferByFd,

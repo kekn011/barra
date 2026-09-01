@@ -107,7 +107,17 @@ static int gpu_init(void){
 static int import_buf(int fd, uint32_t size, VkBuffer* b, VkDeviceMemory* m){
   VkMemoryFdPropertiesKHR fp={.sType=VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
   if(pGetMemFdProps(dev,VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,fd,&fp)!=VK_SUCCESS) return -1;
-  uint32_t mt=pick_mem(fp.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  /* Memory-Type-Wahl (1.9.): Lese-Ceiling auf importierten dmabufs war ~14 GB/s (native Vulkan-
+   * Allokationen ~23 effektiv) -> DEVICE_LOCAL bevorzugen, falls der Treiber es fuer dmabuf-Import
+   * anbietet; einmalig ALLE angebotenen Typen loggen (Diagnose). GPUD_IMPORT_MT=<i> erzwingt Typ i. */
+  static int logged=0;
+  if(!logged){ logged=1; VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(phys,&mp);
+    for(uint32_t i=0;i<mp.memoryTypeCount;i++) if(fp.memoryTypeBits&(1u<<i))
+      LOG("[gpud-zc] dmabuf-Import Memory-Typ %u: flags=0x%x heap=%u\n",i,mp.memoryTypes[i].propertyFlags,mp.memoryTypes[i].heapIndex); }
+  uint32_t mt=UINT32_MAX;
+  { const char* e=getenv("GPUD_IMPORT_MT"); if(e){ uint32_t i=(uint32_t)atoi(e); if(fp.memoryTypeBits&(1u<<i)) mt=i; } }
+  if(mt==UINT32_MAX) mt=pick_mem(fp.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  if(mt==UINT32_MAX) mt=pick_mem(fp.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
   if(mt==UINT32_MAX) mt=pick_mem(fp.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
   if(mt==UINT32_MAX) return -1;
   VkExternalMemoryBufferCreateInfo ext={.sType=VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
@@ -445,10 +455,10 @@ static void serve_v3(int c, uint32_t* hdr, int* fds, int nfd){
       VK_LOCK(); int r=sh3_load(&sh[slot],spv,slen,nbind,pcsize); VK_UNLOCK();
       free(spv);
       if(r==0){ status=0; shh=(uint32_t)slot; wfull(c,&status,4); wfull(c,&shh,4); } else wfull(c,&status,4);
-    } else if(cmd==5||cmd==7){                    /* DISPATCH nstage (7 = v3.1 mit Stufen-Flags) */
+    } else if(cmd==5||cmd==9){                    /* DISPATCH nstage (9 = v3.1 mit Stufen-Flags; 7 ist EXIT!) */
       uint32_t nstage=hdr[2]; int ok=(nstage>=1&&nstage<=MAXSTAGE3);
       for(uint32_t s=0; ok&&s<nstage; s++){
-        uint32_t sx[7]; sx[6]=0; if(rfull(c,sx,cmd==7?28:24)){ ok=0; break; }
+        uint32_t sx[7]; sx[6]=0; if(rfull(c,sx,cmd==9?28:24)){ ok=0; break; }
         Stage3* S=&st[s]; S->sh=sx[0]; S->gx=sx[1]; S->gy=sx[2]; S->gz=sx[3]; S->nbind=sx[4]; S->pcsize=sx[5]; S->flags=sx[6];
         if(S->sh>=MAXSH3||!sh[S->sh].used||S->nbind>MAXBUF||S->nbind!=sh[S->sh].nbind||S->pcsize!=sh[S->sh].pcsize||sx[1]>65535u||sx[2]>65535u||sx[3]>65535u){ ok=0; break; }
         uint32_t bd[MAXBUF*4]; if(S->nbind&&rfull(c,bd,S->nbind*16)){ ok=0; break; }
@@ -463,6 +473,28 @@ static void serve_v3(int c, uint32_t* hdr, int* fds, int nfd){
       ndisp++;
       if(ndisp<=3||ndisp%1000==0||nstage>=256) LOG("[gpud-zc] v3 dispatch #%ld nstage=%u status=%u  record %.2f ms, gpu %.2f ms, gesamt %.2f ms\n",ndisp,nstage,status,g_t3[0],g_t3[1],g_t3[2]);
       wfull(c,&status,4);
+    } else if(cmd==10){                           /* ALLOC_NATIVE size (1.9., Mess-Experiment): nativer
+      * VkDeviceMemory-Puffer statt dmabuf-Import - misst das Lese-Ceiling ohne den Import-Pfad
+      * (dmabuf-Import bietet nur EINEN Memory-Typ, flags=0xb, ~14 GB/s). Inhalt uninitialisiert. */
+      uint32_t sz=hdr[2]; uint32_t hd2=0; int ok2=0;
+      int slot=-1; for(int k=0;k<MAXH;k++) if(!h[k].used){slot=k;break;}
+      if(slot>=0&&sz){
+        VkBufferCreateInfo bci={.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=sz,.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,.sharingMode=VK_SHARING_MODE_EXCLUSIVE};
+        VK_LOCK();
+        if(vkCreateBuffer(dev,&bci,0,&h[slot].b)==VK_SUCCESS){
+          VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev,h[slot].b,&mr);
+          uint32_t mt2=pick_mem(mr.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+          if(mt2!=UINT32_MAX){
+            VkMemoryAllocateInfo mai={.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,.allocationSize=mr.size,.memoryTypeIndex=mt2};
+            if(vkAllocateMemory(dev,&mai,0,&h[slot].m)==VK_SUCCESS&&vkBindBufferMemory(dev,h[slot].b,h[slot].m,0)==VK_SUCCESS){
+              h[slot].used=1; h[slot].size=sz; hd2=(uint32_t)slot; ok2=1;
+              LOG("[gpud-zc] ALLOC_NATIVE %u B -> handle %u (memtype %u)\n",sz,hd2,mt2); }
+          }
+          if(!ok2){ vkDestroyBuffer(dev,h[slot].b,0); h[slot].b=0; }
+        }
+        VK_UNLOCK();
+      }
+      if(ok2){ status=0; wfull(c,&status,4); wfull(c,&hd2,4); } else wfull(c,&status,4);
     } else if(cmd==8){                            /* FLAGS (Messung): bit0 = keine Zwischen-Barrieren */
       sflags=hdr[2]; status=0; wfull(c,&status,4);
     } else if(cmd==7){                            /* EXIT: Daemon beendet sich, Supervisor respawnt (Dev-Loop ohne Reboot) */

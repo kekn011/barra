@@ -328,6 +328,15 @@ int barra_gpu3_flags(barra_gpu3* g, uint32_t flags){
   return status?-1:0;
 }
 void barra_gpu3_set_autosync(barra_gpu3* g, int on){ if(g) g->autosync=on; }
+int barra_gpu3_alloc_native(barra_gpu3* g, uint32_t size){
+  /* Mess-Experiment (1.9.): nativer Device-Local-Puffer im Daemon (cmd=10), Inhalt uninitialisiert. */
+  if(!g||g->sock<0||!size) return -1;
+  uint32_t hdr[6]={GPZ3_MAGIC,10,size,0,0,0}; uint32_t status=1, hd=0;
+  if(send_hdr_fds(g->sock,hdr,0,0)||rn(g->sock,&status,4)) return gpu3_dead(g);
+  if(status!=0){ fprintf(stderr,"barra: GPU3-AllocNative status=%u\n",status); return -1; }
+  if(rn(g->sock,&hd,4)) return gpu3_dead(g);
+  return (int)hd;
+}
 int barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* st, int nstage){
   /* Fehlerpfade hier muessen LAUT sein (fprintf, nicht GGML-Log: llama-bench schluckt den GGML-Log
    * komplett) - der stumme r=-1 hat am 31.8. Stunden Diagnose gekostet. */
@@ -355,7 +364,7 @@ int barra_gpu3_batch(barra_gpu3* g, const barra_gpu3_stage* st, int nstage){
   if(g_t_on) clock_gettime(CLOCK_MONOTONIC,&tt[1]);
   if(g->autosync) for(int j=0;j<nu;j++) barra_zc_cpu_end(uniq[j]);
   if(g_t_on) clock_gettime(CLOCK_MONOTONIC,&tt[2]);
-  uint32_t hdr[6]={GPZ3_MAGIC,7,(uint32_t)nstage,0,0,0}; int rc=-1,desync=0; uint32_t status=1;   /* cmd=7: v3.1-Stufenheader mit flags (Daemon >= 1.9. noetig; cmd=5 bleibt im Daemon fuer alte Clients) */
+  uint32_t hdr[6]={GPZ3_MAGIC,9,(uint32_t)nstage,0,0,0}; int rc=-1,desync=0; uint32_t status=1;   /* cmd=9: v3.1-Stufenheader mit flags (cmd=7 ist EXIT - Kollision am 1.9. gekostet: shadowte EXIT, Dev-Loop-Restart still kaputt); cmd=5 bleibt im Daemon fuer alte Clients */
   if(send_hdr_fds(g->sock,hdr,0,0)==0){
     rc=0;
     /* Alle Stufen in EINEN Puffer und mit EINEM write() senden: pro Stufe ein eigener write()
