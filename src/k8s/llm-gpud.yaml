@@ -19,6 +19,25 @@ spec:
     port: 8080
     targetPort: 8080
 ---
+# LAN-Zugang: MetalLB (L2, default-addresspool 192.168.178.150-160) vergibt die
+# feste VIP .151 - .150 haelt bereits der Ingress. OpenAI-kompatible API und
+# Web-UI damit direkt unter http://192.168.178.151:8080 im lokalen Netz.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gpud-lb
+  namespace: barra
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: 192.168.178.151
+spec:
+  type: LoadBalancer
+  selector:
+    app: llm-gpud
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
