@@ -66,11 +66,15 @@ void main() {
     // Spalten-Basis der q8_1-Bloecke: col/i12/i13 waehlen die x-Spalte; deren Block 0
     uint xcol = (col * pc.nb11 + i12 * pc.nb12 + i13 * pc.nb13) / pc.ne00;   // Spaltenindex
     uint xcolbase = pc.offxq + xcol * pc.xqcols * 9u;
-    float acc = 0.0;
-    // Lane bearbeitet Subblock 'lane' jedes 256er-Blocks
-    for (uint ib = 0u; ib < pc.n256; ib++) {
-        acc += dot_sub(wrow + ib * 9u, lane, xcolbase + (ib * 8u + lane) * 9u);
+    float acc = 0.0, acc2 = 0.0;
+    // 2-Block-Unroll: zwei unabhaengige Akkumulatoren verstecken die Ladelatenz
+    uint ib = 0u;
+    for (; ib + 1u < pc.n256; ib += 2u) {
+        acc  += dot_sub(wrow + ib * 9u,        lane, xcolbase + (ib * 8u + lane) * 9u);
+        acc2 += dot_sub(wrow + (ib + 1u) * 9u, lane, xcolbase + ((ib + 1u) * 8u + lane) * 9u);
     }
+    if (ib < pc.n256) acc += dot_sub(wrow + ib * 9u, lane, xcolbase + (ib * 8u + lane) * 9u);
+    acc += acc2;
     acc = subgroupClusteredAdd(acc, LPR);
     if (lane == 0u && valid) {
         dst[pc.offd + row + col * pc.nbd1 + i12 * pc.nbd2 + i13 * pc.nbd3] = acc;

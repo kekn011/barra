@@ -13,7 +13,10 @@
 // Block 210 B: ql[128] qh[64] scales[16 x int8 @192] d[f16 @208]. q = (ql | qh<<4) - 32;
 // je 16 Elemente ein int8-Scale -> sc*(dot16 - 32*sum16), sum16 per dotPacked mit 0x01010101.
 // Voraussetzung (Backend): ne00 % 256 == 0, Gewichts-Offsets 2-Byte-aligned, x zusammenhaengend.
-layout(local_size_x = 64) in;
+#ifndef WGS
+#define WGS 64
+#endif
+layout(local_size_x = WGS) in;
 layout(std430, binding = 0) readonly buffer W  { uint w32[]; };
 layout(std430, binding = 1) readonly buffer XQ { uint xq[]; };
 layout(std430, binding = 2) writeonly buffer D { float dst[]; };
