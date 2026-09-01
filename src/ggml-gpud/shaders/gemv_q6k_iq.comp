@@ -1,0 +1,83 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_clustered : enable
+// int-dot-GEMV fuer q6_K: dst[row, col] = sum_k deq(W[row,k]) * x[k,col], x als q8_1 (aus quantize_q8_1).
+// Wie gemv_q4k_iq (8 Lanes je Zeile, subgroupClusteredAdd), ABER: block_q6_K ist 210 B (NUR 2-Byte-
+// aligned, 1.9.: ne00=8960 -> Zeilenstride 7350 B, mod 4 = 2) -> Gewichte als u16 gelesen und zu
+// 32-Bit-Worten fuer dotPacked4x8EXT zusammengesetzt. Der Mali-Vulkan-Fork loest das per 224-B-Repack;
+// hier NICHT moeglich: UMA-dmabuf, die CPU-Seite (set/get_tensor, Rueckfall) erwartet ggml-Layout.
+// Block 210 B = 105 u16: ql[128 B] qh[64 B] scales[16 x int8] d[f16 @208]. q = (ql | qh<<4) - 32;
+// je 16 Elemente ein int8-Scale -> dot16 - 32*sum16 (sum16 per dotPacked mit 0x01010101).
+// Voraussetzung (Backend): ne00 % 256 == 0, Gewichts-Offsets 2-Byte-aligned, x zusammenhaengend.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer W  { uint16_t w16[]; };
+layout(std430, binding = 1) readonly buffer XQ { uint  xq[]; };
+layout(std430, binding = 2) writeonly buffer D { float dst[]; };
+layout(push_constant) uniform PC {
+    uint ne00, ne01, ne11, ne12;
+    uint nb01h;                    // src0-Zeilenstride in u16 (=105 * n256)
+    uint nb02h, nb03h;
+    uint nb11, nb12, nb13;         // src1(x)-Strides (Elemente, fuer Spaltenindex)
+    uint nbd1, nbd2, nbd3;
+    uint off0h, offxq, offd;       // off0h in u16; offxq in uint (q8_1-Block-Basis der Spalte 0)
+    uint r2, r3, n256, xqcols;     // xqcols = nb32 (q8_1-Bloecke je Spalte)
+} pc;
+#define LPR 8u
+
+uint w32(uint h) { return uint(w16[h]) | (uint(w16[h + 1u]) << 16); }
+
+// Ein 32er-Subblock: Gewicht bei u16-Basis wblk (256er-Block), Subblock sub(0..7); x-q8_1-Block bei xbase.
+float dot_sub(uint wblk, uint sub, uint xbase) {
+    uint h = sub >> 2, seg = sub & 3u;
+    uint qlb = wblk + h * 32u + (seg & 1u) * 16u;    // 32 ql-Bytes = 16 u16
+    uint qhb = wblk + 64u + h * 16u;                 // 32 qh-Bytes = 16 u16
+    uint nsh = (seg >> 1) * 4u;                      // Nibble-Auswahl
+    uint hsh = seg * 2u;                             // qh-Bit-Auswahl
+    uint scw = uint(w16[wblk + 96u + h * 4u + seg]); // 2 int8-Scales (je 16 Elemente)
+    int sca = bitfieldExtract(int(scw), 0, 8), scb = bitfieldExtract(int(scw), 8, 8);
+    float d = unpackHalf2x16(uint(w16[wblk + 104u])).x;
+    vec2 ds = unpackHalf2x16(xq[xbase]);             // (d_b, d_b*sum32) - sum32 hier ungenutzt
+    uint xb = xbase + 1u;
+    int dqa = 0, dqb = 0, sa = 0, sb = 0;
+    for (uint w = 0u; w < 4u; w++) {
+        uint nib = (w32(qlb + 2u * w) >> nsh) & 0x0F0F0F0Fu;
+        uint hi  = ((w32(qhb + 2u * w) >> hsh) & 0x03030303u) << 4;
+        int xw = int(xq[xb + w]);
+        dqa += dotPacked4x8EXT(int(nib | hi), xw);
+        sa  += dotPacked4x8EXT(int(0x01010101u), xw);
+    }
+    for (uint w = 4u; w < 8u; w++) {
+        uint nib = (w32(qlb + 2u * w) >> nsh) & 0x0F0F0F0Fu;
+        uint hi  = ((w32(qhb + 2u * w) >> hsh) & 0x03030303u) << 4;
+        int xw = int(xq[xb + w]);
+        dqb += dotPacked4x8EXT(int(nib | hi), xw);
+        sb  += dotPacked4x8EXT(int(0x01010101u), xw);
+    }
+    return ds.x * d * (float(sca) * float(dqa - 32 * sa) + float(scb) * float(dqb - 32 * sb));
+}
+
+void main() {
+    uint rows_per_sg = gl_SubgroupSize / LPR;
+    uint rows_per_wg = (gl_WorkGroupSize.x / gl_SubgroupSize) * rows_per_sg;
+    uint row = rows_per_wg * gl_WorkGroupID.x + gl_SubgroupID * rows_per_sg + gl_SubgroupInvocationID / LPR;
+    uint lane = gl_SubgroupInvocationID % LPR;
+    uint col = gl_WorkGroupID.y, z = gl_WorkGroupID.z;
+    uint i12 = z % pc.ne12, i13 = z / pc.ne12, i02 = i12 / pc.r2, i03 = i13 / pc.r3;
+    bool valid = row < pc.ne01;
+    uint rr = valid ? row : 0u;
+    uint wrow = pc.off0h + rr * pc.nb01h + i02 * pc.nb02h + i03 * pc.nb03h;
+    uint xcol = (col * pc.nb11 + i12 * pc.nb12 + i13 * pc.nb13) / pc.ne00;
+    uint xcolbase = pc.offxq + xcol * pc.xqcols * 9u;
+    float acc = 0.0;
+    for (uint ib = 0u; ib < pc.n256; ib++) {
+        acc += dot_sub(wrow + ib * 105u, lane, xcolbase + (ib * 8u + lane) * 9u);
+    }
+    acc = subgroupClusteredAdd(acc, LPR);
+    if (lane == 0u && valid) {
+        dst[pc.offd + row + col * pc.nbd1 + i12 * pc.nbd2 + i13 * pc.nbd3] = acc;
+    }
+}

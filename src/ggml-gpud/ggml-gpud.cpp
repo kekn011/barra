@@ -24,7 +24,7 @@ static inline double gpud_now_ms() { return std::chrono::duration<double, std::m
 #define GPUD_MAX_PC 128
 
 // ---------------------------------------------------------------- Shader-Tabelle (Push-Constant-Layouts wie in shaders/*.comp)
-enum { SH_BINARY, SH_UNARY, SH_RMS, SH_CPY, SH_GET_ROWS, SH_MUL_MAT, SH_ROPE, SH_SOFTMAX, SH_GLU, SH_SET_ROWS, SH_GEMV_Q, SH_QUANT_Q81, SH_GEMV_Q4K_IQ, SH_FLASH, SH_N };
+enum { SH_BINARY, SH_UNARY, SH_RMS, SH_CPY, SH_GET_ROWS, SH_MUL_MAT, SH_ROPE, SH_SOFTMAX, SH_GLU, SH_SET_ROWS, SH_GEMV_Q, SH_QUANT_Q81, SH_GEMV_Q4K_IQ, SH_GEMV_Q6K_IQ, SH_FLASH, SH_N };
 struct pc_binary   { uint32_t ne[4], nb0[4], nb1[4], nbd[4], ne1[4], offa, offb, offd, op, n; };
 struct pc_unary    { uint32_t n, offa, offd, op; float s, b; };
 struct pc_rms      { uint32_t ne00, nrows, nb01, nbd1, offa, offw, offd, fuse; float eps; };
@@ -55,6 +55,7 @@ static const shader_def g_shaders[SH_N] = {
     { gpud_spv_gemv_q,   gpud_spv_gemv_q_len,   4, sizeof(pc_gemv),     "gemv_q"   },
     { gpud_spv_quantize_q8_1, gpud_spv_quantize_q8_1_len, 2, sizeof(pc_quant),  "quant_q81" },
     { gpud_spv_gemv_q4k_iq,   gpud_spv_gemv_q4k_iq_len,   3, sizeof(pc_gemv_iq), "gemv_q4k_iq" },
+    { gpud_spv_gemv_q6k_iq,   gpud_spv_gemv_q6k_iq_len,   3, sizeof(pc_gemv_iq), "gemv_q6k_iq" },
     { gpud_spv_flash_attn,    gpud_spv_flash_attn_len,    7, sizeof(pc_flash),   "flash_attn" },
 };
 
@@ -412,8 +413,15 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
         return true;
     }
     case GGML_OP_MUL_MAT: {
-        // M2b: int-dot-GEMV fuer q4_K (dotPacked4x8EXT + Subgroup-Cluster) - x wird zuerst nach q8_1 quantisiert.
-        if (s0->type == GGML_TYPE_Q4_K && s0->ne[0] % 256 == 0 && ggml_is_contiguous(s1) && !getenv("GGML_GPUD_NOIQ")) {
+        // M2b: int-dot-GEMV fuer q4_K und q6_K (dotPacked4x8EXT + Subgroup-Cluster) - x zuerst nach q8_1.
+        // q6_K seit 1.9.: der Float-GEMV (gemv_q) fuer die q6_K-Matrizen (FFN-down + Output-Head, ~400 MB)
+        // frass ~60 % der Decode-Tokenzeit (Profil 1.9.: 29 Stufen a ~4,2 ms real = ~120 ms/Token).
+        if ((s0->type == GGML_TYPE_Q4_K || (s0->type == GGML_TYPE_Q6_K && !getenv("GGML_GPUD_NOIQ6")))
+            && s0->ne[0] % 256 == 0 && ggml_is_contiguous(s1) && !getenv("GGML_GPUD_NOIQ")
+            // Gewichts-Bindung vorab pruefen (VOR der Quantize-Stufe, sonst bliebe sie verwaist im Batch):
+            // Offset-Rest muss zur Lese-Einheit passen (q4_K: uvec4/16 B, q6_K: u16/2 B).
+            && [&]{ barra_gpu3_bind bw_; uint32_t remw_ = 0;
+                    return gpud_encoder::bind(s0, bw_, remw_) && remw_ % (s0->type == GGML_TYPE_Q6_K ? 2u : 16u) == 0; }()) {
             uint32_t ncols = (uint32_t) (s1->ne[1] * s1->ne[2] * s1->ne[3]);
             uint32_t nb32 = (uint32_t) s1->ne[0] / 32;
             uint32_t need = nb32 * ncols * 36u;                       // q8_1: 36 B je 32er-Block
@@ -431,22 +439,25 @@ static bool encode_node(gpud_backend_ctx * ctx, ggml_cgraph * cg, int i, int & s
                 uint32_t gx, gy; grid2(pc.nblk, gx, gy);
                 if (!enc.push_raw(SH_QUANT_Q81, gx, gy, 1, binds, 2, &pc, sizeof(pc))) return false;
             }
-            // Stufe 2: int-dot-GEMV (W, scratch, dst)
+            // Stufe 2: int-dot-GEMV (W, scratch, dst). q4_K: Strides in uvec4 (144-B-Block, 16-aligned);
+            // q6_K: Strides in u16 (210-B-Block, nur 2-Byte-aligned - siehe gemv_q6k_iq.comp).
             {
+                const bool q6 = s0->type == GGML_TYPE_Q6_K;
+                const uint32_t u = q6 ? 2u : 16u;
                 pc_gemv_iq pc{}; pc.ne00 = (uint32_t) s0->ne[0]; pc.ne01 = (uint32_t) s0->ne[1]; pc.ne11 = (uint32_t) s1->ne[1]; pc.ne12 = (uint32_t) s1->ne[2];
-                pc.nb01v4 = (uint32_t) (s0->nb[1] / 16); pc.nb02v4 = (uint32_t) (s0->nb[2] / 16); pc.nb03v4 = (uint32_t) (s0->nb[3] / 16);
+                pc.nb01v4 = (uint32_t) (s0->nb[1] / u); pc.nb02v4 = (uint32_t) (s0->nb[2] / u); pc.nb03v4 = (uint32_t) (s0->nb[3] / u);
                 pc.nb11 = E(s1->nb[1], 4); pc.nb12 = E(s1->nb[2], 4); pc.nb13 = E(s1->nb[3], 4);
                 pc.nbd1 = E(t->nb[1], 4); pc.nbd2 = E(t->nb[2], 4); pc.nbd3 = E(t->nb[3], 4);
                 pc.r2 = (uint32_t) (s1->ne[2] / s0->ne[2]); pc.r3 = (uint32_t) (s1->ne[3] / s0->ne[3]);
                 pc.n256 = pc.ne00 / 256; pc.xqcols = nb32;
                 uint32_t remw = 0, remd = 0; barra_gpu3_bind bw, bd;
                 if (!gpud_encoder::bind(s0, bw, remw) || !gpud_encoder::bind(t, bd, remd)) return false;
-                pc.off0v4 = remw / 16; pc.offxq = 0; pc.offd = remd / 4;
+                pc.off0v4 = remw / u; pc.offxq = 0; pc.offd = remd / 4;   // remw % u == 0 vorab geprueft
                 barra_gpu3_bind bq{ sc, 0, 0 };
                 barra_gpu3_bind binds[3] = { bw, bq, bd };
                 if (enc.full(3)) { if (g_s.log) GGML_LOG_INFO("gpud: flush wg full(3) nst=%zu maxstage=%d\n", enc.nst, g_s.maxstage); if (!flush()) return false; }
                 uint32_t gx, gy; grid2((pc.ne01 + 7) / 8, gx, gy);   // 8 Zeilen je Workgroup
-                if (!enc.push_raw(SH_GEMV_Q4K_IQ, gx, pc.ne11, (uint32_t) (s1->ne[2] * s1->ne[3]), binds, 3, &pc, sizeof(pc))) return false;
+                if (!enc.push_raw(q6 ? SH_GEMV_Q6K_IQ : SH_GEMV_Q4K_IQ, gx, pc.ne11, (uint32_t) (s1->ne[2] * s1->ne[3]), binds, 3, &pc, sizeof(pc))) return false;
             }
             return true;
         }
