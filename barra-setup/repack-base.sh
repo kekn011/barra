@@ -12,23 +12,28 @@
 # Der Fehler war nur deshalb moeglich, weil der Vorgang nirgends aufgeschrieben war. Also:
 # aufschreiben, als root ausfuehren, und danach pruefen statt hoffen.
 #
-#   sudo bash repack-base.sh [-a <lokal>=<pfad-im-archiv>]... <alt.tar.gz> <neu.tar.gz> \
-#                            [<datei-zum-entfernen> ...]
+#   sudo bash repack-base.sh [-a <lokal>=<pfad-im-archiv>[:modus]]... [-l <pfad-im-archiv>=<linkziel>]... \
+#                            <alt.tar.gz> <neu.tar.gz> [<datei-zum-entfernen> ...]
 #
 # -a ersetzt eine Datei im Archiv (oder legt sie an) - z.B. den i18n-Katalog:
 #   -a ../src/i18n/de.properties=adb/baseos/i18n/de.properties
-# Ersetzte Dateien werden root:root mit dem Modus der bereits vorhandenen Datei eingetragen
-# (neue Dateien: 644) und am Ende im ERGEBNIS gegen Groesse, Eigentuemer und Modus geprueft.
+# Ersetzte Dateien werden root:root mit dem Modus der bereits vorhandenen Datei eingetragen;
+# neue Dateien bekommen 644 oder den optional angehaengten :modus (0.2.0: barra-power braucht 755).
+# -l legt einen Symlink an (oder biegt ihn um) - z.B. reboot -> barra-power:
+#   -l ubuntu/usr/local/sbin/reboot=barra-power
+# Am Ende wird das ERGEBNIS gegen Groesse, Eigentuemer, Modus und Linkziel geprueft.
 #
 # Muss in WSL oder einem Linux laufen (auf NTFS gibt es keine Eigentuemer und keine
 # setuid-Bits) und MUSS als root laufen, sonst bricht es sofort ab.
 set -euo pipefail
 
-ERSETZE=()
-while [ "${1:-}" = "-a" ]; do
-  [ -n "${2:-}" ] || { echo "FEHLER: -a braucht <lokal>=<pfad-im-archiv>"; exit 1; }
-  case "$2" in *=*) ;; *) echo "FEHLER: -a erwartet <lokal>=<pfad-im-archiv>, bekam '$2'"; exit 1;; esac
-  ERSETZE+=("$2"); shift 2
+ERSETZE=(); LINKS=()
+while [ "${1:-}" = "-a" ] || [ "${1:-}" = "-l" ]; do
+  opt=$1
+  [ -n "${2:-}" ] || { echo "FEHLER: $opt braucht ein Argument mit ="; exit 1; }
+  case "$2" in *=*) ;; *) echo "FEHLER: $opt erwartet <a>=<b>, bekam '$2'"; exit 1;; esac
+  if [ "$opt" = "-a" ]; then ERSETZE+=("$2"); else LINKS+=("$2"); fi
+  shift 2
 done
 
 ALT=${1:-}; NEU=${2:-}; shift 2 || true
@@ -44,6 +49,9 @@ case "$(uname -r)" in *icrosoft*|*WSL*) ;; *) [ -d /proc ] || { echo "FEHLER: Li
 for e in ${ERSETZE+"${ERSETZE[@]}"}; do
   q=${e%%=*}
   [ -f "$q" ] || { echo "FEHLER: -a Quelle nicht gefunden: $q"; exit 1; }
+done
+for e in ${LINKS+"${LINKS[@]}"}; do
+  case "${e%%=*}" in ubuntu/*|adb/*) ;; *) echo "FEHLER: -l Ziel muss unter ubuntu/ oder adb/ liegen: ${e%%=*}"; exit 1;; esac
 done
 
 # Diese Programme muessen in einem Ubuntu 24.04 setuid-root sein. Die Liste stammt aus
@@ -76,13 +84,14 @@ for weg in "$@"; do
 done
 
 for e in ${ERSETZE+"${ERSETZE[@]}"}; do
-  q=${e%%=*}; z=${e#*=}
+  q=${e%%=*}; rest=${e#*=}; z=${rest%%:*}
+  wunsch=""; case "$rest" in *:*) wunsch=${rest#*:};; esac
   case "$z" in ubuntu/*|adb/*) ;; *) echo "FEHLER: -a Ziel muss unter ubuntu/ oder adb/ liegen: $z"; exit 1;; esac
   if [ -e "$z" ]; then
-    modus=$(stat -c %a "$z")
-    echo "== ersetzen: $z  ($(stat -c %s "$z") -> $(stat -c %s "$q") Bytes, Modus $modus bleibt)"
+    modus=${wunsch:-$(stat -c %a "$z")}
+    echo "== ersetzen: $z  ($(stat -c %s "$z") -> $(stat -c %s "$q") Bytes, Modus $modus)"
   else
-    modus=644
+    modus=${wunsch:-644}
     echo "== neu anlegen: $z  ($(stat -c %s "$q") Bytes, Modus $modus)"
     mkdir -p "$(dirname "$z")"
   fi
@@ -90,6 +99,14 @@ for e in ${ERSETZE+"${ERSETZE[@]}"}; do
   # existieren - deshalb beides danach hier setzen, nicht von der Quelle uebernehmen.
   cp "$q" "$z"
   chown 0:0 "$z"; chmod "$modus" "$z"
+done
+
+for e in ${LINKS+"${LINKS[@]}"}; do
+  z=${e%%=*}; ziel=${e#*=}
+  echo "== Symlink: $z -> $ziel"
+  mkdir -p "$(dirname "$z")"
+  ln -sfn "$ziel" "$z"
+  chown -h 0:0 "$z"
 done
 
 echo "== packen =="
@@ -115,7 +132,7 @@ done
 # Die ersetzten Dateien im Ergebnis nachmessen - eine stumm danebengegangene Ersetzung ist
 # genau die Fehlerklasse, die den i18n-Katalog vom 22.8. bis ins Release getragen hat.
 for e in ${ERSETZE+"${ERSETZE[@]}"}; do
-  q=${e%%=*}; z=${e#*=}
+  q=${e%%=*}; rest=${e#*=}; z=${rest%%:*}
   soll=$(stat -c %s "$q")
   zeile=$(printf '%s\n' "$LISTE" | grep -E " $z\$" || true)
   if [ -z "$zeile" ]; then
@@ -123,10 +140,29 @@ for e in ${ERSETZE+"${ERSETZE[@]}"}; do
   fi
   ist=$(printf '%s' "$zeile" | awk '{print $3}')
   eigner=$(printf '%s' "$zeile" | awk '{print $2}')
+  rechte=$(printf '%s' "$zeile" | awk '{print $1}')
+  wunsch=""; case "${e#*=}" in *:*) wunsch=${e##*:};; esac
   if [ "$ist" != "$soll" ] || [ "$eigner" != "0/0" ]; then
     echo "   FEHLER: $z ist $ist Bytes $eigner, erwartet $soll Bytes 0/0"; fehler=1
+  elif [ "$wunsch" = "755" ] && [ "$rechte" != "-rwxr-xr-x" ]; then
+    echo "   FEHLER: $z ist '$rechte', erwartet '-rwxr-xr-x' (Modus 755)"; fehler=1
   else
-    echo "   ok: $z ($soll Bytes, 0/0)"
+    echo "   ok: $z ($soll Bytes, 0/0${wunsch:+, $rechte})"
+  fi
+done
+
+for e in ${LINKS+"${LINKS[@]}"}; do
+  z=${e%%=*}; ziel=${e#*=}
+  zeile=$(printf '%s\n' "$LISTE" | grep -E " $z -> " || true)
+  if [ -z "$zeile" ]; then
+    echo "   FEHLER: Symlink fehlt im Archiv: $z"; fehler=1; continue
+  fi
+  ist=${zeile##* -> }
+  typ=$(printf '%s' "$zeile" | cut -c1)
+  if [ "$typ" != "l" ] || [ "$ist" != "$ziel" ]; then
+    echo "   FEHLER: $z ist '$typ ... -> $ist', erwartet 'l ... -> $ziel'"; fehler=1
+  else
+    echo "   ok: $z -> $ziel"
   fi
 done
 
