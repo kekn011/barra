@@ -78,8 +78,10 @@ struct gpud_session {
     // GGML_GPUD_MAXSTAGE=<n> schaltet auf das alte FIXE Verhalten (Reproduzierbarkeit alter Messungen).
     int maxstage = 512;              // harte Stufen-Obergrenze; im Fix-Modus die Batchgroesse
     bool fixed = false;              // GGML_GPUD_MAXSTAGE gesetzt -> kein Zeit-Budget
-    double budget_ms = 100.0;        // GGML_GPUD_BUDGET_MS ueberschreibt (1..2000); 100 ms = der am
-                                     // 30./31.8. vermessene sichere Decode-Betriebspunkt (MS=512, med 103 ms)
+    double budget_ms = 250.0;        // GGML_GPUD_BUDGET_MS ueberschreibt (1..2000). 250 ms = Grenztest
+                                     // 1.9. MIT Kevin am Geraet: 150/250/400/800 ms getastet, max Batch
+                                     // 867 ms problemlos; Prefill saettigt ab ~250 (pp512 29,4 -> 35,2 t/s,
+                                     // +20 %), Decode unveraendert. 250 statt 400 = doppelter Abstand.
     double est_wg = 0.0;             // gemessene ms je Workgroup (0 = noch keine Messung -> Bootstrap-Cap 64)
     barra_zbuf scratch{}; bool scratch_ok = false; uint32_t scratch_sz = 0;   // x-q8_1 fuer int-dot-GEMV
     // Staging-dmabuf fuer den Native-Buft (Upload/Download via barra_gpu3_copy); waechst bis 32 MB
