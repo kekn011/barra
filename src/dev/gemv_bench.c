@@ -19,7 +19,7 @@ int main(int argc, char** argv){
   uint32_t slen=0; uint8_t* spv=rdfile(argv[1],&slen); if(!spv){ perror(argv[1]); return 1; }
   uint32_t ne00=atoi(argv[2]), ne01=atoi(argv[3]); int q6=atoi(argv[4]);
   int nstage=argc>5?atoi(argv[5]):32, nrep=argc>6?atoi(argv[6]):5;
-  uint32_t n256=ne00/256, blkb=q6==2?224u:(q6?210u:144u), unit=q6==1?2u:16u;   /* q6=2: Repack-Layout (224 B, aligned; Strides in u16 wie q6=1) */
+  uint32_t n256=ne00/256, blkb=q6==3?192u:(q6==2?224u:(q6?210u:144u)), unit=q6==1?2u:16u;   /* q6=2: Repack-Layout (224 B, aligned; Strides in u16 wie q6=1) */
   uint64_t rowb=(uint64_t)n256*blkb, wbytes=rowb*ne01;
   uint32_t nb32=ne00/32, xqb=nb32*36u, db=ne01*4u;
   barra_gpu3 g; if(barra_gpu3_open(&g)){ fprintf(stderr,"gpuzc.sock?\n"); return 1; }

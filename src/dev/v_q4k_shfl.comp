@@ -1,0 +1,90 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_KHR_shader_subgroup_clustered : enable
+#extension GL_KHR_shader_subgroup_shuffle : enable
+// int-dot-GEMV fuer q4_K: dst[row, col] = sum_k deq(W[row,k]) * x[k,col], x als q8_1 (aus quantize_q8_1).
+// 8 Lanes je Zeile (MALI_LPR), subgroupClusteredAdd; jede Lane nimmt einen 32er-Subblock je 256er-Block.
+// Gewicht q4_K 144 B = 9 uvec4: [0] Header (d,dmin,scales12), [1..8] qs. x-q8_1-Block 36 B = 9 uint.
+// Voraussetzung (Backend): ne00 % 256 == 0, Zeilenanfang 16-Byte-aligned, x zusammenhaengend.
+#ifndef WGS
+#define WGS 64
+#endif
+layout(local_size_x = WGS) in;
+layout(std430, binding = 0) readonly buffer W  { uvec4 wq[]; };
+layout(std430, binding = 1) readonly buffer XQ { uint  xq[]; };
+layout(std430, binding = 1) readonly buffer XQ4 { uvec4 xq4[]; };   // Alias: qs-Bereich als uvec4
+layout(std430, binding = 2) writeonly buffer D { float dst[]; };
+layout(push_constant) uniform PC {
+    uint ne00, ne01, ne11, ne12;
+    uint nb01v4;                   // src0-Zeilenstride in uvec4 (=144/16 * n256)
+    uint nb02v4, nb03v4;
+    uint nb11, nb12, nb13;         // src1(x)-Strides (Elemente, fuer Spaltenindex)
+    uint nbd1, nbd2, nbd3;
+    uint off0v4, offxq, offd;      // off0v4 in uvec4; offxq in uint (q8_1-Block-Basis der Spalte 0)
+    uint r2, r3, n256, xqcols;     // xqcols = nb32 (q8_1-Bloecke je Spalte)
+} pc;
+#define LPR 8u
+
+// Ein Subblock: Gewicht bei uvec4-Basis wbase (256er-Block), Subblock sub(0..7); x-q8_1-Block bei xbase (uint).
+float dot_sub(uint wbase, uint sub, uint xhdr, uint xqs4) {
+    uint l = sub >> 1, shift = (sub & 1u) * 4u;
+    // Header nur von Lane 0 des Clusters laden und per Shuffle verteilen (8 gleiche
+    // Adress-Loads je Block serialisieren sonst in der LSU)
+    uvec4 h = uvec4(0u);
+    uint cbase = gl_SubgroupInvocationID & ~(LPR - 1u);
+    if (sub == 0u) h = wq[wbase];
+    h.x = subgroupShuffle(h.x, cbase); h.y = subgroupShuffle(h.y, cbase);
+    h.z = subgroupShuffle(h.z, cbase); h.w = subgroupShuffle(h.w, cbase);
+    uvec4 q0 = wq[wbase + 1u + 2u * l];
+    uvec4 q1 = wq[wbase + 2u + 2u * l];
+    vec2 dm = unpackHalf2x16(h.x);
+    float sc, mb;
+    if (sub < 4u) { uint s = 8u * sub; sc = float((h.y >> s) & 63u); mb = float((h.z >> s) & 63u); }
+    else {
+        uint s = 8u * (sub - 4u);
+        uint a = (h.w >> s) & 0xFFu, b = (h.y >> s) & 0xFFu, cc = (h.z >> s) & 0xFFu;
+        sc = float((a & 0xFu) | ((b >> 6) << 4)); mb = float((a >> 4) | ((cc >> 6) << 4));
+    }
+    vec2 ds = unpackHalf2x16(xq[xhdr]);          // (d_b, s = d_b*sum(xq))
+    uvec4 xa = xq4[xqs4], xb4 = xq4[xqs4 + 1u];  // 8 qs-Worte als 2 uvec4 (Split-Layout)
+    int qsum = 0;
+    qsum += dotPacked4x8EXT(int((q0.x >> shift) & 0x0F0F0F0Fu), int(xa.x));
+    qsum += dotPacked4x8EXT(int((q0.y >> shift) & 0x0F0F0F0Fu), int(xa.y));
+    qsum += dotPacked4x8EXT(int((q0.z >> shift) & 0x0F0F0F0Fu), int(xa.z));
+    qsum += dotPacked4x8EXT(int((q0.w >> shift) & 0x0F0F0F0Fu), int(xa.w));
+    qsum += dotPacked4x8EXT(int((q1.x >> shift) & 0x0F0F0F0Fu), int(xb4.x));
+    qsum += dotPacked4x8EXT(int((q1.y >> shift) & 0x0F0F0F0Fu), int(xb4.y));
+    qsum += dotPacked4x8EXT(int((q1.z >> shift) & 0x0F0F0F0Fu), int(xb4.z));
+    qsum += dotPacked4x8EXT(int((q1.w >> shift) & 0x0F0F0F0Fu), int(xb4.w));
+    return ds.x * dm.x * sc * float(qsum) - dm.y * mb * ds.y;
+}
+
+void main() {
+    uint rows_per_sg = gl_SubgroupSize / LPR;
+    uint rows_per_wg = (gl_WorkGroupSize.x / gl_SubgroupSize) * rows_per_sg;
+    uint row = rows_per_wg * gl_WorkGroupID.x + gl_SubgroupID * rows_per_sg + gl_SubgroupInvocationID / LPR;
+    uint lane = gl_SubgroupInvocationID % LPR;
+    uint col = gl_WorkGroupID.y, z = gl_WorkGroupID.z;
+    uint i12 = z % pc.ne12, i13 = z / pc.ne12, i02 = i12 / pc.r2, i03 = i13 / pc.r3;
+    bool valid = row < pc.ne01;
+    uint rr = valid ? row : 0u;
+    uint wrow = pc.off0v4 + rr * pc.nb01v4 + i02 * pc.nb02v4 + i03 * pc.nb03v4;
+    // Spalten-Basis der q8_1-Bloecke: col/i12/i13 waehlen die x-Spalte; deren Block 0
+    uint xcol = (col * pc.nb11 + i12 * pc.nb12 + i13 * pc.nb13) / pc.ne00;   // Spaltenindex
+    // Split-Layout: Header[xqcols*ncols] ab offxq, danach (16B-aligned) 2 uvec4 qs je Block
+    uint nblk_all = pc.xqcols * pc.ne11 * pc.ne12;
+    uint qs4base = ((pc.offxq + nblk_all + 3u) & ~3u) >> 2;
+    uint xhdr0 = pc.offxq + xcol * pc.xqcols;
+    uint xqs40 = qs4base + xcol * pc.xqcols * 2u;
+    float acc = 0.0;
+    for (uint ib = 0u; ib < pc.n256; ib++) {
+        uint bi = ib * 8u + lane;
+        acc += dot_sub(wrow + ib * 9u, lane, xhdr0 + bi, xqs40 + bi * 2u);
+    }
+    acc = subgroupClusteredAdd(acc, LPR);
+    if (lane == 0u && valid) {
+        dst[pc.offd + row + col * pc.nbd1 + i12 * pc.nbd2 + i13 * pc.nbd3] = acc;
+    }
+}
